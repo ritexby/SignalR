@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HELIX SignTablet — Админка</title>
+  <title>HELIX SignTablet - Админка</title>
   <link rel="stylesheet" href="/admin/admin.css" />
 </head>
 <body>
@@ -29,11 +29,8 @@
         <button class="tab" data-tab="groups">Группы</button>
         <button class="tab" data-tab="workstations">Места</button>
         <button class="tab" data-tab="apikeys">API-ключи</button>
+        <button class="tab" data-tab="apidocs">API</button>
       </nav>
-      <div class="target">
-        <label>Кому:</label>
-        <select id="targetSelect"></select>
-      </div>
       <button id="logout" class="btn btn-ghost">Выйти</button>
     </header>
 
@@ -43,6 +40,9 @@
         <div class="panel-head">
           <h2>Слайды (реклама)</h2>
           <div class="row">
+            <label class="target-inline">Кому:
+              <select id="slidesTarget"></select>
+            </label>
             <label>Интервал, сек:
               <input id="intervalInput" type="number" min="1" max="3600" value="6" />
             </label>
@@ -53,7 +53,7 @@
             <button id="saveSlides" class="btn btn-primary">Сохранить и показать</button>
           </div>
         </div>
-        <p class="hint">Контент отправится на выбранного вверху адресата («Кому»): все / группа / конкретный планшет. Номер на картинке — её порядок.</p>
+        <p class="hint">Реклама отправится выбранному адресату («Кому»): все / группа / конкретный планшет. Выбор здесь не зависит от вкладки «Документ». Номер на картинке - её порядок.</p>
         <div id="imageGrid" class="grid"></div>
       </section>
 
@@ -62,12 +62,15 @@
         <div class="panel-head">
           <h2>Документ для подписанта</h2>
           <div class="row">
+            <label class="target-inline">Кому:
+              <select id="docTarget"></select>
+            </label>
             <button id="saveDocument" class="btn btn-ghost">Сохранить документ</button>
             <button id="showDocument" class="btn btn-primary">Показать документ подписанту</button>
             <button id="showSlides" class="btn btn-ghost">Вернуть рекламу</button>
           </div>
         </div>
-        <p class="hint">«Показать документ» переключит выбранного вверху адресата с рекламы на этот документ.</p>
+        <p class="hint">«Показать документ» переключит выбранного здесь адресата с рекламы на этот документ. Этот выбор независим от вкладки «Слайды»: например, реклама идёт на все планшеты, а документ - только на один.</p>
         <div class="doc-editor">
           <label class="field">Заголовок документа
             <input id="docTitle" type="text" />
@@ -100,7 +103,20 @@
           <h2>Планшеты</h2>
           <button id="addDevice" class="btn btn-primary">+ Добавить планшет (код)</button>
         </div>
-        <p class="hint">Новый планшет добавляется кодом активации: сгенерируйте код, введите его на планшете один раз — он получит защищённый доступ. Идентификатор в URL больше не нужен.</p>
+        <p class="hint">Новый планшет добавляется кодом активации: сгенерируйте код, введите его на планшете один раз - он получит защищённый доступ.</p>
+        <div class="filter-bar">
+          <input id="devSearch" class="filter-search" type="search" placeholder="Поиск по имени или ID" />
+          <select id="devStatusFilter" class="filter-select">
+            <option value="">Все статусы</option>
+            <option value="online">Онлайн</option>
+            <option value="offline">Офлайн</option>
+            <option value="revoked">Заблокированные</option>
+          </select>
+          <select id="devGroupFilter" class="filter-select"></select>
+          <select id="devWsFilter" class="filter-select"></select>
+          <button id="devFilterReset" class="btn btn-ghost btn-sm">Сбросить</button>
+          <span id="devFilterCount" class="filter-count"></span>
+        </div>
         <div id="devicesList" class="dev-list"></div>
       </section>
 
@@ -123,7 +139,7 @@
           <h2>Рабочие места</h2>
           <button id="addWorkstation" class="btn btn-primary">+ Добавить место</button>
         </div>
-        <p class="hint"><code>Внешний ID</code> — ключ вашей учётной системы (например <code>WS-204</code>). По нему привязка «планшет ↔ место» доступна из внешнего API.</p>
+        <p class="hint"><code>Внешний ID</code> - ключ вашей учётной системы (например <code>WS-204</code>). По нему привязка «планшет ↔ место» доступна из внешнего API.</p>
         <div id="workstationsList" class="simple-list"></div>
       </section>
 
@@ -138,6 +154,15 @@
         </div>
         <p class="hint">Ключ даёт внешней системе доступ к <code>/api/ext/*</code>: список планшетов, статус, привязка к местам, создание кодов активации. Ключ показывается один раз при создании.</p>
         <div id="keysList" class="simple-list"></div>
+      </section>
+
+      <!-- API docs -->
+      <section class="panel hidden" data-panel="apidocs">
+        <div class="panel-head">
+          <h2>Методы API для внешних систем</h2>
+        </div>
+        <p class="hint">Все запросы к <code>/api/ext/*</code> требуют заголовок <code>X-Api-Key</code> с ключом из вкладки «API-ключи». Базовый адрес: <code id="apiBaseUrl"></code>.</p>
+        <div id="apiDocsList" class="api-docs"></div>
       </section>
     </main>
   </div>

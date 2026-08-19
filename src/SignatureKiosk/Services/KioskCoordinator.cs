@@ -95,22 +95,68 @@ public class KioskCoordinator
 
     // ---------- Public operations ----------
 
+    /// <summary>
+    /// Publish advertising slides to a target (all / group / device).
+    /// Hard rule: a document always has priority over ads. Publishing ads never
+    /// interrupts a tablet that is currently showing a document; its playlist is
+    /// updated in storage so the latest ads appear once it is returned to slides,
+    /// but it is not flipped and receives no ShowSlides push. Only the explicit
+    /// "return to slides" action moves a tablet out of document mode.
+    /// </summary>
     public async Task SaveAndShowSlidesAsync(string target, List<string> imageIds, int intervalSec)
     {
         intervalSec = Math.Clamp(intervalSec, 1, 3600);
         var (kind, id) = Parse(target);
         var states = _storage.GetStates();
-        ApplyToState(states, kind, id, s =>
+
+        if (kind == Kind.All)
         {
-            s.Mode = "slides";
+            states.Default.Mode = "slides";
+            states.Default.PlaylistImageIds = new List<string>(imageIds);
+            states.Default.IntervalSec = intervalSec;
+            foreach (var s in states.Devices.Values)
+            {
+                s.PlaylistImageIds = new List<string>(imageIds);
+                s.IntervalSec = intervalSec;
+                if (s.Mode != "document") s.Mode = "slides";
+            }
+            _storage.SaveStates(states);
+
+            var payloadAll = BuildSlidesPayload(states.Default);
+            foreach (var deviceId in _tracker.OnlineDeviceIds())
+            {
+                if (IsShowingDocument(states, deviceId)) continue; // document wins
+                await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payloadAll);
+            }
+            return;
+        }
+
+        // Group or single device: update each concrete device's stored playlist, but
+        // apply the same document-priority rule per device.
+        var targetDevices = DeviceIds(kind, id);
+        foreach (var deviceId in targetDevices)
+        {
+            if (!states.Devices.TryGetValue(deviceId, out var s))
+            {
+                s = states.Default.Clone();
+                states.Devices[deviceId] = s;
+            }
             s.PlaylistImageIds = new List<string>(imageIds);
             s.IntervalSec = intervalSec;
-        });
+            if (s.Mode != "document") s.Mode = "slides";
+        }
         _storage.SaveStates(states);
 
         var payload = BuildSlidesPayload(new KioskState { PlaylistImageIds = imageIds, IntervalSec = intervalSec });
-        await Clients(kind, id).SendAsync("ShowSlides", payload);
+        foreach (var deviceId in targetDevices)
+        {
+            if (IsShowingDocument(states, deviceId)) continue; // document wins
+            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
+        }
     }
+
+    private static bool IsShowingDocument(StateStore states, string deviceId) =>
+        states.Devices.TryGetValue(deviceId, out var s) && s.Mode == "document";
 
     public async Task ShowDocumentAsync(string target)
     {

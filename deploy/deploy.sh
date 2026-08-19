@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# Signature Kiosk deploy script — run on the Ubuntu server as root, from the repo root:
+# Signature Kiosk deploy script - run on the Ubuntu server as root, from the repo root:
 #     sudo ADMIN_PASSWORD='your-password' bash deploy/deploy.sh
 #
 # What it does:
-#   1. installs the .NET 8 SDK (only if missing) via apt;
+#   1. installs the .NET 10 SDK (only if missing) via apt, with official-installer fallback;
 #   2. publishes a self-contained build to /opt/signaturekiosk/app;
 #   3. creates the data dir and /etc/signaturekiosk.env (admin password, port);
 #   4. installs + starts the systemd service `signaturekiosk`.
@@ -71,10 +71,10 @@ EOF
     chown root:"$RUN_USER" /etc/signaturekiosk.env
     echo "    ---------------------------------------------"
     echo "    Admin password: $PW"
-    echo "    (saved in /etc/signaturekiosk.env — change it there anytime)"
+    echo "    (saved in /etc/signaturekiosk.env - change it there anytime)"
     echo "    ---------------------------------------------"
 else
-    echo "    /etc/signaturekiosk.env already exists — leaving it untouched."
+    echo "    /etc/signaturekiosk.env already exists - leaving it untouched."
 fi
 
 echo "==> [5/5] Installing systemd service"
@@ -92,7 +92,8 @@ echo "  • Reverse proxy is already configured (Nginx Proxy Manager -> http://T
 echo "    Make sure port $PORT is reachable from the proxy host (firewall), e.g.:"
 echo "      sudo ufw allow from <PROXY_IP> to any port $PORT proto tcp"
 echo "  • Open https://signalr.zrobim.it/admin  (log in with the password above)"
-echo "  • On each tablet, point freekiosk at:"
-echo "      https://signalr.zrobim.it/?device=tablet-1&name=Reception"
-echo "      https://signalr.zrobim.it/?device=tablet-2&name=Office"
+echo "  • Add each tablet in the admin panel (tab 'Планшеты' -> 'Добавить планшет'),"
+echo "    generate an activation code, then on the tablet open:"
+echo "      https://signalr.zrobim.it/"
+echo "    and enter the code once (or open https://signalr.zrobim.it/?enroll=CODE)."
 echo "  • Logs: journalctl -u $SVC -f"

@@ -7,7 +7,7 @@ namespace SignatureKiosk.Hubs;
 
 /// <summary>
 /// Only authenticated connections may reach the hub: a tablet (device token) or the
-/// admin page (login cookie). Identity and group membership come from the token —
+/// admin page (login cookie). Identity and group membership come from the token -
 /// never from client-supplied arguments.
 /// </summary>
 [Authorize]

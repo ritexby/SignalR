@@ -1,6 +1,5 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.FileProviders;
@@ -29,6 +28,28 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("Device", p => p.RequireClaim("role", "device"));
 });
 
+// Per-client-IP rate limiting on the unauthenticated / brute-forceable endpoints.
+// Fixed-window is sufficient here and keeps memory bounded; partitions are keyed by
+// the real client IP (resolved after UseForwardedHeaders).
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    static Func<HttpContext, RateLimitPartition<string>> Fixed(int permitPerMinute) =>
+        httpContext => RateLimitPartition.GetFixedWindowLimiter(
+            ClientIp(httpContext),
+            _ => new FixedWindowRateLimiterOptions
+            {
+                Window = TimeSpan.FromMinutes(1),
+                PermitLimit = permitPerMinute,
+                QueueLimit = 0
+            });
+
+    options.AddPolicy("login", Fixed(10));    // admin password guesses
+    options.AddPolicy("enroll", Fixed(20));   // activation-code redemption
+    options.AddPolicy("sign", Fixed(60));     // signature submissions (bursty by design)
+});
+
 var app = builder.Build();
 
 var storage = app.Services.GetRequiredService<StorageService>();
@@ -55,6 +76,32 @@ forwardedOptions.KnownIPNetworks.Clear();
 forwardedOptions.KnownProxies.Clear();
 app.UseForwardedHeaders(forwardedOptions);
 
+// Security response headers. The app serves its own first-party assets only (SignalR +
+// signature_pad are vendored under /lib), so a tight CSP is safe. Kept in one place so the
+// policy is auditable at a glance.
+app.Use(async (context, next) =>
+{
+    var headers = context.Response.Headers;
+    headers["X-Content-Type-Options"] = "nosniff";
+    headers["X-Frame-Options"] = "DENY";
+    headers["Referrer-Policy"] = "no-referrer";
+    headers["Cross-Origin-Opener-Policy"] = "same-origin";
+    headers["Content-Security-Policy"] =
+        "default-src 'self'; " +
+        "base-uri 'self'; " +
+        "frame-ancestors 'none'; " +
+        "object-src 'none'; " +
+        "img-src 'self' data: blob:; " +
+        "media-src 'self' blob:; " +
+        "connect-src 'self'; " +
+        "script-src 'self'; " +
+        "style-src 'self' 'unsafe-inline'; " +
+        "font-src 'self'";
+    if (context.Request.IsHttps)
+        headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
+    await next();
+});
+
 // Redirect the bare /admin (no trailing slash) to /admin/ (middleware, not an endpoint,
 // so it never shadows the static /admin/ files).
 app.Use(async (context, next) =>
@@ -69,6 +116,7 @@ app.Use(async (context, next) =>
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -89,7 +137,7 @@ app.MapPost("/api/kiosk/enroll", (EnrollRequest req) =>
         return Results.Json(new { error = "invalid or expired code" }, statusCode: StatusCodes.Status400BadRequest);
     var (device, token) = result.Value;
     return Results.Ok(new { deviceId = device.Id, name = device.Name, token });
-});
+}).RequireRateLimiting("enroll");
 
 // ==================== Device-authenticated: submit signature ====================
 
@@ -116,7 +164,7 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
 
     await coord.NotifyAdminsSignatureAsync(rec);
     return Results.Ok(new { id = rec.Id });
-}).RequireAuthorization("Device");
+}).RequireAuthorization("Device").RequireRateLimiting("sign");
 
 // ==================== Admin authentication ====================
 
@@ -135,7 +183,7 @@ app.MapPost("/api/admin/login", (LoginDto dto, HttpContext ctx) =>
         return Results.Ok(new { ok = true });
     }
     return Results.Json(new { ok = false, error = "wrong password" }, statusCode: StatusCodes.Status401Unauthorized);
-});
+}).RequireRateLimiting("login");
 
 app.MapPost("/api/admin/logout", (HttpContext ctx) =>
 {
@@ -382,6 +430,12 @@ ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto)
 app.Run();
 
 // ==================== Local helpers ====================
+
+// Real client IP for rate-limit partitioning, resolved after UseForwardedHeaders has
+// applied X-Forwarded-For. Falls back to a constant so a missing IP shares one bucket
+// rather than escaping the limiter entirely.
+static string ClientIp(HttpContext ctx) =>
+    ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 
 static string? ResolveImageExtension(string fileName, string? contentType)
 {

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <title>Kiosk</title>
+  <title>HELIX SignTablet</title>
   <link rel="stylesheet" href="/kiosk.css" />
 </head>
 <body>
@@ -32,7 +32,7 @@
       <form id="enrollForm" class="enroll-box">
         <div class="enroll-badge">HELIX SignTablet</div>
         <h1>Активация планшета</h1>
-        <p class="enroll-sub">Код активации выдаётся в админке. Введите его один раз — планшет запомнит доступ.</p>
+        <p class="enroll-sub">Код активации выдаётся в админке. Введите его один раз - планшет запомнит доступ.</p>
         <input id="enrollCode" inputmode="text" autocomplete="one-time-code" placeholder="XXXX-XXXX" maxlength="9" />
         <button id="enrollBtn" type="submit" class="btn btn-primary">Активировать</button>
         <div id="enrollMsg" class="enroll-msg"></div>
@@ -47,8 +47,6 @@
       <div class="identify-code" id="identifyCode"></div>
       <div class="identify-name" id="identifyName"></div>
     </div>
-
-    <div id="deviceBadge" class="badge hidden"></div>
   </div>
 
   <script src="/lib/signalr.min.js"></script>

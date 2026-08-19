@@ -4,12 +4,11 @@
   "use strict";
 
   var TOKEN_KEY = "sk_device_token";
-  var NAME_KEY = "sk_device_name";
   var qs = new URLSearchParams(location.search);
 
   function getToken() { return localStorage.getItem(TOKEN_KEY); }
   function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
-  function clearToken() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(NAME_KEY); }
+  function clearToken() { localStorage.removeItem(TOKEN_KEY); }
 
   // ---------- DOM ----------
   var el = {
@@ -30,17 +29,11 @@
     statusText: document.getElementById("statusText"),
     identify: document.getElementById("identifyOverlay"),
     identifyCode: document.getElementById("identifyCode"),
-    identifyName: document.getElementById("identifyName"),
-    badge: document.getElementById("deviceBadge")
+    identifyName: document.getElementById("identifyName")
   };
 
   function showStatus(t) { el.statusText.textContent = t; el.status.classList.remove("hidden"); }
   function hideStatus() { el.status.classList.add("hidden"); }
-  function updateBadge() {
-    var name = localStorage.getItem(NAME_KEY);
-    if (name) { el.badge.textContent = name; el.badge.classList.remove("hidden"); }
-    else el.badge.classList.add("hidden");
-  }
 
   // ==================================================================
   // Slideshow
@@ -220,7 +213,7 @@
     el.docProgress.textContent = "";
     var body = document.createElement("div");
     body.className = "thankyou";
-    var mark = document.createElement("div"); mark.className = "mark"; mark.textContent = "✓"; body.appendChild(mark);
+    var mark = document.createElement("div"); mark.className = "mark"; body.appendChild(mark);
     var h = document.createElement("h2"); h.textContent = doc.config.thankYouText || "Спасибо!"; body.appendChild(h);
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
@@ -319,7 +312,7 @@
   // ==================================================================
   var identifyTimer = null;
   function showIdentify(code, name) {
-    el.identifyCode.textContent = code || "•";
+    el.identifyCode.textContent = code || "";
     el.identifyName.textContent = name || "";
     el.identify.classList.remove("hidden");
     clearTimeout(identifyTimer);
@@ -369,8 +362,6 @@
       return r.json();
     }).then(function (j) {
       setToken(j.token);
-      if (j.name) localStorage.setItem(NAME_KEY, j.name);
-      updateBadge();
       return j;
     });
   }
@@ -435,7 +426,6 @@
   // ==================================================================
   // Boot
   // ==================================================================
-  updateBadge();
   (function boot() {
     if (getToken()) { connect(); return; }
     var code = qs.get("enroll");

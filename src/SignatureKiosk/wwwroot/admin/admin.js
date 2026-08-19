@@ -1,14 +1,18 @@
-/* Admin panel: slides, signing document, signatures, and fleet management —
+/* Admin panel: slides, signing document, signatures, and fleet management -
    devices (enrollment codes, revoke, identify), groups, workstations, API keys. */
 (function () {
   "use strict";
 
   var state = {
-    target: "all",
+    slidesTarget: "all",   // recipient for advertising slides
+    docTarget: "all",      // recipient for the signing document (independent of slides)
     images: [], playlist: [], interval: 6,
     doc: null,
     devices: [], groups: [], workstations: [], apikeys: []
   };
+
+  // Client-side filter for the devices list.
+  var devFilter = { q: "", status: "", groupId: "", wsId: "" };
 
   var $ = function (id) { return document.getElementById(id); };
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
@@ -59,6 +63,7 @@
       if (name === "groups") loadGroups();
       if (name === "workstations") loadWorkstations();
       if (name === "apikeys") loadKeys();
+      if (name === "apidocs") renderApiDocs();
     });
   });
 
@@ -68,11 +73,18 @@
   $("modalClose").addEventListener("click", closeModal);
   $("modal").addEventListener("click", function (e) { if (e.target === $("modal")) closeModal(); });
 
-  // ---------------- Target selector ----------------
-  $("targetSelect").addEventListener("change", function () { state.target = $("targetSelect").value; loadPlaylist(); });
+  // ---------------- Target selectors (independent: slides vs document) ----------------
+  $("slidesTarget").addEventListener("change", function () { state.slidesTarget = this.value; loadPlaylist(); });
+  $("docTarget").addEventListener("change", function () { state.docTarget = this.value; });
 
-  function renderTargetOptions() {
-    var sel = $("targetSelect"); var cur = state.target; sel.innerHTML = "";
+  function targetExists(t) {
+    return t === "all"
+      || state.groups.some(function (g) { return "group:" + g.id === t; })
+      || state.devices.some(function (d) { return "device:" + d.id === t; });
+  }
+
+  function fillTargetSelect(sel, current) {
+    sel.innerHTML = "";
     sel.appendChild(new Option("Все планшеты", "all"));
     if (state.groups.length) {
       var og = document.createElement("optgroup"); og.label = "Группы";
@@ -81,18 +93,22 @@
     }
     if (state.devices.length) {
       var od = document.createElement("optgroup"); od.label = "Планшеты";
-      state.devices.forEach(function (d) { od.appendChild(new Option((d.online ? "🟢 " : "⚪ ") + d.name, "device:" + d.id)); });
+      state.devices.forEach(function (d) { od.appendChild(new Option(d.name + (d.online ? "" : " (офлайн)"), "device:" + d.id)); });
       sel.appendChild(od);
     }
-    var exists = cur === "all" || state.groups.some(function (g) { return "group:" + g.id === cur; })
-      || state.devices.some(function (d) { return "device:" + d.id === cur; });
-    sel.value = exists ? cur : "all"; state.target = sel.value;
+    sel.value = targetExists(current) ? current : "all";
+    return sel.value;
+  }
+
+  function renderTargetOptions() {
+    state.slidesTarget = fillTargetSelect($("slidesTarget"), state.slidesTarget);
+    state.docTarget = fillTargetSelect($("docTarget"), state.docTarget);
   }
 
   // ---------------- Images / slides ----------------
   function loadImages() { return apiJson("/images").then(function (imgs) { state.images = imgs; }); }
   function loadPlaylist() {
-    return apiJson("/playlist?target=" + encodeURIComponent(state.target)).then(function (p) {
+    return apiJson("/playlist?target=" + encodeURIComponent(state.slidesTarget)).then(function (p) {
       state.playlist = p.imageIds || []; state.interval = p.intervalSec || 6;
       $("intervalInput").value = state.interval; renderImages();
     });
@@ -133,14 +149,14 @@
   });
   $("saveSlides").addEventListener("click", function () {
     var interval = parseInt($("intervalInput").value, 10) || 6;
-    apiSend("/playlist", "PUT", { target: state.target, imageIds: state.playlist, intervalSec: interval })
-      .then(function () { toast("Сохранено и отправлено (" + targetLabel() + ")"); });
+    apiSend("/playlist", "PUT", { target: state.slidesTarget, imageIds: state.playlist, intervalSec: interval })
+      .then(function () { toast("Сохранено и отправлено (" + targetLabel(state.slidesTarget) + ")"); });
   });
 
-  function targetLabel() {
-    if (state.target === "all") return "все планшеты";
-    if (state.target.indexOf("group:") === 0) { var g = state.groups.find(function (x) { return "group:" + x.id === state.target; }); return "группа " + (g ? g.name : ""); }
-    var d = state.devices.find(function (x) { return "device:" + x.id === state.target; }); return d ? d.name : "планшет";
+  function targetLabel(t) {
+    if (t === "all") return "все планшеты";
+    if (t.indexOf("group:") === 0) { var g = state.groups.find(function (x) { return "group:" + x.id === t; }); return "группа " + (g ? g.name : ""); }
+    var d = state.devices.find(function (x) { return "device:" + x.id === t; }); return d ? d.name : "планшет";
   }
 
   // ---------------- Document editor ----------------
@@ -202,11 +218,11 @@
   $("showDocument").addEventListener("click", function () {
     collectDoc();
     apiSend("/document", "PUT", state.doc)
-      .then(function () { return apiSend("/show-document", "POST", { target: state.target }); })
-      .then(function () { toast("Документ показан (" + targetLabel() + ")"); });
+      .then(function () { return apiSend("/show-document", "POST", { target: state.docTarget }); })
+      .then(function () { toast("Документ показан (" + targetLabel(state.docTarget) + ")"); });
   });
   $("showSlides").addEventListener("click", function () {
-    apiSend("/show-slides", "POST", { target: state.target }).then(function () { toast("Реклама возвращена (" + targetLabel() + ")"); });
+    apiSend("/show-slides", "POST", { target: state.docTarget }).then(function () { toast("Реклама возвращена (" + targetLabel(state.docTarget) + ")"); });
   });
 
   // ---------------- Signatures ----------------
@@ -218,7 +234,7 @@
         var item = el("div", "sig-item");
         var col = el("div");
         col.appendChild(el("div", "when", new Date(s.createdUtc).toLocaleString("ru-RU")));
-        var where = (s.workstationName ? s.workstationName + " · " : "") + (s.deviceName || s.deviceId || "—");
+        var where = (s.workstationName ? s.workstationName + " · " : "") + (s.deviceName || s.deviceId || "-");
         col.appendChild(el("div", "meta", where + " · " + (s.documentTitle || "")));
         item.appendChild(col);
         item.appendChild(el("div", "badge", "отмечено " + s.checkedCount + " из " + s.totalCount));
@@ -231,19 +247,19 @@
     apiJson("/signatures/" + id).then(function (rec) {
       var c = el("div");
       c.appendChild(el("h3", null, rec.documentTitle || "Подпись"));
-      var where = (rec.workstationName ? rec.workstationName + " · " : "") + (rec.deviceName || rec.deviceId || "—");
+      var where = (rec.workstationName ? rec.workstationName + " · " : "") + (rec.deviceName || rec.deviceId || "-");
       c.appendChild(el("div", "sig-meta", new Date(rec.createdUtc).toLocaleString("ru-RU") + " · " + where));
       var list = el("div", "item-list");
       (rec.items || []).forEach(function (it) {
         var row = el("div", "item " + (it.checked ? "on" : "off"));
-        row.appendChild(el("span", "tick", it.checked ? "✓" : "✕"));
+        row.appendChild(el("span", "tick", it.checked ? "Да" : "Нет"));
         row.appendChild(el("span", null, it.label)); list.appendChild(row);
       });
       if (!(rec.items || []).length) list.appendChild(el("div", "empty-note", "Без чекбоксов"));
       c.appendChild(list);
       var img = el("img", "sig-image"); img.src = "/api/admin/signatures/" + id + "/image"; img.alt = "Подпись"; c.appendChild(img);
       var dl = document.createElement("a");
-      dl.className = "btn btn-ghost"; dl.textContent = "📄 Скачать PDF";
+      dl.className = "btn btn-ghost"; dl.textContent = "Скачать PDF";
       dl.href = "/api/admin/signatures/" + id + "/pdf"; dl.target = "_blank";
       dl.style.cssText = "display:inline-block;margin-top:12px;text-decoration:none;";
       c.appendChild(dl);
@@ -254,12 +270,49 @@
 
   // ---------------- Devices ----------------
   function loadDevices() {
-    return apiJson("/devices").then(function (list) { state.devices = list; renderDevices(); renderTargetOptions(); });
+    return apiJson("/devices").then(function (list) { state.devices = list; populateDeviceFilters(); renderDevices(); renderTargetOptions(); });
   }
+
+  function populateDeviceFilters() {
+    var gSel = $("devGroupFilter"), wSel = $("devWsFilter");
+    if (!gSel || !wSel) return;
+    var gCur = devFilter.groupId, wCur = devFilter.wsId;
+    gSel.innerHTML = ""; gSel.appendChild(new Option("Все группы", ""));
+    state.groups.forEach(function (g) { gSel.appendChild(new Option(g.name, g.id)); });
+    gSel.value = state.groups.some(function (g) { return g.id === gCur; }) ? gCur : "";
+    devFilter.groupId = gSel.value;
+    wSel.innerHTML = ""; wSel.appendChild(new Option("Все места", ""));
+    state.workstations.forEach(function (w) { wSel.appendChild(new Option(w.name || w.id, w.id)); });
+    wSel.value = state.workstations.some(function (w) { return w.id === wCur; }) ? wCur : "";
+    devFilter.wsId = wSel.value;
+  }
+
+  function matchesDeviceFilter(d) {
+    if (devFilter.status === "online" && !d.online) return false;
+    if (devFilter.status === "offline" && (d.online || d.status === "revoked")) return false;
+    if (devFilter.status === "revoked" && d.status !== "revoked") return false;
+    if (devFilter.groupId && (d.groupIds || []).indexOf(devFilter.groupId) < 0) return false;
+    if (devFilter.wsId && d.workstationId !== devFilter.wsId) return false;
+    var q = devFilter.q.trim().toLowerCase();
+    if (q) {
+      var hay = ((d.name || "") + " " + (d.id || "")).toLowerCase();
+      if (hay.indexOf(q) < 0) return false;
+    }
+    return true;
+  }
+
   function renderDevices() {
     var wrap = $("devicesList"); wrap.innerHTML = "";
-    if (!state.devices.length) { wrap.innerHTML = '<div class="empty-note">Планшетов пока нет. Нажмите «Добавить планшет (код)».</div>'; return; }
-    state.devices.forEach(function (d) {
+    var countEl = $("devFilterCount");
+    if (!state.devices.length) {
+      wrap.innerHTML = '<div class="empty-note">Планшетов пока нет. Нажмите «Добавить планшет (код)».</div>';
+      if (countEl) countEl.textContent = "";
+      return;
+    }
+    var shown = state.devices.filter(matchesDeviceFilter);
+    if (countEl) countEl.textContent = "Показано " + shown.length + " из " + state.devices.length;
+    if (!shown.length) { wrap.innerHTML = '<div class="empty-note">Ничего не найдено по заданным фильтрам.</div>'; return; }
+    shown.forEach(function (d) {
       var item = el("div", "dev-item" + (d.status === "revoked" ? " revoked" : ""));
       item.appendChild(el("div", "dot" + (d.online ? " online" : "")));
       var info = el("div", "dev-info");
@@ -269,9 +322,9 @@
       else nameRow.appendChild(el("span", "chip chip-ok", d.online ? "онлайн" : "офлайн"));
       info.appendChild(nameRow);
       var meta = [];
-      if (d.workstationName) meta.push("📍 " + d.workstationName);
-      if (d.groups && d.groups.length) meta.push("👥 " + d.groups.join(", "));
-      meta.push("посл. связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "—"));
+      if (d.workstationName) meta.push("Место: " + d.workstationName);
+      if (d.groups && d.groups.length) meta.push("Группы: " + d.groups.join(", "));
+      meta.push("посл. связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "-"));
       info.appendChild(el("div", "dev-meta", meta.join("   ·   ")));
       item.appendChild(info);
 
@@ -301,13 +354,25 @@
     });
   }
 
+  // Device filter controls
+  $("devSearch").addEventListener("input", function () { devFilter.q = this.value; renderDevices(); });
+  $("devStatusFilter").addEventListener("change", function () { devFilter.status = this.value; renderDevices(); });
+  $("devGroupFilter").addEventListener("change", function () { devFilter.groupId = this.value; renderDevices(); });
+  $("devWsFilter").addEventListener("change", function () { devFilter.wsId = this.value; renderDevices(); });
+  $("devFilterReset").addEventListener("click", function () {
+    devFilter = { q: "", status: "", groupId: "", wsId: "" };
+    $("devSearch").value = ""; $("devStatusFilter").value = "";
+    $("devGroupFilter").value = ""; $("devWsFilter").value = "";
+    renderDevices();
+  });
+
   $("addDevice").addEventListener("click", function () {
     var form = el("div");
     form.appendChild(el("h3", null, "Новый планшет"));
     form.appendChild(el("p", "sig-meta", "Заполните и получите код активации. Введите его на планшете один раз."));
     var name = labeledInput("Имя планшета (напр. Ресепшн 1)", "");
     form.appendChild(name.wrap);
-    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "— не привязывать —" }].concat(state.workstations.map(function (w) { return { v: w.id, t: w.name + (w.externalId ? " (" + w.externalId + ")" : "") }; })));
+    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "- не привязывать -" }].concat(state.workstations.map(function (w) { return { v: w.id, t: w.name + (w.externalId ? " (" + w.externalId + ")" : "") }; })));
     form.appendChild(wsSel.wrap);
     var groupsBox = el("div", "field"); groupsBox.appendChild(document.createTextNode("Группы"));
     var gWrap = el("div", "check-group");
@@ -346,7 +411,7 @@
     var form = el("div");
     form.appendChild(el("h3", null, "Планшет: " + d.name));
     var name = labeledInput("Имя", d.name); form.appendChild(name.wrap);
-    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "— не привязывать —" }].concat(state.workstations.map(function (w) { return { v: w.id, t: w.name + (w.externalId ? " (" + w.externalId + ")" : "") }; })));
+    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "- не привязывать -" }].concat(state.workstations.map(function (w) { return { v: w.id, t: w.name + (w.externalId ? " (" + w.externalId + ")" : "") }; })));
     wsSel.select.value = d.workstationId || ""; form.appendChild(wsSel.wrap);
     var groupsBox = el("div", "field"); groupsBox.appendChild(document.createTextNode("Группы (применятся при след. подключении)"));
     var gWrap = el("div", "check-group");
@@ -366,7 +431,7 @@
   }
 
   // ---------------- Groups ----------------
-  function loadGroups() { return apiJson("/groups").then(function (list) { state.groups = list; renderGroups(); renderTargetOptions(); }); }
+  function loadGroups() { return apiJson("/groups").then(function (list) { state.groups = list; renderGroups(); renderTargetOptions(); populateDeviceFilters(); }); }
   function renderGroups() {
     var wrap = $("groupsList"); wrap.innerHTML = "";
     if (!state.groups.length) { wrap.innerHTML = '<div class="empty-note">Групп пока нет.</div>'; return; }
@@ -388,7 +453,7 @@
   });
 
   // ---------------- Workstations ----------------
-  function loadWorkstations() { return apiJson("/workstations").then(function (list) { state.workstations = list; renderWorkstations(); }); }
+  function loadWorkstations() { return apiJson("/workstations").then(function (list) { state.workstations = list; renderWorkstations(); populateDeviceFilters(); }); }
   function renderWorkstations() {
     var wrap = $("workstationsList"); wrap.innerHTML = "";
     if (!state.workstations.length) { wrap.innerHTML = '<div class="empty-note">Рабочих мест пока нет.</div>'; return; }
@@ -431,7 +496,7 @@
       $("newKeyLabel").value = "";
       var c = el("div");
       c.appendChild(el("h3", null, "Ключ создан"));
-      c.appendChild(el("p", "sig-meta", "Скопируйте ключ сейчас — позже он не показывается."));
+      c.appendChild(el("p", "sig-meta", "Скопируйте ключ сейчас - позже он не показывается."));
       var code = el("div", "enroll-code"); code.style.fontSize = "1rem"; code.style.wordBreak = "break-all"; code.textContent = j.key;
       c.appendChild(code);
       c.appendChild(el("p", "sig-meta", "Передавайте его в заголовке X-Api-Key при запросах к /api/ext/*"));
@@ -439,6 +504,66 @@
       c.appendChild(done); openModal(c);
     });
   });
+
+  // ---------------- API docs ----------------
+  var API_ENDPOINTS = [
+    {
+      method: "GET", path: "/api/ext/devices",
+      desc: "Список всех планшетов: статус (онлайн/офлайн), группы и привязанное рабочее место.",
+      sample: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  {BASE}/api/ext/devices'
+    },
+    {
+      method: "GET", path: "/api/ext/workstations",
+      desc: "Список рабочих мест с внешними идентификаторами (externalId).",
+      sample: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  {BASE}/api/ext/workstations'
+    },
+    {
+      method: "POST", path: "/api/ext/workstations",
+      desc: "Создать рабочее место. Поле externalId - ключ в вашей учётной системе.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"externalId":"WS-204","name":"Касса 4","location":"1 этаж"}\' \\\n  {BASE}/api/ext/workstations'
+    },
+    {
+      method: "POST", path: "/api/ext/enrollments",
+      desc: "Сгенерировать код активации нового планшета. Можно сразу привязать к месту через workstationExternalId. Ответ: { code, expiresUtc }.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"Ресепшн 1","workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/enrollments'
+    },
+    {
+      method: "PUT", path: "/api/ext/devices/{id}/workstation",
+      desc: "Привязать планшет к рабочему месту по externalId места. Так внешняя система задаёт, какой планшет на каком месте.",
+      sample: 'curl -X PUT -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"externalId":"WS-204"}\' \\\n  {BASE}/api/ext/devices/DEVICE_ID/workstation'
+    }
+  ];
+
+  function renderApiDocs() {
+    var base = window.location.origin;
+    var baseEl = $("apiBaseUrl"); if (baseEl) baseEl.textContent = base;
+    var wrap = $("apiDocsList"); if (!wrap) return; wrap.innerHTML = "";
+    API_ENDPOINTS.forEach(function (ep) {
+      var card = el("div", "api-ep");
+      var head = el("div", "api-ep-head");
+      var m = ep.method.toLowerCase();
+      head.appendChild(el("span", "api-method api-" + m, ep.method));
+      head.appendChild(el("span", "api-path", ep.path));
+      var copy = el("button", "btn btn-ghost btn-sm api-copy", "Копировать");
+      var sample = ep.sample.replace(/\{BASE\}/g, base);
+      copy.addEventListener("click", function () { copyText(sample); });
+      head.appendChild(copy);
+      card.appendChild(head);
+      card.appendChild(el("p", "api-desc", ep.desc));
+      card.appendChild(el("pre", "api-code", sample));
+      wrap.appendChild(card);
+    });
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast("Скопировано"); }, function () { toast("Не удалось скопировать"); });
+    } else {
+      var ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); toast("Скопировано"); } catch (e) { toast("Не удалось скопировать"); }
+      document.body.removeChild(ta);
+    }
+  }
 
   // ---------------- Small form helpers ----------------
   function labeledInput(labelText, value) {
