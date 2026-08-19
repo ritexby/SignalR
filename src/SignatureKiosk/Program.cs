@@ -21,7 +21,15 @@ var app = builder.Build();
 
 var storage = app.Services.GetRequiredService<StorageService>();
 var tracker = app.Services.GetRequiredService<DeviceTracker>();
-var adminPassword = app.Configuration["AdminPassword"] ?? "admin";
+var adminPassword = app.Configuration["AdminPassword"];
+if (string.IsNullOrWhiteSpace(adminPassword) || adminPassword == "admin")
+{
+    app.Logger.LogCritical(
+        "AdminPassword is not configured (or is the insecure default \"admin\"). " +
+        "Set a strong AdminPassword (e.g. in /etc/signaturekiosk.env) and restart.");
+    throw new InvalidOperationException(
+        "AdminPassword must be configured; refusing to start with an empty or default password.");
+}
 var adminToken = ComputeToken(adminPassword);
 
 const string AdminCookie = "sk_admin";
