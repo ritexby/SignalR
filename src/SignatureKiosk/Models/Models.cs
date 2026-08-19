@@ -24,14 +24,54 @@ public class StateStore
     public Dictionary<string, KioskState> Devices { get; set; } = new();
 }
 
-// ---------- Devices ----------
+// ---------- Devices, groups, workstations, enrollment ----------
 
-public class DeviceInfo
+/// <summary>An enrolled tablet. Authenticated by a per-device secret (hash stored here).</summary>
+public class Device
 {
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
-    public DateTime FirstSeenUtc { get; set; }
+    public string SecretHash { get; set; } = "";              // SHA-256 hex of the device secret
+    public List<string> GroupIds { get; set; } = new();
+    public string? WorkstationId { get; set; }
+    public DateTime EnrolledUtc { get; set; }
     public DateTime LastSeenUtc { get; set; }
+    public string Status { get; set; } = "active";            // "active" | "revoked"
+}
+
+public class DeviceGroup
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+}
+
+public class Workstation
+{
+    public string Id { get; set; } = "";
+    public string ExternalId { get; set; } = "";              // key for the customer's external system
+    public string Name { get; set; } = "";
+    public string Location { get; set; } = "";
+}
+
+/// <summary>A one-time enrollment code that a tablet redeems for a device token.</summary>
+public class Enrollment
+{
+    public string Code { get; set; } = "";
+    public string? Name { get; set; }
+    public string? WorkstationId { get; set; }
+    public List<string> GroupIds { get; set; } = new();
+    public DateTime CreatedUtc { get; set; }
+    public DateTime ExpiresUtc { get; set; }
+    public string? UsedByDeviceId { get; set; }               // null until redeemed
+}
+
+/// <summary>An API key for the external integration surface (/api/ext).</summary>
+public class ApiKey
+{
+    public string Id { get; set; } = "";
+    public string KeyHash { get; set; } = "";                 // SHA-256 hex of the key
+    public string Label { get; set; } = "";
+    public DateTime CreatedUtc { get; set; }
 }
 
 // ---------- Images ----------
@@ -77,7 +117,6 @@ public class SubmittedItem
 
 public class SignatureSubmission
 {
-    public string? DeviceId { get; set; }
     public List<SubmittedItem> Items { get; set; } = new();
     public string Signature { get; set; } = ""; // data URL (image/png)
 }
@@ -89,6 +128,8 @@ public class SignatureRecord
     public string DocumentTitle { get; set; } = "";
     public string? DeviceId { get; set; }
     public string? DeviceName { get; set; }
+    public string? WorkstationId { get; set; }
+    public string? WorkstationName { get; set; }
     public List<SubmittedItem> Items { get; set; } = new();
 }
 
@@ -112,4 +153,13 @@ public class CurrentCommand
 public record LoginDto(string? Password);
 public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec);
 public record TargetDto(string? Target);
-public record DeviceRenameDto(string? Name);
+
+public record EnrollRequest(string? Code);
+public record CreateEnrollmentDto(string? Name, string? WorkstationId, List<string>? GroupIds, int? TtlMinutes);
+public record DeviceUpdateDto(string? Name, List<string>? GroupIds, string? WorkstationId);
+public record GroupDto(string? Name);
+public record WorkstationDto(string? ExternalId, string? Name, string? Location);
+public record ApiKeyDto(string? Label);
+
+public record ExtEnrollmentDto(string? WorkstationExternalId, string? Name);
+public record ExtWorkstationAssignDto(string? ExternalId);

@@ -1,12 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
     <RootNamespace>SignatureKiosk</RootNamespace>
     <AssemblyName>SignatureKiosk</AssemblyName>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="PDFsharp" Version="6.2.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Cyrillic-capable font embedded into the assembly for PDF generation. -->
+    <EmbeddedResource Include="Resources/DejaVuSans.ttf" />
+    <EmbeddedResource Include="Resources/DejaVuSans-Bold.ttf" />
+  </ItemGroup>
 
 </Project>

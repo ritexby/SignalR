@@ -1,8 +1,10 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.FileProviders;
+using SignatureKiosk.Auth;
 using SignatureKiosk.Hubs;
 using SignatureKiosk.Models;
 using SignatureKiosk.Services;
@@ -16,11 +18,22 @@ builder.Services.AddSignalR().AddJsonProtocol(options =>
 builder.Services.AddSingleton<StorageService>();
 builder.Services.AddSingleton<DeviceTracker>();
 builder.Services.AddSingleton<KioskCoordinator>();
+builder.Services.AddSingleton<TokenAuthService>();
+builder.Services.AddSingleton<PdfService>();
+
+builder.Services.AddAuthentication(SkAuthHandler.SchemeName)
+    .AddScheme<AuthenticationSchemeOptions, SkAuthHandler>(SkAuthHandler.SchemeName, null);
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("Admin", p => p.RequireClaim("role", "admin"));
+    options.AddPolicy("Device", p => p.RequireClaim("role", "device"));
+});
 
 var app = builder.Build();
 
 var storage = app.Services.GetRequiredService<StorageService>();
 var tracker = app.Services.GetRequiredService<DeviceTracker>();
+
 var adminPassword = app.Configuration["AdminPassword"];
 if (string.IsNullOrWhiteSpace(adminPassword) || adminPassword == "admin")
 {
@@ -30,23 +43,20 @@ if (string.IsNullOrWhiteSpace(adminPassword) || adminPassword == "admin")
     throw new InvalidOperationException(
         "AdminPassword must be configured; refusing to start with an empty or default password.");
 }
-var adminToken = ComputeToken(adminPassword);
+var auth = app.Services.GetRequiredService<TokenAuthService>();
 
-const string AdminCookie = "sk_admin";
-
-// Behind a reverse proxy (nginx / Nginx Proxy Manager), possibly on another host:
-// honour X-Forwarded-Proto/For so Request.IsHttps and client IPs reflect the real client.
+// Behind a reverse proxy (Nginx Proxy Manager), possibly on another host: honour
+// X-Forwarded-Proto/For so Request.IsHttps and client IPs reflect the real client.
 var forwardedOptions = new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
 };
-// The proxy lives on the LAN (not loopback), so accept forwarded headers from it.
-forwardedOptions.KnownNetworks.Clear();
+forwardedOptions.KnownIPNetworks.Clear();
 forwardedOptions.KnownProxies.Clear();
 app.UseForwardedHeaders(forwardedOptions);
 
-// Redirect the bare /admin (no trailing slash) to /admin/ so its relative assets resolve.
-// Implemented as middleware (not an endpoint) so it never shadows the static /admin/ files.
+// Redirect the bare /admin (no trailing slash) to /admin/ (middleware, not an endpoint,
+// so it never shadows the static /admin/ files).
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.Equals("/admin", StringComparison.OrdinalIgnoreCase))
@@ -57,11 +67,11 @@ app.Use(async (context, next) =>
     await next();
 });
 
-// Static files: default document (kiosk index.html) + wwwroot assets.
+app.UseAuthentication();
+app.UseAuthorization();
+
 app.UseDefaultFiles();
 app.UseStaticFiles();
-
-// Publicly-served uploaded images.
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(storage.ImagesDir),
@@ -70,9 +80,20 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.MapHub<KioskHub>("/hub/kiosk");
 
-// ---------------- Public endpoint: submit signature ----------------
+// ==================== Public: tablet enrollment ====================
 
-app.MapPost("/api/sign", async (SignatureSubmission sub, KioskCoordinator coord) =>
+app.MapPost("/api/kiosk/enroll", (EnrollRequest req) =>
+{
+    var result = storage.RedeemEnrollment(req?.Code);
+    if (result is null)
+        return Results.Json(new { error = "invalid or expired code" }, statusCode: StatusCodes.Status400BadRequest);
+    var (device, token) = result.Value;
+    return Results.Ok(new { deviceId = device.Id, name = device.Name, token });
+});
+
+// ==================== Device-authenticated: submit signature ====================
+
+app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskCoordinator coord, PdfService pdf) =>
 {
     if (sub is null || string.IsNullOrWhiteSpace(sub.Signature))
         return Results.BadRequest(new { error = "signature required" });
@@ -81,23 +102,29 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, KioskCoordinator coord)
     if (png is null)
         return Results.BadRequest(new { error = "invalid signature image" });
 
-    string? deviceName = null;
-    if (!string.IsNullOrWhiteSpace(sub.DeviceId))
-        deviceName = storage.GetDevices().FirstOrDefault(d => d.Id == sub.DeviceId)?.Name;
+    var deviceId = ctx.User.FindFirst("device_id")?.Value;
+    var device = deviceId is null ? null : storage.GetDevice(deviceId);
+    Workstation? ws = device?.WorkstationId is null
+        ? null
+        : storage.GetWorkstations().FirstOrDefault(w => w.Id == device.WorkstationId);
 
     var doc = storage.GetDocument();
-    var rec = storage.AddSignature(sub, doc.Title, deviceName, png);
+    var rec = storage.AddSignature(sub, doc.Title, device, ws, png);
+
+    try { pdf.Generate(rec, doc, png); }
+    catch (Exception ex) { app.Logger.LogError(ex, "PDF generation failed for {Id}", rec.Id); }
+
     await coord.NotifyAdminsSignatureAsync(rec);
     return Results.Ok(new { id = rec.Id });
-});
+}).RequireAuthorization("Device");
 
-// ---------------- Admin authentication ----------------
+// ==================== Admin authentication ====================
 
 app.MapPost("/api/admin/login", (LoginDto dto, HttpContext ctx) =>
 {
-    if (dto?.Password is not null && FixedTimeEquals(dto.Password, adminPassword))
+    if (auth.CheckPassword(dto?.Password))
     {
-        ctx.Response.Cookies.Append(AdminCookie, adminToken, new CookieOptions
+        ctx.Response.Cookies.Append(TokenAuthService.AdminCookieName, auth.AdminTokenValue, new CookieOptions
         {
             HttpOnly = true,
             SameSite = SameSiteMode.Lax,
@@ -112,60 +139,118 @@ app.MapPost("/api/admin/login", (LoginDto dto, HttpContext ctx) =>
 
 app.MapPost("/api/admin/logout", (HttpContext ctx) =>
 {
-    ctx.Response.Cookies.Delete(AdminCookie);
+    ctx.Response.Cookies.Delete(TokenAuthService.AdminCookieName);
     return Results.Ok(new { ok = true });
 });
 
 app.MapGet("/api/admin/me", (HttpContext ctx) =>
-    Results.Ok(new { authenticated = IsAdmin(ctx) }));
+    Results.Ok(new { authenticated = ctx.User.FindFirst("role")?.Value == "admin" }));
 
-// ---------------- Admin API (password protected) ----------------
+// ==================== Admin API ====================
 
-var admin = app.MapGroup("/api/admin").AddEndpointFilter(async (ctx, next) =>
-{
-    if (!IsAdmin(ctx.HttpContext))
-        return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
-    return await next(ctx);
-});
+var admin = app.MapGroup("/api/admin").RequireAuthorization("Admin");
 
-// Devices
+// ---- Devices ----
 admin.MapGet("/devices", () =>
 {
     var online = tracker.OnlineDeviceIds();
+    var groups = storage.GetGroups().ToDictionary(g => g.Id, g => g.Name);
+    var wss = storage.GetWorkstations().ToDictionary(w => w.Id, w => w.Name);
     var devices = storage.GetDevices()
         .OrderBy(d => d.Name)
         .Select(d => new
         {
             d.Id,
             d.Name,
-            d.FirstSeenUtc,
+            d.Status,
+            d.GroupIds,
+            groups = d.GroupIds.Where(groups.ContainsKey).Select(g => groups[g]).ToList(),
+            d.WorkstationId,
+            workstationName = d.WorkstationId != null && wss.TryGetValue(d.WorkstationId, out var wn) ? wn : null,
+            online = online.Contains(d.Id),
             d.LastSeenUtc,
-            online = online.Contains(d.Id)
+            d.EnrolledUtc
         });
     return Results.Ok(devices);
 });
 
-admin.MapPut("/devices/{id}", (string id, DeviceRenameDto dto) =>
-    storage.RenameDevice(id, dto?.Name ?? "") ? Results.Ok(new { ok = true }) : Results.NotFound());
-
-// Images
-admin.MapGet("/images", () =>
+admin.MapPost("/devices/enroll", (CreateEnrollmentDto dto) =>
 {
-    var imgs = storage.GetImages().Select(i => new
-    {
-        i.Id,
-        i.OriginalName,
-        i.UploadedUtc,
-        url = "/media/" + i.FileName
-    });
-    return Results.Ok(imgs);
+    var e = storage.CreateEnrollment(dto?.Name, dto?.WorkstationId, dto?.GroupIds, dto?.TtlMinutes ?? 60);
+    return Results.Ok(new { code = e.Code, expiresUtc = e.ExpiresUtc, name = e.Name, workstationId = e.WorkstationId, groupIds = e.GroupIds });
 });
+
+admin.MapPut("/devices/{id}", async (string id, DeviceUpdateDto dto, KioskCoordinator coord) =>
+{
+    if (!storage.UpdateDevice(id, dto?.Name, dto?.GroupIds, dto?.WorkstationId, touchWorkstation: true))
+        return Results.NotFound();
+    await coord.NotifyAdminsDevicesAsync();
+    return Results.Ok(new { ok = true });
+});
+
+admin.MapPost("/devices/{id}/revoke", async (string id, KioskCoordinator coord) =>
+{
+    if (!storage.SetDeviceStatus(id, "revoked")) return Results.NotFound();
+    await coord.NotifyAdminsDevicesAsync();
+    return Results.Ok(new { ok = true });
+});
+
+admin.MapPost("/devices/{id}/unrevoke", async (string id, KioskCoordinator coord) =>
+{
+    if (!storage.SetDeviceStatus(id, "active")) return Results.NotFound();
+    await coord.NotifyAdminsDevicesAsync();
+    return Results.Ok(new { ok = true });
+});
+
+admin.MapDelete("/devices/{id}", async (string id, KioskCoordinator coord) =>
+{
+    if (!storage.DeleteDevice(id)) return Results.NotFound();
+    await coord.NotifyAdminsDevicesAsync();
+    return Results.Ok(new { ok = true });
+});
+
+admin.MapPost("/devices/{id}/identify", async (string id, KioskCoordinator coord) =>
+{
+    var code = await coord.IdentifyAsync(id);
+    return Results.Ok(new { code });
+});
+
+// ---- Groups ----
+admin.MapGet("/groups", () => Results.Ok(storage.GetGroups()));
+admin.MapPost("/groups", (GroupDto dto) => Results.Ok(storage.AddGroup(dto?.Name ?? "")));
+admin.MapPut("/groups/{id}", (string id, GroupDto dto) =>
+    storage.RenameGroup(id, dto?.Name ?? "") ? Results.Ok(new { ok = true }) : Results.NotFound());
+admin.MapDelete("/groups/{id}", (string id) =>
+    storage.DeleteGroup(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
+
+// ---- Workstations ----
+admin.MapGet("/workstations", () => Results.Ok(storage.GetWorkstations()));
+admin.MapPost("/workstations", (WorkstationDto dto) =>
+    Results.Ok(storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location)));
+admin.MapPut("/workstations/{id}", (string id, WorkstationDto dto) =>
+    storage.UpdateWorkstation(id, dto?.ExternalId, dto?.Name, dto?.Location) ? Results.Ok(new { ok = true }) : Results.NotFound());
+admin.MapDelete("/workstations/{id}", (string id) =>
+    storage.DeleteWorkstation(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
+
+// ---- API keys (external integration) ----
+admin.MapGet("/apikeys", () =>
+    Results.Ok(storage.GetApiKeys().Select(k => new { k.Id, k.Label, k.CreatedUtc })));
+admin.MapPost("/apikeys", (ApiKeyDto dto) =>
+{
+    var (key, plaintext) = storage.CreateApiKey(dto?.Label);
+    return Results.Ok(new { key.Id, key.Label, key = plaintext }); // plaintext returned once
+});
+admin.MapDelete("/apikeys/{id}", (string id) =>
+    storage.DeleteApiKey(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
+
+// ---- Images ----
+admin.MapGet("/images", () =>
+    Results.Ok(storage.GetImages().Select(i => new { i.Id, i.OriginalName, i.UploadedUtc, url = "/media/" + i.FileName })));
 
 admin.MapPost("/images", async (HttpRequest req) =>
 {
     if (!req.HasFormContentType)
         return Results.BadRequest(new { error = "expected multipart/form-data" });
-
     var form = await req.ReadFormAsync();
     var added = new List<object>();
     foreach (var file in form.Files)
@@ -182,13 +267,14 @@ admin.MapPost("/images", async (HttpRequest req) =>
 admin.MapDelete("/images/{id}", (string id) =>
     storage.DeleteImage(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
 
-// Playlist / slideshow
+// ---- Playlist / slideshow ----
 admin.MapGet("/playlist", (string? target) =>
 {
     var t = string.IsNullOrWhiteSpace(target) ? KioskCoordinator.AllTarget : target;
-    var state = t == KioskCoordinator.AllTarget
-        ? storage.GetStates().Default
-        : storage.ResolveState(t);
+    KioskState state;
+    if (t == KioskCoordinator.AllTarget) state = storage.GetStates().Default;
+    else if (t.StartsWith("device:", StringComparison.Ordinal)) state = storage.ResolveState(t["device:".Length..]);
+    else state = storage.GetStates().Default; // groups share the default view for editing
     return Results.Ok(new { target = t, imageIds = state.PlaylistImageIds, intervalSec = state.IntervalSec, mode = state.Mode });
 });
 
@@ -199,44 +285,29 @@ admin.MapPut("/playlist", async (PlaylistSaveDto dto, KioskCoordinator coord) =>
     return Results.Ok(new { ok = true });
 });
 
-// Document
+// ---- Document ----
 admin.MapGet("/document", () => Results.Ok(storage.GetDocument()));
-
-admin.MapPut("/document", (DocumentConfig doc) =>
-{
-    storage.SaveDocument(doc);
-    return Results.Ok(new { ok = true });
-});
+admin.MapPut("/document", (DocumentConfig doc) => { storage.SaveDocument(doc); return Results.Ok(new { ok = true }); });
 
 admin.MapPost("/show-document", async (TargetDto dto, KioskCoordinator coord) =>
 {
-    var target = string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!;
-    await coord.ShowDocumentAsync(target);
+    await coord.ShowDocumentAsync(string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!);
     return Results.Ok(new { ok = true });
 });
 
 admin.MapPost("/show-slides", async (TargetDto dto, KioskCoordinator coord) =>
 {
-    var target = string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!;
-    await coord.ReturnToSlidesAsync(target);
+    await coord.ReturnToSlidesAsync(string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!);
     return Results.Ok(new { ok = true });
 });
 
-// Signatures
+// ---- Signatures ----
 admin.MapGet("/signatures", () =>
-{
-    var list = storage.ListSignatures().Select(r => new
+    Results.Ok(storage.ListSignatures().Select(r => new
     {
-        r.Id,
-        r.CreatedUtc,
-        r.DocumentTitle,
-        r.DeviceId,
-        r.DeviceName,
-        checkedCount = r.Items.Count(i => i.Checked),
-        totalCount = r.Items.Count
-    });
-    return Results.Ok(list);
-});
+        r.Id, r.CreatedUtc, r.DocumentTitle, r.DeviceId, r.DeviceName, r.WorkstationName,
+        checkedCount = r.Items.Count(i => i.Checked), totalCount = r.Items.Count
+    })));
 
 admin.MapGet("/signatures/{id}", (string id) =>
 {
@@ -250,21 +321,67 @@ admin.MapGet("/signatures/{id}/image", (string id) =>
     return path is null ? Results.NotFound() : Results.File(path, "image/png");
 });
 
+admin.MapGet("/signatures/{id}/pdf", (string id) =>
+{
+    var path = storage.GetPdfPath(id);
+    return path is null ? Results.NotFound() : Results.File(path, "application/pdf", id + ".pdf");
+});
+
+// ==================== External integration API (X-Api-Key) ====================
+
+var ext = app.MapGroup("/api/ext").AddEndpointFilter(async (ctx, next) =>
+{
+    var key = ctx.HttpContext.Request.Headers["X-Api-Key"].ToString();
+    if (!storage.ValidateApiKey(key))
+        return Results.Json(new { error = "invalid api key" }, statusCode: StatusCodes.Status401Unauthorized);
+    return await next(ctx);
+});
+
+ext.MapGet("/devices", () =>
+{
+    var online = tracker.OnlineDeviceIds();
+    var wss = storage.GetWorkstations().ToDictionary(w => w.Id, w => w);
+    var groups = storage.GetGroups().ToDictionary(g => g.Id, g => g.Name);
+    return Results.Ok(storage.GetDevices().Select(d => new
+    {
+        deviceId = d.Id,
+        d.Name,
+        d.Status,
+        online = online.Contains(d.Id),
+        d.LastSeenUtc,
+        groups = d.GroupIds.Where(groups.ContainsKey).Select(g => groups[g]),
+        workstation = d.WorkstationId != null && wss.TryGetValue(d.WorkstationId, out var w)
+            ? new { w.Id, w.ExternalId, w.Name, w.Location } : null
+    }));
+});
+
+ext.MapGet("/workstations", () =>
+    Results.Ok(storage.GetWorkstations().Select(w => new { w.Id, w.ExternalId, w.Name, w.Location })));
+
+ext.MapPost("/workstations", (WorkstationDto dto) =>
+    Results.Ok(storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location)));
+
+ext.MapPost("/enrollments", (ExtEnrollmentDto dto) =>
+{
+    string? wsId = null;
+    if (!string.IsNullOrWhiteSpace(dto?.WorkstationExternalId))
+    {
+        var ws = storage.GetWorkstations().FirstOrDefault(w => w.ExternalId == dto!.WorkstationExternalId);
+        if (ws is null) return Results.Json(new { error = "unknown workstationExternalId" }, statusCode: StatusCodes.Status404NotFound);
+        wsId = ws.Id;
+    }
+    var e = storage.CreateEnrollment(dto?.Name, wsId, null, 60);
+    return Results.Ok(new { code = e.Code, expiresUtc = e.ExpiresUtc });
+});
+
+ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto) =>
+    storage.AssignWorkstationByExternalId(id, dto?.ExternalId)
+        ? Results.Ok(new { ok = true })
+        : Results.Json(new { error = "device or workstation not found" }, statusCode: StatusCodes.Status404NotFound));
+
 app.Run();
 
-// ---------------- Local helpers ----------------
-
-bool IsAdmin(HttpContext ctx) =>
-    ctx.Request.Cookies.TryGetValue(AdminCookie, out var v) && FixedTimeEquals(v, adminToken);
-
-static string ComputeToken(string password)
-{
-    var bytes = SHA256.HashData(Encoding.UTF8.GetBytes("sk::" + password));
-    return Convert.ToHexString(bytes);
-}
-
-static bool FixedTimeEquals(string a, string b) =>
-    CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
+// ==================== Local helpers ====================
 
 static string? ResolveImageExtension(string fileName, string? contentType)
 {
@@ -272,7 +389,6 @@ static string? ResolveImageExtension(string fileName, string? contentType)
     var ext = Path.GetExtension(fileName).ToLowerInvariant();
     if (allowed.Contains(ext))
         return ext == ".jpeg" ? ".jpg" : ext;
-
     return contentType switch
     {
         "image/jpeg" => ".jpg",

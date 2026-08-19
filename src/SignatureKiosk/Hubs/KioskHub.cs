@@ -1,9 +1,16 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using SignatureKiosk.Models;
 using SignatureKiosk.Services;
 
 namespace SignatureKiosk.Hubs;
 
+/// <summary>
+/// Only authenticated connections may reach the hub: a tablet (device token) or the
+/// admin page (login cookie). Identity and group membership come from the token —
+/// never from client-supplied arguments.
+/// </summary>
+[Authorize]
 public class KioskHub : Hub
 {
     private const string DeviceItemKey = "deviceId";
@@ -19,31 +26,43 @@ public class KioskHub : Hub
         _tracker = tracker;
     }
 
-    /// <summary>Called by a tablet after connecting. Joins groups, records the device and
-    /// returns the state the tablet should render right now (restores state after reboot/reconnect).</summary>
-    public async Task<CurrentCommand> RegisterKiosk(string deviceId, string? name)
-    {
-        deviceId = NormalizeDeviceId(deviceId);
-        Context.Items[DeviceItemKey] = deviceId;
+    private string? DeviceId => Context.User?.FindFirst("device_id")?.Value;
+    private bool IsAdmin => Context.User?.FindFirst("role")?.Value == "admin";
 
+    /// <summary>A tablet joins its channels and gets the screen it should render right now.</summary>
+    public async Task<CurrentCommand> RegisterKiosk()
+    {
+        var deviceId = DeviceId;
+        if (string.IsNullOrEmpty(deviceId)) throw new HubException("not a device connection");
+
+        Context.Items[DeviceItemKey] = deviceId;
         await Groups.AddToGroupAsync(Context.ConnectionId, "kiosks");
         await Groups.AddToGroupAsync(Context.ConnectionId, KioskCoordinator.DeviceGroup(deviceId));
 
-        _storage.UpsertDevice(deviceId, name);
+        var dev = _storage.GetDevice(deviceId);
+        if (dev is not null)
+            foreach (var groupId in dev.GroupIds)
+                await Groups.AddToGroupAsync(Context.ConnectionId, KioskCoordinator.RoomGroup(groupId));
+
+        _storage.TouchDevice(deviceId);
         _tracker.Add(deviceId, Context.ConnectionId);
         await _coord.NotifyAdminsDevicesAsync();
 
         return _coord.BuildCurrentCommand(deviceId);
     }
 
-    /// <summary>Called by the admin page so it can receive live device/signature notifications.</summary>
-    public Task RegisterAdmin() => Groups.AddToGroupAsync(Context.ConnectionId, "admins");
+    /// <summary>The admin page subscribes to live notifications. Admins only.</summary>
+    public async Task RegisterAdmin()
+    {
+        if (!IsAdmin) throw new HubException("admin only");
+        await Groups.AddToGroupAsync(Context.ConnectionId, "admins");
+    }
 
     /// <summary>Called by a tablet after a completed signing flow so it returns to the slideshow.</summary>
     public async Task FinishDocument()
     {
         if (Context.Items.TryGetValue(DeviceItemKey, out var value) && value is string deviceId)
-            await _coord.ReturnToSlidesAsync(deviceId);
+            await _coord.ReturnToSlidesAsync("device:" + deviceId);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
@@ -54,15 +73,5 @@ public class KioskHub : Hub
             await _coord.NotifyAdminsDevicesAsync();
         }
         await base.OnDisconnectedAsync(exception);
-    }
-
-    private static string NormalizeDeviceId(string? deviceId)
-    {
-        if (string.IsNullOrWhiteSpace(deviceId)) return "unknown";
-        var cleaned = new string(deviceId.Trim()
-            .Where(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.')
-            .ToArray());
-        if (cleaned.Length == 0) return "unknown";
-        return cleaned.Length > 64 ? cleaned[..64] : cleaned;
     }
 }

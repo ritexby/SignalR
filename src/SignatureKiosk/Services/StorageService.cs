@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using SignatureKiosk.Models;
 
@@ -25,13 +27,26 @@ public class StorageService
         Directory.CreateDirectory(_dataDir);
         Directory.CreateDirectory(ImagesDir);
         Directory.CreateDirectory(SignaturesDir);
+        Directory.CreateDirectory(PdfDir);
     }
 
     public string DataDir => _dataDir;
     public string ImagesDir => Path.Combine(_dataDir, "images");
     public string SignaturesDir => Path.Combine(_dataDir, "signatures");
+    public string PdfDir => Path.Combine(_dataDir, "pdf");
+
+    public string? GetPdfPath(string id)
+    {
+        if (!IsSafeId(id)) return null;
+        var path = Path.Combine(PdfDir, id + ".pdf");
+        return File.Exists(path) ? path : null;
+    }
     private string StatesPath => Path.Combine(_dataDir, "states.json");
     private string DevicesPath => Path.Combine(_dataDir, "devices.json");
+    private string GroupsPath => Path.Combine(_dataDir, "groups.json");
+    private string WorkstationsPath => Path.Combine(_dataDir, "workstations.json");
+    private string EnrollmentsPath => Path.Combine(_dataDir, "enrollments.json");
+    private string ApiKeysPath => Path.Combine(_dataDir, "apikeys.json");
     private string DocumentPath => Path.Combine(_dataDir, "document.json");
     private string ImagesIndexPath => Path.Combine(_dataDir, "images.json");
 
@@ -59,51 +74,307 @@ public class StorageService
 
     // ---------------- Devices ----------------
 
-    public List<DeviceInfo> GetDevices()
+    public List<Device> GetDevices()
     {
-        lock (_lock) return ReadOr(DevicesPath, () => new List<DeviceInfo>());
+        lock (_lock) return ReadOr(DevicesPath, () => new List<Device>());
     }
 
-    public DeviceInfo UpsertDevice(string id, string? name)
+    public Device? GetDevice(string id)
+    {
+        lock (_lock) return ReadOr(DevicesPath, () => new List<Device>()).FirstOrDefault(d => d.Id == id);
+    }
+
+    public void TouchDevice(string id)
     {
         lock (_lock)
         {
-            var list = ReadOr(DevicesPath, () => new List<DeviceInfo>());
+            var list = ReadOr(DevicesPath, () => new List<Device>());
             var dev = list.FirstOrDefault(d => d.Id == id);
-            var now = DateTime.UtcNow;
-            if (dev == null)
-            {
-                dev = new DeviceInfo
-                {
-                    Id = id,
-                    Name = string.IsNullOrWhiteSpace(name) ? id : name!.Trim(),
-                    FirstSeenUtc = now,
-                    LastSeenUtc = now
-                };
-                list.Add(dev);
-            }
-            else
-            {
-                dev.LastSeenUtc = now;
-                // Adopt a provided name only if the device has no explicit name yet.
-                if (!string.IsNullOrWhiteSpace(name) && (string.IsNullOrWhiteSpace(dev.Name) || dev.Name == dev.Id))
-                    dev.Name = name!.Trim();
-            }
+            if (dev == null) return;
+            dev.LastSeenUtc = DateTime.UtcNow;
             Write(DevicesPath, list);
-            return dev;
         }
     }
 
-    public bool RenameDevice(string id, string name)
+    public bool UpdateDevice(string id, string? name, List<string>? groupIds, string? workstationId, bool touchWorkstation)
     {
         lock (_lock)
         {
-            var list = ReadOr(DevicesPath, () => new List<DeviceInfo>());
+            var list = ReadOr(DevicesPath, () => new List<Device>());
             var dev = list.FirstOrDefault(d => d.Id == id);
             if (dev == null) return false;
-            dev.Name = string.IsNullOrWhiteSpace(name) ? dev.Id : name.Trim();
+            if (!string.IsNullOrWhiteSpace(name)) dev.Name = name!.Trim();
+            if (groupIds != null) dev.GroupIds = groupIds;
+            if (touchWorkstation) dev.WorkstationId = string.IsNullOrWhiteSpace(workstationId) ? null : workstationId;
             Write(DevicesPath, list);
             return true;
+        }
+    }
+
+    public bool SetDeviceStatus(string id, string status)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(DevicesPath, () => new List<Device>());
+            var dev = list.FirstOrDefault(d => d.Id == id);
+            if (dev == null) return false;
+            dev.Status = status;
+            Write(DevicesPath, list);
+            return true;
+        }
+    }
+
+    public bool DeleteDevice(string id)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(DevicesPath, () => new List<Device>());
+            var dev = list.FirstOrDefault(d => d.Id == id);
+            if (dev == null) return false;
+            list.Remove(dev);
+            Write(DevicesPath, list);
+            var states = ReadOr(StatesPath, () => new StateStore());
+            if (states.Devices.Remove(id)) Write(StatesPath, states);
+            return true;
+        }
+    }
+
+    /// <summary>Assign a device to a workstation identified by the external system's id.</summary>
+    public bool AssignWorkstationByExternalId(string deviceId, string? externalId)
+    {
+        lock (_lock)
+        {
+            var wsId = (string?)null;
+            if (!string.IsNullOrWhiteSpace(externalId))
+            {
+                var ws = ReadOr(WorkstationsPath, () => new List<Workstation>())
+                    .FirstOrDefault(w => w.ExternalId == externalId);
+                if (ws == null) return false;
+                wsId = ws.Id;
+            }
+            var list = ReadOr(DevicesPath, () => new List<Device>());
+            var dev = list.FirstOrDefault(d => d.Id == deviceId);
+            if (dev == null) return false;
+            dev.WorkstationId = wsId;
+            Write(DevicesPath, list);
+            return true;
+        }
+    }
+
+    // ---------------- Groups ----------------
+
+    public List<DeviceGroup> GetGroups()
+    {
+        lock (_lock) return ReadOr(GroupsPath, () => new List<DeviceGroup>());
+    }
+
+    public DeviceGroup AddGroup(string name)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(GroupsPath, () => new List<DeviceGroup>());
+            var g = new DeviceGroup { Id = "grp-" + ShortId(), Name = string.IsNullOrWhiteSpace(name) ? "Группа" : name.Trim() };
+            list.Add(g);
+            Write(GroupsPath, list);
+            return g;
+        }
+    }
+
+    public bool RenameGroup(string id, string name)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(GroupsPath, () => new List<DeviceGroup>());
+            var g = list.FirstOrDefault(x => x.Id == id);
+            if (g == null) return false;
+            g.Name = string.IsNullOrWhiteSpace(name) ? g.Id : name.Trim();
+            Write(GroupsPath, list);
+            return true;
+        }
+    }
+
+    public bool DeleteGroup(string id)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(GroupsPath, () => new List<DeviceGroup>());
+            var g = list.FirstOrDefault(x => x.Id == id);
+            if (g == null) return false;
+            list.Remove(g);
+            Write(GroupsPath, list);
+            // remove membership from devices
+            var devs = ReadOr(DevicesPath, () => new List<Device>());
+            bool changed = false;
+            foreach (var d in devs) changed |= d.GroupIds.Remove(id);
+            if (changed) Write(DevicesPath, devs);
+            return true;
+        }
+    }
+
+    // ---------------- Workstations ----------------
+
+    public List<Workstation> GetWorkstations()
+    {
+        lock (_lock) return ReadOr(WorkstationsPath, () => new List<Workstation>());
+    }
+
+    public Workstation AddWorkstation(string? externalId, string? name, string? location)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
+            var w = new Workstation
+            {
+                Id = "ws-" + ShortId(),
+                ExternalId = (externalId ?? "").Trim(),
+                Name = string.IsNullOrWhiteSpace(name) ? "Рабочее место" : name!.Trim(),
+                Location = (location ?? "").Trim()
+            };
+            list.Add(w);
+            Write(WorkstationsPath, list);
+            return w;
+        }
+    }
+
+    public bool UpdateWorkstation(string id, string? externalId, string? name, string? location)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
+            var w = list.FirstOrDefault(x => x.Id == id);
+            if (w == null) return false;
+            if (externalId != null) w.ExternalId = externalId.Trim();
+            if (!string.IsNullOrWhiteSpace(name)) w.Name = name.Trim();
+            if (location != null) w.Location = location.Trim();
+            Write(WorkstationsPath, list);
+            return true;
+        }
+    }
+
+    public bool DeleteWorkstation(string id)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
+            var w = list.FirstOrDefault(x => x.Id == id);
+            if (w == null) return false;
+            list.Remove(w);
+            Write(WorkstationsPath, list);
+            var devs = ReadOr(DevicesPath, () => new List<Device>());
+            bool changed = false;
+            foreach (var d in devs) if (d.WorkstationId == id) { d.WorkstationId = null; changed = true; }
+            if (changed) Write(DevicesPath, devs);
+            return true;
+        }
+    }
+
+    // ---------------- Enrollment ----------------
+
+    public Enrollment CreateEnrollment(string? name, string? workstationId, List<string>? groupIds, int ttlMinutes)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(EnrollmentsPath, () => new List<Enrollment>());
+            // prune used or long-expired codes to keep the file small
+            var now = DateTime.UtcNow;
+            list.RemoveAll(e => e.UsedByDeviceId != null || e.ExpiresUtc < now.AddDays(-1));
+            var e = new Enrollment
+            {
+                Code = FriendlyCode(),
+                Name = string.IsNullOrWhiteSpace(name) ? null : name!.Trim(),
+                WorkstationId = string.IsNullOrWhiteSpace(workstationId) ? null : workstationId,
+                GroupIds = groupIds ?? new List<string>(),
+                CreatedUtc = now,
+                ExpiresUtc = now.AddMinutes(ttlMinutes > 0 ? ttlMinutes : 60)
+            };
+            list.Add(e);
+            Write(EnrollmentsPath, list);
+            return e;
+        }
+    }
+
+    /// <summary>Redeem a code: create a device and return it plus the one-time token (id.secret).</summary>
+    public (Device device, string token)? RedeemEnrollment(string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return null;
+        code = code.Trim().ToUpperInvariant();
+        lock (_lock)
+        {
+            var enrolls = ReadOr(EnrollmentsPath, () => new List<Enrollment>());
+            var e = enrolls.FirstOrDefault(x => x.Code == code);
+            if (e == null || e.UsedByDeviceId != null || e.ExpiresUtc < DateTime.UtcNow) return null;
+
+            var devices = ReadOr(DevicesPath, () => new List<Device>());
+            var id = "dev-" + ShortId();
+            var secret = RandomToken(24);
+            var now = DateTime.UtcNow;
+            var dev = new Device
+            {
+                Id = id,
+                Name = string.IsNullOrWhiteSpace(e.Name) ? "Планшет " + id[^4..] : e.Name!,
+                SecretHash = Sha256Hex(secret),
+                GroupIds = e.GroupIds ?? new List<string>(),
+                WorkstationId = e.WorkstationId,
+                EnrolledUtc = now,
+                LastSeenUtc = now,
+                Status = "active"
+            };
+            devices.Add(dev);
+            Write(DevicesPath, devices);
+
+            e.UsedByDeviceId = id;
+            Write(EnrollmentsPath, enrolls);
+
+            return (dev, id + "." + secret);
+        }
+    }
+
+    // ---------------- API keys ----------------
+
+    public List<ApiKey> GetApiKeys()
+    {
+        lock (_lock) return ReadOr(ApiKeysPath, () => new List<ApiKey>());
+    }
+
+    public (ApiKey key, string plaintext) CreateApiKey(string? label)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(ApiKeysPath, () => new List<ApiKey>());
+            var plaintext = "sk_" + RandomToken(30);
+            var k = new ApiKey
+            {
+                Id = "key-" + ShortId(),
+                KeyHash = Sha256Hex(plaintext),
+                Label = string.IsNullOrWhiteSpace(label) ? "API key" : label!.Trim(),
+                CreatedUtc = DateTime.UtcNow
+            };
+            list.Add(k);
+            Write(ApiKeysPath, list);
+            return (k, plaintext);
+        }
+    }
+
+    public bool DeleteApiKey(string id)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(ApiKeysPath, () => new List<ApiKey>());
+            var k = list.FirstOrDefault(x => x.Id == id);
+            if (k == null) return false;
+            list.Remove(k);
+            Write(ApiKeysPath, list);
+            return true;
+        }
+    }
+
+    public bool ValidateApiKey(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key)) return false;
+        var hash = Sha256Hex(key);
+        lock (_lock)
+        {
+            return ReadOr(ApiKeysPath, () => new List<ApiKey>()).Any(k => k.KeyHash == hash);
         }
     }
 
@@ -150,7 +421,6 @@ public class StorageService
             var path = Path.Combine(ImagesDir, img.FileName);
             if (File.Exists(path)) File.Delete(path);
 
-            // Drop the image from every playlist that references it.
             var states = ReadOr(StatesPath, () => new StateStore());
             bool changed = states.Default.PlaylistImageIds.Remove(id);
             foreach (var s in states.Devices.Values)
@@ -174,7 +444,7 @@ public class StorageService
 
     // ---------------- Signatures ----------------
 
-    public SignatureRecord AddSignature(SignatureSubmission sub, string documentTitle, string? deviceName, byte[] pngBytes)
+    public SignatureRecord AddSignature(SignatureSubmission sub, string documentTitle, Device? device, Workstation? workstation, byte[] pngBytes)
     {
         lock (_lock)
         {
@@ -186,8 +456,10 @@ public class StorageService
                 Id = id,
                 CreatedUtc = DateTime.UtcNow,
                 DocumentTitle = documentTitle,
-                DeviceId = sub.DeviceId,
-                DeviceName = deviceName,
+                DeviceId = device?.Id,
+                DeviceName = device?.Name,
+                WorkstationId = workstation?.Id,
+                WorkstationName = workstation?.Name,
                 Items = sub.Items
             };
             Write(Path.Combine(dir, "meta.json"), rec);
@@ -240,6 +512,28 @@ public class StorageService
 
     public static bool IsSafeId(string id) =>
         !string.IsNullOrEmpty(id) && id.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.');
+
+    public static string Sha256Hex(string s) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s)));
+
+    private static string RandomToken(int bytes)
+    {
+        var buf = RandomNumberGenerator.GetBytes(bytes);
+        return Convert.ToBase64String(buf).Replace("+", "-").Replace("/", "_").TrimEnd('=');
+    }
+
+    private static string ShortId() =>
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(5)).ToLowerInvariant();
+
+    /// <summary>Human-friendly enrollment code, e.g. "7QF3-K92X" (no ambiguous chars).</summary>
+    private static string FriendlyCode()
+    {
+        const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
+        var chars = new char[8];
+        var rnd = RandomNumberGenerator.GetBytes(8);
+        for (int i = 0; i < 8; i++) chars[i] = alphabet[rnd[i] % alphabet.Length];
+        return new string(chars, 0, 4) + "-" + new string(chars, 4, 4);
+    }
 
     private T ReadOr<T>(string path, Func<T> fallback)
     {

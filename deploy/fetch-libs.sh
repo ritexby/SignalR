@@ -9,8 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIBDIR="$SCRIPT_DIR/../src/SignatureKiosk/wwwroot/lib"
 mkdir -p "$LIBDIR"
 
-SIGNALR_VER="${SIGNALR_VER:-8.0.29}"
-SIGPAD_VER="${SIGPAD_VER:-4.2.0}"
+SIGNALR_VER="${SIGNALR_VER:-10.0.11}"
+SIGPAD_VER="${SIGPAD_VER:-5.1.4}"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

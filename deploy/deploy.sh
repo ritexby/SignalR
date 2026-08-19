@@ -24,13 +24,27 @@ PROJECT="$REPO_ROOT/src/SignatureKiosk/SignatureKiosk.csproj"
 
 if [ "$(id -u)" -ne 0 ]; then echo "Please run as root (sudo)." >&2; exit 1; fi
 
-echo "==> [1/5] Ensuring .NET SDK 8 is installed"
-if ! command -v dotnet >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y dotnet-sdk-8.0
+echo "==> [1/5] Ensuring .NET SDK 10 is installed"
+if command -v dotnet >/dev/null 2>&1 && dotnet --list-sdks 2>/dev/null | grep -q '^10\.'; then
+    echo "    .NET SDK 10 already present: $(dotnet --version)"
 else
-    echo "    dotnet already present: $(dotnet --version)"
+    echo "    Installing .NET SDK 10..."
+    INSTALLED=0
+    # Preferred: Ubuntu 24.04 ships dotnet-sdk-10.0 in the archive.
+    if apt-get update && apt-get install -y dotnet-sdk-10.0; then
+        command -v dotnet >/dev/null 2>&1 && dotnet --list-sdks 2>/dev/null | grep -q '^10\.' && INSTALLED=1
+    fi
+    # Fallback (older Ubuntu / package missing): official installer script.
+    if [ "$INSTALLED" -ne 1 ]; then
+        echo "    apt package unavailable; using the official dotnet-install script"
+        curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+        bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/local/dotnet
+        ln -sf /usr/local/dotnet/dotnet /usr/local/bin/dotnet
+    fi
 fi
+export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+command -v dotnet >/dev/null 2>&1 || { echo "ERROR: .NET SDK install failed." >&2; exit 1; }
+echo "    using dotnet $(dotnet --version)"
 
 echo "==> [2/5] Publishing self-contained build to $APP_DIR"
 echo "    Fetching browser libraries (signalr, signature_pad)"

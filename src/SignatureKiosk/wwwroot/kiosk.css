@@ -107,3 +107,21 @@ html, body {
   background: rgba(0,0,0,.45); color: #cbd5e1; font-size: 12px;
   padding: 5px 10px; border-radius: 8px; pointer-events: none;
 }
+
+/* ---------- Enrollment (activation) ---------- */
+#enroll { background: var(--doc-bg); display: flex; align-items: center; justify-content: center; }
+.enroll-box { width: min(440px, 90vw); background: #fff; border: 1px solid #e5e7eb; border-radius: 20px; padding: clamp(24px, 5vw, 40px); box-shadow: 0 12px 40px rgba(0,0,0,.08); display: flex; flex-direction: column; gap: 14px; text-align: center; }
+.enroll-badge { font-size: .8rem; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+.enroll-box h1 { margin: 0; font-size: clamp(1.5rem, 4vw, 2rem); color: var(--text); }
+.enroll-sub { color: var(--muted); font-size: 1rem; line-height: 1.5; margin: 0 0 6px; }
+#enrollCode { font-size: clamp(1.6rem, 6vw, 2.2rem); text-align: center; letter-spacing: .12em; font-weight: 700; text-transform: uppercase; padding: 14px; border: 2px solid #cbd2dc; border-radius: 14px; color: var(--text); font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace; }
+#enrollCode:focus { outline: none; border-color: var(--accent); }
+.enroll-box .btn { padding: 16px; font-size: 1.15rem; border-radius: 14px; border: none; cursor: pointer; font-weight: 600; }
+.enroll-msg { color: var(--danger); font-size: .95rem; min-height: 1.2em; }
+
+/* ---------- Identify overlay ---------- */
+.identify { position: absolute; inset: 0; z-index: 60; background: rgba(37,99,235,.97); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; animation: idflash 1s ease-in-out infinite alternate; }
+@keyframes idflash { from { background: rgba(37,99,235,.97);} to { background: rgba(29,78,216,.97);} }
+@media (prefers-reduced-motion: reduce){ .identify { animation: none; } }
+.identify-code { font-size: min(46vw, 46vh); font-weight: 800; line-height: 1; letter-spacing: .02em; }
+.identify-name { font-size: clamp(1.2rem, 4vw, 2rem); opacity: .9; }

@@ -1,465 +1,466 @@
-/* Admin panel: manage images/playlist, the signing document, view signatures,
-   and target a specific tablet or all tablets. */
+/* Admin panel: slides, signing document, signatures, and fleet management —
+   devices (enrollment codes, revoke, identify), groups, workstations, API keys. */
 (function () {
   "use strict";
 
   var state = {
     target: "all",
-    images: [],
-    playlist: [],   // ordered image ids selected for the current target
-    interval: 6,
+    images: [], playlist: [], interval: 6,
     doc: null,
-    devices: []
+    devices: [], groups: [], workstations: [], apikeys: []
   };
 
   var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 
-  // ---------------- API helper ----------------
+  // ---------------- API ----------------
   function api(path, opts) {
-    opts = opts || {};
-    opts.credentials = "same-origin";
+    opts = opts || {}; opts.credentials = "same-origin";
     return fetch("/api/admin" + path, opts).then(function (r) {
       if (r.status === 401) { showLogin(); throw new Error("unauthorized"); }
       return r;
     });
   }
   function apiJson(path, opts) { return api(path, opts).then(function (r) { return r.json(); }); }
+  function apiSend(path, method, body) {
+    return api(path, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  }
 
   // ---------------- Auth ----------------
   function showLogin() { $("login").classList.remove("hidden"); $("app").classList.add("hidden"); }
   function showApp() { $("login").classList.add("hidden"); $("app").classList.remove("hidden"); }
 
   function checkAuth() {
-    fetch("/api/admin/me", { credentials: "same-origin" })
-      .then(function (r) { return r.json(); })
-      .then(function (j) { if (j.authenticated) { showApp(); init(); } else { showLogin(); } })
+    fetch("/api/admin/me", { credentials: "same-origin" }).then(function (r) { return r.json(); })
+      .then(function (j) { if (j.authenticated) { showApp(); init(); } else showLogin(); })
       .catch(showLogin);
   }
-
   $("loginForm").addEventListener("submit", function (e) {
-    e.preventDefault();
-    $("loginError").textContent = "";
+    e.preventDefault(); $("loginError").textContent = "";
     fetch("/api/admin/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
+      method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
       body: JSON.stringify({ password: $("password").value })
     }).then(function (r) {
       if (r.ok) { $("password").value = ""; showApp(); init(); }
-      else { $("loginError").textContent = "Неверный пароль"; }
+      else $("loginError").textContent = "Неверный пароль";
     }).catch(function () { $("loginError").textContent = "Ошибка соединения"; });
   });
-
-  $("logout").addEventListener("click", function () {
-    api("/logout", { method: "POST" }).finally(showLogin);
-  });
+  $("logout").addEventListener("click", function () { api("/logout", { method: "POST" }).finally(showLogin); });
 
   // ---------------- Tabs ----------------
-  Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
+  document.querySelectorAll(".tab").forEach(function (tab) {
     tab.addEventListener("click", function () {
       document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("active"); });
       tab.classList.add("active");
       var name = tab.getAttribute("data-tab");
-      document.querySelectorAll(".panel").forEach(function (p) {
-        p.classList.toggle("hidden", p.getAttribute("data-panel") !== name);
-      });
+      document.querySelectorAll(".panel").forEach(function (p) { p.classList.toggle("hidden", p.getAttribute("data-panel") !== name); });
       if (name === "signatures") loadSignatures();
       if (name === "devices") loadDevices();
+      if (name === "groups") loadGroups();
+      if (name === "workstations") loadWorkstations();
+      if (name === "apikeys") loadKeys();
     });
   });
+
+  // ---------------- Modal ----------------
+  function openModal(node) { var c = $("modalContent"); c.innerHTML = ""; c.appendChild(node); $("modal").classList.remove("hidden"); }
+  function closeModal() { $("modal").classList.add("hidden"); }
+  $("modalClose").addEventListener("click", closeModal);
+  $("modal").addEventListener("click", function (e) { if (e.target === $("modal")) closeModal(); });
 
   // ---------------- Target selector ----------------
-  $("targetSelect").addEventListener("change", function () {
-    state.target = $("targetSelect").value;
-    loadPlaylist();
-  });
+  $("targetSelect").addEventListener("change", function () { state.target = $("targetSelect").value; loadPlaylist(); });
 
   function renderTargetOptions() {
-    var sel = $("targetSelect");
-    var current = state.target;
-    sel.innerHTML = "";
-    var optAll = document.createElement("option");
-    optAll.value = "all"; optAll.textContent = "Все планшеты";
-    sel.appendChild(optAll);
-    state.devices.forEach(function (d) {
-      var o = document.createElement("option");
-      o.value = d.id;
-      o.textContent = (d.online ? "🟢 " : "⚪ ") + d.name;
-      sel.appendChild(o);
-    });
-    // keep selection if it still exists
-    var exists = current === "all" || state.devices.some(function (d) { return d.id === current; });
-    sel.value = exists ? current : "all";
-    state.target = sel.value;
+    var sel = $("targetSelect"); var cur = state.target; sel.innerHTML = "";
+    sel.appendChild(new Option("Все планшеты", "all"));
+    if (state.groups.length) {
+      var og = document.createElement("optgroup"); og.label = "Группы";
+      state.groups.forEach(function (g) { og.appendChild(new Option(g.name, "group:" + g.id)); });
+      sel.appendChild(og);
+    }
+    if (state.devices.length) {
+      var od = document.createElement("optgroup"); od.label = "Планшеты";
+      state.devices.forEach(function (d) { od.appendChild(new Option((d.online ? "🟢 " : "⚪ ") + d.name, "device:" + d.id)); });
+      sel.appendChild(od);
+    }
+    var exists = cur === "all" || state.groups.some(function (g) { return "group:" + g.id === cur; })
+      || state.devices.some(function (d) { return "device:" + d.id === cur; });
+    sel.value = exists ? cur : "all"; state.target = sel.value;
   }
 
   // ---------------- Images / slides ----------------
-  function loadImages() {
-    return apiJson("/images").then(function (imgs) { state.images = imgs; });
-  }
-
+  function loadImages() { return apiJson("/images").then(function (imgs) { state.images = imgs; }); }
   function loadPlaylist() {
     return apiJson("/playlist?target=" + encodeURIComponent(state.target)).then(function (p) {
-      state.playlist = p.imageIds || [];
-      state.interval = p.intervalSec || 6;
-      $("intervalInput").value = state.interval;
-      renderImages();
+      state.playlist = p.imageIds || []; state.interval = p.intervalSec || 6;
+      $("intervalInput").value = state.interval; renderImages();
     });
   }
-
   function renderImages() {
-    var grid = $("imageGrid");
-    grid.innerHTML = "";
-    if (!state.images.length) {
-      grid.innerHTML = '<div class="empty-note">Пока нет загруженных картинок. Нажмите «Загрузить картинки».</div>';
-      return;
-    }
+    var grid = $("imageGrid"); grid.innerHTML = "";
+    if (!state.images.length) { grid.innerHTML = '<div class="empty-note">Пока нет картинок. Нажмите «Загрузить картинки».</div>'; return; }
     state.images.forEach(function (img) {
       var pos = state.playlist.indexOf(img.id);
-      var card = document.createElement("div");
-      card.className = "card" + (pos >= 0 ? " selected" : "");
-
-      var order = document.createElement("div");
-      order.className = "order";
-      order.textContent = pos >= 0 ? (pos + 1) : "";
-      card.appendChild(order);
-
-      var del = document.createElement("button");
-      del.className = "del"; del.textContent = "×"; del.title = "Удалить";
+      var card = el("div", "card" + (pos >= 0 ? " selected" : ""));
+      var order = el("div", "order", pos >= 0 ? (pos + 1) : ""); card.appendChild(order);
+      var del = el("button", "del", "×"); del.title = "Удалить";
       del.addEventListener("click", function (e) {
         e.stopPropagation();
         if (!confirm("Удалить эту картинку?")) return;
         api("/images/" + img.id, { method: "DELETE" }).then(function () {
-          var i = state.playlist.indexOf(img.id);
-          if (i >= 0) state.playlist.splice(i, 1);
+          var i = state.playlist.indexOf(img.id); if (i >= 0) state.playlist.splice(i, 1);
           return loadImages();
         }).then(renderImages);
       });
       card.appendChild(del);
-
-      var im = document.createElement("img");
-      im.src = img.url; im.alt = img.originalName || "";
-      card.appendChild(im);
-
-      var name = document.createElement("div");
-      name.className = "name"; name.textContent = img.originalName || img.id;
-      card.appendChild(name);
-
+      var im = el("img"); im.src = img.url; im.alt = img.originalName || ""; card.appendChild(im);
+      card.appendChild(el("div", "name", img.originalName || img.id));
       card.addEventListener("click", function () {
         var i = state.playlist.indexOf(img.id);
-        if (i >= 0) state.playlist.splice(i, 1);
-        else state.playlist.push(img.id);
+        if (i >= 0) state.playlist.splice(i, 1); else state.playlist.push(img.id);
         renderImages();
       });
-
       grid.appendChild(card);
     });
   }
-
   $("imageUpload").addEventListener("change", function () {
-    var input = $("imageUpload");
-    if (!input.files.length) return;
+    var input = $("imageUpload"); if (!input.files.length) return;
     var fd = new FormData();
     Array.prototype.forEach.call(input.files, function (f) { fd.append("files", f); });
-    api("/images", { method: "POST", body: fd })
-      .then(loadImages).then(renderImages)
+    api("/images", { method: "POST", body: fd }).then(loadImages).then(renderImages)
       .then(function () { input.value = ""; toast("Картинки загружены"); });
   });
-
   $("saveSlides").addEventListener("click", function () {
     var interval = parseInt($("intervalInput").value, 10) || 6;
-    api("/playlist", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: state.target, imageIds: state.playlist, intervalSec: interval })
-    }).then(function () { toast("Сохранено и отправлено на планшет"); });
+    apiSend("/playlist", "PUT", { target: state.target, imageIds: state.playlist, intervalSec: interval })
+      .then(function () { toast("Сохранено и отправлено (" + targetLabel() + ")"); });
   });
 
-  // ---------------- Document editor ----------------
-  function loadDoc() {
-    return apiJson("/document").then(function (d) { state.doc = d; renderDoc(); });
+  function targetLabel() {
+    if (state.target === "all") return "все планшеты";
+    if (state.target.indexOf("group:") === 0) { var g = state.groups.find(function (x) { return "group:" + x.id === state.target; }); return "группа " + (g ? g.name : ""); }
+    var d = state.devices.find(function (x) { return "device:" + x.id === state.target; }); return d ? d.name : "планшет";
   }
 
+  // ---------------- Document editor ----------------
+  function loadDoc() { return apiJson("/document").then(function (d) { state.doc = d; renderDoc(); }); }
   function renderDoc() {
-    var d = state.doc;
-    $("docTitle").value = d.title || "";
-    $("signPrompt").value = d.signPrompt || "";
-    $("thankYou").value = d.thankYouText || "";
+    $("docTitle").value = state.doc.title || ""; $("signPrompt").value = state.doc.signPrompt || ""; $("thankYou").value = state.doc.thankYouText || "";
     renderPages();
   }
-
   function renderPages() {
-    var wrap = $("pagesEditor");
-    wrap.innerHTML = "";
+    var wrap = $("pagesEditor"); wrap.innerHTML = "";
     (state.doc.pages || []).forEach(function (page, pi) {
-      var card = document.createElement("div");
-      card.className = "page-card";
-
-      var title = document.createElement("div");
-      title.className = "page-title";
-      var strong = document.createElement("strong");
-      strong.textContent = "Страница " + (pi + 1);
-      title.appendChild(strong);
-      var delPage = document.createElement("button");
-      delPage.className = "btn btn-danger"; delPage.textContent = "Удалить страницу";
-      delPage.addEventListener("click", function () {
-        collectDoc();
-        state.doc.pages.splice(pi, 1);
-        renderPages();
-      });
-      title.appendChild(delPage);
-      card.appendChild(title);
-
-      var head = fieldInput("Заголовок", page.heading || "", "heading");
-      card.appendChild(head);
-
-      var body = document.createElement("label");
-      body.className = "field";
-      body.textContent = "Текст";
-      var ta = document.createElement("textarea");
-      ta.rows = 4; ta.value = page.body || ""; ta.setAttribute("data-role", "body");
-      body.appendChild(ta);
-      card.appendChild(body);
-
-      var cbTitle = document.createElement("div");
-      cbTitle.className = "field"; cbTitle.textContent = "Чекбоксы";
-      card.appendChild(cbTitle);
-
-      var cbList = document.createElement("div");
-      cbList.className = "cb-list"; cbList.setAttribute("data-role", "cblist");
-      (page.checkboxes || []).forEach(function (cb) { cbList.appendChild(checkboxRow(cb)); });
-      card.appendChild(cbList);
-
-      var addCb = document.createElement("button");
-      addCb.className = "btn btn-ghost"; addCb.textContent = "+ Чекбокс";
-      addCb.addEventListener("click", function () {
-        cbList.appendChild(checkboxRow({ label: "", required: true }));
-      });
+      var card = el("div", "page-card");
+      var title = el("div", "page-title");
+      title.appendChild(el("strong", null, "Страница " + (pi + 1)));
+      var delPage = el("button", "btn btn-danger", "Удалить страницу");
+      delPage.addEventListener("click", function () { collectDoc(); state.doc.pages.splice(pi, 1); renderPages(); });
+      title.appendChild(delPage); card.appendChild(title);
+      card.appendChild(fieldInput("Заголовок", page.heading || "", "heading"));
+      var body = el("label", "field"); body.textContent = "Текст";
+      var ta = el("textarea"); ta.rows = 4; ta.value = page.body || ""; ta.setAttribute("data-role", "body"); body.appendChild(ta); card.appendChild(body);
+      card.appendChild(el("div", "field", "Чекбоксы"));
+      var cbList = el("div", "cb-list"); cbList.setAttribute("data-role", "cblist");
+      (page.checkboxes || []).forEach(function (cb) { cbList.appendChild(checkboxRow(cb)); }); card.appendChild(cbList);
+      var addCb = el("button", "btn btn-ghost", "+ Чекбокс");
+      addCb.addEventListener("click", function () { cbList.appendChild(checkboxRow({ label: "", required: true })); });
       card.appendChild(addCb);
-
       wrap.appendChild(card);
     });
   }
-
   function fieldInput(labelText, value, role) {
-    var label = document.createElement("label");
-    label.className = "field"; label.textContent = labelText;
-    var input = document.createElement("input");
-    input.type = "text"; input.value = value; input.setAttribute("data-role", role);
-    label.appendChild(input);
-    return label;
+    var label = el("label", "field", labelText); var input = el("input"); input.type = "text"; input.value = value; input.setAttribute("data-role", role); label.appendChild(input); return label;
   }
-
   function checkboxRow(cb) {
-    var row = document.createElement("div");
-    row.className = "cb-row"; row.setAttribute("data-role", "cbrow");
-    var label = document.createElement("input");
-    label.type = "text"; label.placeholder = "Текст пункта"; label.value = cb.label || "";
-    label.setAttribute("data-role", "cblabel");
-    row.appendChild(label);
-    var reqLabel = document.createElement("label");
-    var req = document.createElement("input");
-    req.type = "checkbox"; req.checked = cb.required !== false; req.setAttribute("data-role", "cbreq");
-    reqLabel.appendChild(req);
-    reqLabel.appendChild(document.createTextNode(" обязательный"));
-    row.appendChild(reqLabel);
-    var del = document.createElement("button");
-    del.className = "btn btn-danger"; del.textContent = "×";
-    del.addEventListener("click", function () { row.remove(); });
-    row.appendChild(del);
+    var row = el("div", "cb-row"); row.setAttribute("data-role", "cbrow");
+    var label = el("input"); label.type = "text"; label.placeholder = "Текст пункта"; label.value = cb.label || ""; label.setAttribute("data-role", "cblabel"); row.appendChild(label);
+    var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = cb.required !== false; req.setAttribute("data-role", "cbreq");
+    reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательный")); row.appendChild(reqLabel);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { row.remove(); }); row.appendChild(del);
     return row;
   }
-
   function collectDoc() {
-    state.doc.title = $("docTitle").value;
-    state.doc.signPrompt = $("signPrompt").value;
-    state.doc.thankYouText = $("thankYou").value;
+    state.doc.title = $("docTitle").value; state.doc.signPrompt = $("signPrompt").value; state.doc.thankYouText = $("thankYou").value;
     var pages = [];
     document.querySelectorAll("#pagesEditor .page-card").forEach(function (card) {
       var heading = card.querySelector('[data-role="heading"]').value;
       var body = card.querySelector('[data-role="body"]').value;
       var checkboxes = [];
-      card.querySelectorAll('[data-role="cbrow"]').forEach(function (row) {
-        var label = row.querySelector('[data-role="cblabel"]').value;
-        var required = row.querySelector('[data-role="cbreq"]').checked;
-        if (label.trim()) checkboxes.push({ label: label, required: required });
+      card.querySelectorAll('[data-role="cbrow"]').forEach(function (r) {
+        var lab = r.querySelector('[data-role="cblabel"]').value;
+        var req = r.querySelector('[data-role="cbreq"]').checked;
+        if (lab.trim()) checkboxes.push({ label: lab, required: req });
       });
       pages.push({ heading: heading, body: body, checkboxes: checkboxes });
     });
     state.doc.pages = pages;
   }
-
-  $("addPage").addEventListener("click", function () {
-    collectDoc();
-    state.doc.pages.push({ heading: "Новая страница", body: "", checkboxes: [] });
-    renderPages();
-  });
-
-  $("saveDocument").addEventListener("click", function () {
-    collectDoc();
-    api("/document", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(state.doc)
-    }).then(function () { toast("Документ сохранён"); });
-  });
-
+  $("addPage").addEventListener("click", function () { collectDoc(); state.doc.pages.push({ heading: "Новая страница", body: "", checkboxes: [] }); renderPages(); });
+  $("saveDocument").addEventListener("click", function () { collectDoc(); apiSend("/document", "PUT", state.doc).then(function () { toast("Документ сохранён"); }); });
   $("showDocument").addEventListener("click", function () {
     collectDoc();
-    api("/document", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(state.doc)
-    }).then(function () {
-      return api("/show-document", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target: state.target })
-      });
-    }).then(function () { toast("Документ показан на планшете"); });
+    apiSend("/document", "PUT", state.doc)
+      .then(function () { return apiSend("/show-document", "POST", { target: state.target }); })
+      .then(function () { toast("Документ показан (" + targetLabel() + ")"); });
   });
-
   $("showSlides").addEventListener("click", function () {
-    api("/show-slides", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: state.target })
-    }).then(function () { toast("Реклама возвращена"); });
+    apiSend("/show-slides", "POST", { target: state.target }).then(function () { toast("Реклама возвращена (" + targetLabel() + ")"); });
   });
 
   // ---------------- Signatures ----------------
   function loadSignatures() {
     apiJson("/signatures").then(function (list) {
-      var wrap = $("signaturesList");
-      wrap.innerHTML = "";
+      var wrap = $("signaturesList"); wrap.innerHTML = "";
       if (!list.length) { wrap.innerHTML = '<div class="empty-note">Пока нет подписей.</div>'; return; }
       list.forEach(function (s) {
-        var item = document.createElement("div");
-        item.className = "sig-item";
-        var when = document.createElement("div"); when.className = "when";
-        when.textContent = new Date(s.createdUtc).toLocaleString("ru-RU");
-        var meta = document.createElement("div"); meta.className = "meta";
-        meta.textContent = (s.deviceName || s.deviceId || "—") + " · " + (s.documentTitle || "");
-        var col = document.createElement("div");
-        col.appendChild(when); col.appendChild(meta);
+        var item = el("div", "sig-item");
+        var col = el("div");
+        col.appendChild(el("div", "when", new Date(s.createdUtc).toLocaleString("ru-RU")));
+        var where = (s.workstationName ? s.workstationName + " · " : "") + (s.deviceName || s.deviceId || "—");
+        col.appendChild(el("div", "meta", where + " · " + (s.documentTitle || "")));
         item.appendChild(col);
-        var badge = document.createElement("div"); badge.className = "badge";
-        badge.textContent = "отмечено " + s.checkedCount + " из " + s.totalCount;
-        item.appendChild(badge);
+        item.appendChild(el("div", "badge", "отмечено " + s.checkedCount + " из " + s.totalCount));
         item.addEventListener("click", function () { openSignature(s.id); });
         wrap.appendChild(item);
       });
     });
   }
-
   function openSignature(id) {
     apiJson("/signatures/" + id).then(function (rec) {
-      var c = $("modalContent");
-      c.innerHTML = "";
-      var h = document.createElement("h3"); h.textContent = rec.documentTitle || "Подпись"; c.appendChild(h);
-      var meta = document.createElement("div"); meta.className = "sig-meta";
-      meta.textContent = new Date(rec.createdUtc).toLocaleString("ru-RU") +
-        " · " + (rec.deviceName || rec.deviceId || "—");
-      c.appendChild(meta);
-
-      var list = document.createElement("div"); list.className = "item-list";
+      var c = el("div");
+      c.appendChild(el("h3", null, rec.documentTitle || "Подпись"));
+      var where = (rec.workstationName ? rec.workstationName + " · " : "") + (rec.deviceName || rec.deviceId || "—");
+      c.appendChild(el("div", "sig-meta", new Date(rec.createdUtc).toLocaleString("ru-RU") + " · " + where));
+      var list = el("div", "item-list");
       (rec.items || []).forEach(function (it) {
-        var row = document.createElement("div");
-        row.className = "item " + (it.checked ? "on" : "off");
-        var tick = document.createElement("span"); tick.className = "tick";
-        tick.textContent = it.checked ? "✓" : "✕";
-        row.appendChild(tick);
-        var label = document.createElement("span"); label.textContent = it.label;
-        row.appendChild(label);
-        list.appendChild(row);
+        var row = el("div", "item " + (it.checked ? "on" : "off"));
+        row.appendChild(el("span", "tick", it.checked ? "✓" : "✕"));
+        row.appendChild(el("span", null, it.label)); list.appendChild(row);
       });
-      if (!(rec.items || []).length) {
-        var none = document.createElement("div"); none.className = "empty-note"; none.textContent = "Без чекбоксов";
-        list.appendChild(none);
-      }
+      if (!(rec.items || []).length) list.appendChild(el("div", "empty-note", "Без чекбоксов"));
       c.appendChild(list);
-
-      var img = document.createElement("img");
-      img.className = "sig-image";
-      img.src = "/api/admin/signatures/" + id + "/image";
-      img.alt = "Подпись";
-      c.appendChild(img);
-
-      $("modal").classList.remove("hidden");
+      var img = el("img", "sig-image"); img.src = "/api/admin/signatures/" + id + "/image"; img.alt = "Подпись"; c.appendChild(img);
+      var dl = document.createElement("a");
+      dl.className = "btn btn-ghost"; dl.textContent = "📄 Скачать PDF";
+      dl.href = "/api/admin/signatures/" + id + "/pdf"; dl.target = "_blank";
+      dl.style.cssText = "display:inline-block;margin-top:12px;text-decoration:none;";
+      c.appendChild(dl);
+      openModal(c);
     });
   }
-
-  $("modalClose").addEventListener("click", function () { $("modal").classList.add("hidden"); });
-  $("modal").addEventListener("click", function (e) { if (e.target === $("modal")) $("modal").classList.add("hidden"); });
   $("reloadSignatures").addEventListener("click", loadSignatures);
 
   // ---------------- Devices ----------------
   function loadDevices() {
-    return apiJson("/devices").then(function (list) {
-      state.devices = list;
-      renderTargetOptions();
-      renderDevices();
-    });
+    return apiJson("/devices").then(function (list) { state.devices = list; renderDevices(); renderTargetOptions(); });
   }
-
   function renderDevices() {
-    var wrap = $("devicesList");
-    wrap.innerHTML = "";
-    if (!state.devices.length) {
-      wrap.innerHTML = '<div class="empty-note">Планшеты ещё не подключались.</div>';
-      return;
-    }
+    var wrap = $("devicesList"); wrap.innerHTML = "";
+    if (!state.devices.length) { wrap.innerHTML = '<div class="empty-note">Планшетов пока нет. Нажмите «Добавить планшет (код)».</div>'; return; }
     state.devices.forEach(function (d) {
-      var item = document.createElement("div");
-      item.className = "dev-item";
-      var dot = document.createElement("div"); dot.className = "dot" + (d.online ? " online" : "");
-      item.appendChild(dot);
-      var input = document.createElement("input");
-      input.className = "grow"; input.value = d.name;
-      item.appendChild(input);
-      var idSpan = document.createElement("span"); idSpan.className = "id"; idSpan.textContent = d.id;
-      item.appendChild(idSpan);
-      var save = document.createElement("button");
-      save.className = "btn btn-ghost"; save.textContent = "Переименовать";
-      save.addEventListener("click", function () {
-        api("/devices/" + d.id, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: input.value })
-        }).then(loadDevices).then(function () { toast("Сохранено"); });
+      var item = el("div", "dev-item" + (d.status === "revoked" ? " revoked" : ""));
+      item.appendChild(el("div", "dot" + (d.online ? " online" : "")));
+      var info = el("div", "dev-info");
+      var nameRow = el("div", "dev-name");
+      nameRow.appendChild(el("strong", null, d.name));
+      if (d.status === "revoked") nameRow.appendChild(el("span", "chip chip-danger", "заблокирован"));
+      else nameRow.appendChild(el("span", "chip chip-ok", d.online ? "онлайн" : "офлайн"));
+      info.appendChild(nameRow);
+      var meta = [];
+      if (d.workstationName) meta.push("📍 " + d.workstationName);
+      if (d.groups && d.groups.length) meta.push("👥 " + d.groups.join(", "));
+      meta.push("посл. связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "—"));
+      info.appendChild(el("div", "dev-meta", meta.join("   ·   ")));
+      item.appendChild(info);
+
+      var actions = el("div", "dev-actions");
+      var bId = el("button", "btn btn-ghost btn-sm", "Опознать");
+      bId.title = "Показать номер на экране планшета";
+      bId.addEventListener("click", function () {
+        apiSend("/devices/" + d.id + "/identify", "POST", {}).then(function (r) { return r.json(); })
+          .then(function (j) { toast("На планшете «" + d.name + "» показан номер " + j.code); });
       });
-      item.appendChild(save);
+      actions.appendChild(bId);
+      var bEdit = el("button", "btn btn-ghost btn-sm", "Изменить"); bEdit.addEventListener("click", function () { editDevice(d); }); actions.appendChild(bEdit);
+      if (d.status === "revoked") {
+        var bUn = el("button", "btn btn-ghost btn-sm", "Разблокировать");
+        bUn.addEventListener("click", function () { apiSend("/devices/" + d.id + "/unrevoke", "POST", {}).then(loadDevices).then(function () { toast("Разблокирован"); }); });
+        actions.appendChild(bUn);
+      } else {
+        var bRev = el("button", "btn btn-danger btn-sm", "Заблокировать");
+        bRev.addEventListener("click", function () { if (confirm("Заблокировать планшет «" + d.name + "»? Он потеряет доступ.")) apiSend("/devices/" + d.id + "/revoke", "POST", {}).then(loadDevices).then(function () { toast("Заблокирован"); }); });
+        actions.appendChild(bRev);
+      }
+      var bDel = el("button", "btn btn-danger btn-sm", "Удалить");
+      bDel.addEventListener("click", function () { if (confirm("Удалить планшет «" + d.name + "» полностью?")) api("/devices/" + d.id, { method: "DELETE" }).then(loadDevices).then(function () { toast("Удалён"); }); });
+      actions.appendChild(bDel);
+      item.appendChild(actions);
       wrap.appendChild(item);
     });
   }
 
-  $("reloadDevices").addEventListener("click", loadDevices);
+  $("addDevice").addEventListener("click", function () {
+    var form = el("div");
+    form.appendChild(el("h3", null, "Новый планшет"));
+    form.appendChild(el("p", "sig-meta", "Заполните и получите код активации. Введите его на планшете один раз."));
+    var name = labeledInput("Имя планшета (напр. Ресепшн 1)", "");
+    form.appendChild(name.wrap);
+    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "— не привязывать —" }].concat(state.workstations.map(function (w) { return { v: w.id, t: w.name + (w.externalId ? " (" + w.externalId + ")" : "") }; })));
+    form.appendChild(wsSel.wrap);
+    var groupsBox = el("div", "field"); groupsBox.appendChild(document.createTextNode("Группы"));
+    var gWrap = el("div", "check-group");
+    state.groups.forEach(function (g) {
+      var l = el("label", "check-inline"); var cb = el("input"); cb.type = "checkbox"; cb.value = g.id; l.appendChild(cb); l.appendChild(document.createTextNode(" " + g.name)); gWrap.appendChild(l);
+    });
+    if (!state.groups.length) gWrap.appendChild(el("span", "sig-meta", "нет групп"));
+    groupsBox.appendChild(gWrap); form.appendChild(groupsBox);
+    var ttl = labeledInput("Код действителен, минут", "60"); ttl.input.type = "number";
+    form.appendChild(ttl.wrap);
+    var btn = el("button", "btn btn-primary", "Сгенерировать код");
+    btn.addEventListener("click", function () {
+      var groupIds = Array.prototype.slice.call(gWrap.querySelectorAll("input:checked")).map(function (c) { return c.value; });
+      apiSend("/devices/enroll", "POST", {
+        name: name.input.value, workstationId: wsSel.select.value || null,
+        groupIds: groupIds, ttlMinutes: parseInt(ttl.input.value, 10) || 60
+      }).then(function (r) { return r.json(); }).then(function (j) { showEnrollCode(j); });
+    });
+    form.appendChild(btn);
+    openModal(form);
+  });
+
+  function showEnrollCode(j) {
+    var c = el("div", "enroll-result");
+    c.appendChild(el("h3", null, "Код активации"));
+    c.appendChild(el("div", "enroll-code", j.code));
+    c.appendChild(el("p", "sig-meta", "Действует до " + new Date(j.expiresUtc).toLocaleString("ru-RU") + ". Введите этот код на планшете (экран «Активация»)."));
+    c.appendChild(el("p", "sig-meta", "Или откройте на планшете ссылку: /?enroll=" + j.code));
+    var done = el("button", "btn btn-primary", "Готово");
+    done.addEventListener("click", function () { closeModal(); loadDevices(); });
+    c.appendChild(done);
+    openModal(c);
+  }
+
+  function editDevice(d) {
+    var form = el("div");
+    form.appendChild(el("h3", null, "Планшет: " + d.name));
+    var name = labeledInput("Имя", d.name); form.appendChild(name.wrap);
+    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "— не привязывать —" }].concat(state.workstations.map(function (w) { return { v: w.id, t: w.name + (w.externalId ? " (" + w.externalId + ")" : "") }; })));
+    wsSel.select.value = d.workstationId || ""; form.appendChild(wsSel.wrap);
+    var groupsBox = el("div", "field"); groupsBox.appendChild(document.createTextNode("Группы (применятся при след. подключении)"));
+    var gWrap = el("div", "check-group");
+    state.groups.forEach(function (g) {
+      var l = el("label", "check-inline"); var cb = el("input"); cb.type = "checkbox"; cb.value = g.id; cb.checked = (d.groupIds || []).indexOf(g.id) >= 0; l.appendChild(cb); l.appendChild(document.createTextNode(" " + g.name)); gWrap.appendChild(l);
+    });
+    if (!state.groups.length) gWrap.appendChild(el("span", "sig-meta", "нет групп"));
+    groupsBox.appendChild(gWrap); form.appendChild(groupsBox);
+    var save = el("button", "btn btn-primary", "Сохранить");
+    save.addEventListener("click", function () {
+      var groupIds = Array.prototype.slice.call(gWrap.querySelectorAll("input:checked")).map(function (c) { return c.value; });
+      apiSend("/devices/" + d.id, "PUT", { name: name.input.value, workstationId: wsSel.select.value || "", groupIds: groupIds })
+        .then(function () { closeModal(); return loadDevices(); }).then(function () { toast("Сохранено"); });
+    });
+    form.appendChild(save);
+    openModal(form);
+  }
+
+  // ---------------- Groups ----------------
+  function loadGroups() { return apiJson("/groups").then(function (list) { state.groups = list; renderGroups(); renderTargetOptions(); }); }
+  function renderGroups() {
+    var wrap = $("groupsList"); wrap.innerHTML = "";
+    if (!state.groups.length) { wrap.innerHTML = '<div class="empty-note">Групп пока нет.</div>'; return; }
+    state.groups.forEach(function (g) {
+      var row = el("div", "simple-row");
+      var inp = el("input"); inp.value = g.name; inp.className = "grow"; row.appendChild(inp);
+      var save = el("button", "btn btn-ghost btn-sm", "Переименовать");
+      save.addEventListener("click", function () { apiSend("/groups/" + g.id, "PUT", { name: inp.value }).then(loadGroups).then(function () { toast("Сохранено"); }); });
+      row.appendChild(save);
+      var del = el("button", "btn btn-danger btn-sm", "Удалить");
+      del.addEventListener("click", function () { if (confirm("Удалить группу «" + g.name + "»?")) api("/groups/" + g.id, { method: "DELETE" }).then(loadGroups).then(loadDevices); });
+      row.appendChild(del);
+      wrap.appendChild(row);
+    });
+  }
+  $("addGroup").addEventListener("click", function () {
+    var name = ($("newGroupName").value || "").trim(); if (!name) return;
+    apiSend("/groups", "POST", { name: name }).then(function () { $("newGroupName").value = ""; return loadGroups(); }).then(function () { toast("Группа добавлена"); });
+  });
+
+  // ---------------- Workstations ----------------
+  function loadWorkstations() { return apiJson("/workstations").then(function (list) { state.workstations = list; renderWorkstations(); }); }
+  function renderWorkstations() {
+    var wrap = $("workstationsList"); wrap.innerHTML = "";
+    if (!state.workstations.length) { wrap.innerHTML = '<div class="empty-note">Рабочих мест пока нет.</div>'; return; }
+    state.workstations.forEach(function (w) {
+      var row = el("div", "simple-row");
+      var ext = el("input"); ext.value = w.externalId || ""; ext.placeholder = "Внешний ID"; ext.style.maxWidth = "130px";
+      var name = el("input"); name.value = w.name || ""; name.placeholder = "Название"; name.className = "grow";
+      var loc = el("input"); loc.value = w.location || ""; loc.placeholder = "Локация"; loc.className = "grow";
+      row.appendChild(ext); row.appendChild(name); row.appendChild(loc);
+      var save = el("button", "btn btn-ghost btn-sm", "Сохранить");
+      save.addEventListener("click", function () { apiSend("/workstations/" + w.id, "PUT", { externalId: ext.value, name: name.value, location: loc.value }).then(loadWorkstations).then(function () { toast("Сохранено"); }); });
+      row.appendChild(save);
+      var del = el("button", "btn btn-danger btn-sm", "Удалить");
+      del.addEventListener("click", function () { if (confirm("Удалить место «" + w.name + "»?")) api("/workstations/" + w.id, { method: "DELETE" }).then(loadWorkstations).then(loadDevices); });
+      row.appendChild(del);
+      wrap.appendChild(row);
+    });
+  }
+  $("addWorkstation").addEventListener("click", function () {
+    apiSend("/workstations", "POST", { externalId: "", name: "Новое место", location: "" }).then(loadWorkstations).then(function () { toast("Место добавлено"); });
+  });
+
+  // ---------------- API keys ----------------
+  function loadKeys() { return apiJson("/apikeys").then(function (list) { state.apikeys = list; renderKeys(); }); }
+  function renderKeys() {
+    var wrap = $("keysList"); wrap.innerHTML = "";
+    if (!state.apikeys.length) { wrap.innerHTML = '<div class="empty-note">Ключей пока нет.</div>'; return; }
+    state.apikeys.forEach(function (k) {
+      var row = el("div", "simple-row");
+      row.appendChild(el("strong", "grow", k.label));
+      row.appendChild(el("span", "sig-meta", new Date(k.createdUtc).toLocaleString("ru-RU")));
+      var del = el("button", "btn btn-danger btn-sm", "Удалить");
+      del.addEventListener("click", function () { if (confirm("Удалить ключ «" + k.label + "»?")) api("/apikeys/" + k.id, { method: "DELETE" }).then(loadKeys); });
+      row.appendChild(del); wrap.appendChild(row);
+    });
+  }
+  $("addKey").addEventListener("click", function () {
+    var label = ($("newKeyLabel").value || "").trim() || "API key";
+    apiSend("/apikeys", "POST", { label: label }).then(function (r) { return r.json(); }).then(function (j) {
+      $("newKeyLabel").value = "";
+      var c = el("div");
+      c.appendChild(el("h3", null, "Ключ создан"));
+      c.appendChild(el("p", "sig-meta", "Скопируйте ключ сейчас — позже он не показывается."));
+      var code = el("div", "enroll-code"); code.style.fontSize = "1rem"; code.style.wordBreak = "break-all"; code.textContent = j.key;
+      c.appendChild(code);
+      c.appendChild(el("p", "sig-meta", "Передавайте его в заголовке X-Api-Key при запросах к /api/ext/*"));
+      var done = el("button", "btn btn-primary", "Готово"); done.addEventListener("click", function () { closeModal(); loadKeys(); });
+      c.appendChild(done); openModal(c);
+    });
+  });
+
+  // ---------------- Small form helpers ----------------
+  function labeledInput(labelText, value) {
+    var wrap = el("label", "field", labelText); var input = el("input"); input.type = "text"; input.value = value; wrap.appendChild(input); return { wrap: wrap, input: input };
+  }
+  function labeledSelect(labelText, options) {
+    var wrap = el("label", "field", labelText); var select = el("select");
+    options.forEach(function (o) { select.appendChild(new Option(o.t, o.v)); }); wrap.appendChild(select); return { wrap: wrap, select: select };
+  }
 
   // ---------------- Toast ----------------
   var toastEl = null, toastTimer = null;
   function toast(msg) {
-    if (!toastEl) {
-      toastEl = document.createElement("div");
-      toastEl.style.cssText = "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111827;color:#fff;padding:12px 20px;border-radius:10px;font-size:.95rem;z-index:100;box-shadow:0 6px 20px rgba(0,0,0,.2);transition:opacity .2s;";
-      document.body.appendChild(toastEl);
-    }
-    toastEl.textContent = msg;
-    toastEl.style.opacity = "1";
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.style.opacity = "0"; }, 2200);
+    if (!toastEl) { toastEl = el("div"); toastEl.className = "toast"; document.body.appendChild(toastEl); }
+    toastEl.textContent = msg; toastEl.style.opacity = "1";
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.style.opacity = "0"; }, 2400);
   }
 
-  // ---------------- Realtime (admin) ----------------
+  // ---------------- Realtime ----------------
   function connectHub() {
-    var conn = new signalR.HubConnectionBuilder()
-      .withUrl("/hub/kiosk")
-      .withAutomaticReconnect()
-      .configureLogging(signalR.LogLevel.Warning)
-      .build();
-    conn.on("SignatureReceived", function () {
-      toast("Получена новая подпись");
-      loadSignatures();
-    });
+    var conn = new signalR.HubConnectionBuilder().withUrl("/hub/kiosk").withAutomaticReconnect().configureLogging(signalR.LogLevel.Warning).build();
+    conn.on("SignatureReceived", function () { toast("Получена новая подпись"); loadSignatures(); });
     conn.on("DevicesChanged", function () { loadDevices(); });
     function reg() { conn.invoke("RegisterAdmin").catch(function () {}); }
     conn.onreconnected(reg);
@@ -468,8 +469,8 @@
 
   // ---------------- Init ----------------
   function init() {
-    Promise.all([loadDevices(), loadImages(), loadDoc()])
-      .then(function () { return loadPlaylist(); })
+    Promise.all([loadGroups(), loadWorkstations(), loadImages(), loadDoc(), loadDevices()])
+      .then(function () { renderTargetOptions(); return loadPlaylist(); })
       .then(function () { loadSignatures(); connectHub(); })
       .catch(function (e) { console.error(e); });
   }

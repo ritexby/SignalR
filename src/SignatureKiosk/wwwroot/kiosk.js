@@ -1,23 +1,15 @@
-/* Kiosk player: connects to the SignalR hub, shows a slideshow, and runs the
-   signing document flow on command. Loaded by freekiosk as a single URL. */
+/* Kiosk player: authenticates with a device token, shows a slideshow, runs the
+   signing document flow, and can be "identified" on demand. Loaded by freekiosk. */
 (function () {
   "use strict";
 
-  // ---------- Device identity ----------
+  var TOKEN_KEY = "sk_device_token";
+  var NAME_KEY = "sk_device_name";
   var qs = new URLSearchParams(location.search);
-  function deviceId() {
-    var id = qs.get("device");
-    if (!id) {
-      id = localStorage.getItem("sk_device_id");
-      if (!id) {
-        id = "kiosk-" + Math.random().toString(36).slice(2, 8);
-        localStorage.setItem("sk_device_id", id);
-      }
-    }
-    return id;
-  }
-  var DEVICE_ID = deviceId();
-  var DEVICE_NAME = qs.get("name") || "";
+
+  function getToken() { return localStorage.getItem(TOKEN_KEY); }
+  function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+  function clearToken() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(NAME_KEY); }
 
   // ---------- DOM ----------
   var el = {
@@ -30,15 +22,25 @@
     docProgress: document.getElementById("docProgress"),
     docBody: document.getElementById("docBody"),
     docFooter: document.getElementById("docFooter"),
+    enroll: document.getElementById("enroll"),
+    enrollForm: document.getElementById("enrollForm"),
+    enrollCode: document.getElementById("enrollCode"),
+    enrollMsg: document.getElementById("enrollMsg"),
     status: document.getElementById("statusOverlay"),
     statusText: document.getElementById("statusText"),
+    identify: document.getElementById("identifyOverlay"),
+    identifyCode: document.getElementById("identifyCode"),
+    identifyName: document.getElementById("identifyName"),
     badge: document.getElementById("deviceBadge")
   };
-  el.badge.textContent = DEVICE_NAME ? (DEVICE_NAME + " · " + DEVICE_ID) : DEVICE_ID;
-  el.badge.classList.remove("hidden");
 
   function showStatus(t) { el.statusText.textContent = t; el.status.classList.remove("hidden"); }
   function hideStatus() { el.status.classList.add("hidden"); }
+  function updateBadge() {
+    var name = localStorage.getItem(NAME_KEY);
+    if (name) { el.badge.textContent = name; el.badge.classList.remove("hidden"); }
+    else el.badge.classList.add("hidden");
+  }
 
   // ==================================================================
   // Slideshow
@@ -66,14 +68,11 @@
     }
     el.slidesEmpty.classList.add("hidden");
 
-    // Show first image immediately on slide A.
     el.slideA.src = images[0];
     el.slideA.classList.add("show");
     slides.front = "A";
 
-    if (images.length > 1) {
-      slides.timer = setInterval(nextSlide, slides.interval);
-    }
+    if (images.length > 1) slides.timer = setInterval(nextSlide, slides.interval);
   }
 
   function nextSlide() {
@@ -83,7 +82,6 @@
     var incoming = slides.front === "A" ? el.slideB : el.slideA;
     var outgoing = slides.front === "A" ? el.slideA : el.slideB;
     incoming.src = url;
-    // Let the browser paint the new src before fading.
     requestAnimationFrame(function () {
       incoming.classList.add("show");
       outgoing.classList.remove("show");
@@ -94,7 +92,7 @@
   // ==================================================================
   // Signing document flow
   // ==================================================================
-  var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false };
+  var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null };
 
   function applyDocument(config) {
     stopSlides();
@@ -103,11 +101,8 @@
     doc.checks = {};
     doc.pad = null;
     doc.submitting = false;
-    // Build the screen list: one per content page, then signature, then thank-you.
     doc.screens = [];
-    (doc.config.pages || []).forEach(function (p, i) {
-      doc.screens.push({ type: "page", pageIndex: i });
-    });
+    (doc.config.pages || []).forEach(function (p, i) { doc.screens.push({ type: "page", pageIndex: i }); });
     doc.screens.push({ type: "signature" });
     doc.screens.push({ type: "thankyou" });
     doc.index = 0;
@@ -120,18 +115,15 @@
   function requiredSatisfied(pageIndex) {
     var page = doc.config.pages[pageIndex];
     if (!page || !page.checkboxes) return true;
-    for (var i = 0; i < page.checkboxes.length; i++) {
+    for (var i = 0; i < page.checkboxes.length; i++)
       if (page.checkboxes[i].required && !doc.checks[checkKey(pageIndex, i)]) return false;
-    }
     return true;
   }
 
   function renderScreen() {
     var screen = doc.screens[doc.index];
-    var isLast = doc.index === doc.screens.length - 1;
     el.docProgress.textContent = screen.type === "thankyou"
       ? "" : "Шаг " + (doc.index + 1) + " из " + (doc.screens.length - 1);
-
     if (screen.type === "page") return renderPage(screen.pageIndex);
     if (screen.type === "signature") return renderSignature();
     return renderThankYou();
@@ -171,8 +163,7 @@
         span.textContent = cb.label || "";
         if (cb.required) {
           var req = document.createElement("span");
-          req.className = "req";
-          req.textContent = "*";
+          req.className = "req"; req.textContent = "*";
           span.appendChild(req);
         }
         label.appendChild(input);
@@ -207,14 +198,12 @@
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
 
-    // Size the canvas to its container (accounting for pixel ratio) and init pad.
     function sizeCanvas() {
       var ratio = Math.max(window.devicePixelRatio || 1, 1);
       var rect = wrap.getBoundingClientRect();
       canvas.width = Math.round(rect.width * ratio);
       canvas.height = Math.round(rect.height * ratio);
-      var ctx = canvas.getContext("2d");
-      ctx.scale(ratio, ratio);
+      canvas.getContext("2d").scale(ratio, ratio);
       if (doc.pad) doc.pad.clear();
     }
     doc.pad = new SignaturePad(canvas, { minWidth: 1.2, maxWidth: 3.2, penColor: "#111827" });
@@ -223,9 +212,7 @@
     sizeCanvas();
     doc.docPadResize = sizeCanvas;
 
-    renderFooter({
-      back: true, clear: true, sign: true
-    });
+    renderFooter({ back: true, clear: true, sign: true });
   }
 
   function renderThankYou() {
@@ -238,39 +225,30 @@
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
     el.docFooter.innerHTML = "";
-    // Return to slideshow shortly; the server will push the current slides.
-    setTimeout(function () { conn.invoke("FinishDocument").catch(function () {}); }, 6000);
+    setTimeout(function () { if (conn) conn.invoke("FinishDocument").catch(function () {}); }, 6000);
   }
 
-  // Footer rendering for page / signature screens.
   function renderFooter(opts) {
     el.docFooter.innerHTML = "";
 
     var back = document.createElement("button");
-    back.className = "btn btn-ghost";
-    back.textContent = "Назад";
-    back.disabled = !opts.back;
+    back.className = "btn btn-ghost"; back.textContent = "Назад"; back.disabled = !opts.back;
     back.addEventListener("click", function () { if (doc.index > 0) { doc.index--; renderScreen(); } });
     el.docFooter.appendChild(back);
 
     var note = document.createElement("div");
-    note.className = "footer-note";
-    note.id = "footerNote";
+    note.className = "footer-note"; note.id = "footerNote";
     el.docFooter.appendChild(note);
 
     if (opts.clear) {
       var clear = document.createElement("button");
-      clear.className = "btn btn-ghost";
-      clear.textContent = "Очистить";
+      clear.className = "btn btn-ghost"; clear.textContent = "Очистить";
       clear.addEventListener("click", function () { if (doc.pad) { doc.pad.clear(); updateFooter(); } });
       el.docFooter.appendChild(clear);
     }
-
     if (opts.next) {
       var next = document.createElement("button");
-      next.className = "btn btn-primary";
-      next.id = "btnNext";
-      next.textContent = opts.nextLabel || "Далее";
+      next.className = "btn btn-primary"; next.id = "btnNext"; next.textContent = opts.nextLabel || "Далее";
       next.addEventListener("click", function () {
         var screen = doc.screens[doc.index];
         if (screen.type === "page" && !requiredSatisfied(screen.pageIndex)) return;
@@ -278,16 +256,12 @@
       });
       el.docFooter.appendChild(next);
     }
-
     if (opts.sign) {
       var sign = document.createElement("button");
-      sign.className = "btn btn-sign";
-      sign.id = "btnSign";
-      sign.textContent = "ПОДПИСАТЬ";
+      sign.className = "btn btn-sign"; sign.id = "btnSign"; sign.textContent = "ПОДПИСАТЬ";
       sign.addEventListener("click", submitSignature);
       el.docFooter.appendChild(sign);
     }
-
     updateFooter();
   }
 
@@ -296,7 +270,6 @@
     var note = document.getElementById("footerNote");
     var next = document.getElementById("btnNext");
     var sign = document.getElementById("btnSign");
-
     if (screen.type === "page" && next) {
       var ok = requiredSatisfied(screen.pageIndex);
       next.disabled = !ok;
@@ -323,18 +296,12 @@
     if (doc.submitting || !doc.pad || doc.pad.isEmpty()) return;
     doc.submitting = true;
     updateFooter();
-    var payload = {
-      deviceId: DEVICE_ID,
-      items: collectItems(),
-      signature: doc.pad.toDataURL("image/png")
-    };
     fetch("/api/sign", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + (getToken() || "") },
+      body: JSON.stringify({ items: collectItems(), signature: doc.pad.toDataURL("image/png") })
     }).then(function (r) {
       if (!r.ok) throw new Error("bad status " + r.status);
-      // Move to the thank-you screen (last screen).
       doc.index = doc.screens.length - 1;
       renderScreen();
     }).catch(function () {
@@ -348,9 +315,22 @@
   window.addEventListener("resize", function () { if (doc.docPadResize) doc.docPadResize(); });
 
   // ==================================================================
+  // Identify overlay
+  // ==================================================================
+  var identifyTimer = null;
+  function showIdentify(code, name) {
+    el.identifyCode.textContent = code || "•";
+    el.identifyName.textContent = name || "";
+    el.identify.classList.remove("hidden");
+    clearTimeout(identifyTimer);
+    identifyTimer = setTimeout(function () { el.identify.classList.add("hidden"); }, 6000);
+  }
+
+  // ==================================================================
   // Layers
   // ==================================================================
   function showLayer(which) {
+    el.enroll.classList.add("hidden");
     if (which === "slides") {
       el.document.classList.add("hidden");
       el.slideshow.classList.remove("hidden");
@@ -367,33 +347,103 @@
   }
 
   // ==================================================================
+  // Enrollment
+  // ==================================================================
+  function showEnroll(message) {
+    stopSlides();
+    el.slideshow.classList.add("hidden");
+    el.document.classList.add("hidden");
+    hideStatus();
+    el.enroll.classList.remove("hidden");
+    el.enrollMsg.textContent = message || "";
+    setTimeout(function () { try { el.enrollCode.focus(); } catch (e) {} }, 100);
+  }
+
+  function enroll(code) {
+    return fetch("/api/kiosk/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code })
+    }).then(function (r) {
+      if (!r.ok) throw new Error("enroll " + r.status);
+      return r.json();
+    }).then(function (j) {
+      setToken(j.token);
+      if (j.name) localStorage.setItem(NAME_KEY, j.name);
+      updateBadge();
+      return j;
+    });
+  }
+
+  el.enrollForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var code = (el.enrollCode.value || "").trim();
+    if (!code) return;
+    el.enrollMsg.textContent = "Активация…";
+    enroll(code)
+      .then(function () { el.enrollCode.value = ""; connect(); })
+      .catch(function () { el.enrollMsg.textContent = "Код недействителен или истёк. Проверьте и попробуйте снова."; });
+  });
+
+  // ==================================================================
   // SignalR connection
   // ==================================================================
-  var conn = new signalR.HubConnectionBuilder()
-    .withUrl("/hub/kiosk")
-    .withAutomaticReconnect([0, 2000, 5000, 10000, 15000, 30000])
-    .configureLogging(signalR.LogLevel.Warning)
-    .build();
-
-  conn.on("ShowSlides", applySlides);
-  conn.on("ShowDocument", applyDocument);
+  var conn = null;
 
   function register() {
-    return conn.invoke("RegisterKiosk", DEVICE_ID, DEVICE_NAME)
-      .then(applyCommand)
+    return conn.invoke("RegisterKiosk").then(applyCommand)
       .catch(function (e) { console.error("register failed", e); });
   }
 
-  conn.onreconnecting(function () { showStatus("Соединение потеряно. Переподключение…"); });
-  conn.onreconnected(function () { hideStatus(); register(); });
-  conn.onclose(function () { showStatus("Нет связи с сервером. Переподключение…"); setTimeout(start, 4000); });
+  function isAuthError(e) {
+    if (!e) return false;
+    if (e.statusCode === 401 || e.statusCode === 403) return true;
+    return /\b401\b|\b403\b|unauthorized|forbidden/i.test(String(e.message || e));
+  }
 
-  function start() {
+  function connect() {
+    var token = getToken();
+    if (!token) { showEnroll(""); return; }
+
+    conn = new signalR.HubConnectionBuilder()
+      .withUrl("/hub/kiosk", { accessTokenFactory: function () { return getToken() || ""; } })
+      .withAutomaticReconnect([0, 2000, 5000, 10000, 15000, 30000])
+      .configureLogging(signalR.LogLevel.Warning)
+      .build();
+
+    conn.on("ShowSlides", applySlides);
+    conn.on("ShowDocument", applyDocument);
+    conn.on("Identify", function (p) { showIdentify(p && p.code, p && p.name); });
+
+    conn.onreconnecting(function () { showStatus("Соединение потеряно. Переподключение…"); });
+    conn.onreconnected(function () { hideStatus(); register(); });
+    conn.onclose(function () {
+      if (getToken()) { showStatus("Нет связи с сервером. Переподключение…"); setTimeout(connect, 4000); }
+      else showEnroll("");
+    });
+
     showStatus("Подключение к серверу…");
     conn.start()
       .then(function () { hideStatus(); return register(); })
-      .catch(function () { showStatus("Нет связи с сервером. Повтор через 4 с…"); setTimeout(start, 4000); });
+      .catch(function (e) {
+        conn = null;
+        if (isAuthError(e)) { clearToken(); showEnroll("Планшет не авторизован. Введите новый код активации."); }
+        else { showStatus("Нет связи с сервером. Повтор через 4 с…"); setTimeout(connect, 4000); }
+      });
   }
 
-  start();
+  // ==================================================================
+  // Boot
+  // ==================================================================
+  updateBadge();
+  (function boot() {
+    if (getToken()) { connect(); return; }
+    var code = qs.get("enroll");
+    if (code) {
+      showStatus("Активация…");
+      enroll(code).then(connect).catch(function () { showEnroll("Код из ссылки недействителен. Введите код вручную."); });
+    } else {
+      showEnroll("");
+    }
+  })();
 })();

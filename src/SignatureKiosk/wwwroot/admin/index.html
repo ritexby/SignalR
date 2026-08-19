@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Админка — Signature Kiosk</title>
+  <title>HELIX SignTablet — Админка</title>
   <link rel="stylesheet" href="/admin/admin.css" />
 </head>
 <body>
@@ -20,15 +20,18 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">Signature Kiosk</div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
         <button class="tab" data-tab="signatures">Подписи</button>
         <button class="tab" data-tab="devices">Планшеты</button>
+        <button class="tab" data-tab="groups">Группы</button>
+        <button class="tab" data-tab="workstations">Места</button>
+        <button class="tab" data-tab="apikeys">API-ключи</button>
       </nav>
       <div class="target">
-        <label>Планшет:</label>
+        <label>Кому:</label>
         <select id="targetSelect"></select>
       </div>
       <button id="logout" class="btn btn-ghost">Выйти</button>
@@ -50,7 +53,7 @@
             <button id="saveSlides" class="btn btn-primary">Сохранить и показать</button>
           </div>
         </div>
-        <p class="hint">Отметьте картинки для показа. Номер на картинке — её порядок в слайд-шоу. «Сохранить и показать» моментально отправит их на выбранный планшет.</p>
+        <p class="hint">Контент отправится на выбранного вверху адресата («Кому»): все / группа / конкретный планшет. Номер на картинке — её порядок.</p>
         <div id="imageGrid" class="grid"></div>
       </section>
 
@@ -64,7 +67,7 @@
             <button id="showSlides" class="btn btn-ghost">Вернуть рекламу</button>
           </div>
         </div>
-        <p class="hint">Отредактируйте страницы, тексты и чекбоксы. «Показать документ» переключит выбранный планшет с рекламы на этот документ.</p>
+        <p class="hint">«Показать документ» переключит выбранного вверху адресата с рекламы на этот документ.</p>
         <div class="doc-editor">
           <label class="field">Заголовок документа
             <input id="docTitle" type="text" />
@@ -95,15 +98,51 @@
       <section class="panel hidden" data-panel="devices">
         <div class="panel-head">
           <h2>Планшеты</h2>
-          <button id="reloadDevices" class="btn btn-ghost">Обновить</button>
+          <button id="addDevice" class="btn btn-primary">+ Добавить планшет (код)</button>
         </div>
-        <p class="hint">Планшеты появляются здесь автоматически при подключении. Идентификатор задаётся в URL: <code>?device=tablet-1&amp;name=Ресепшн</code></p>
+        <p class="hint">Новый планшет добавляется кодом активации: сгенерируйте код, введите его на планшете один раз — он получит защищённый доступ. Идентификатор в URL больше не нужен.</p>
         <div id="devicesList" class="dev-list"></div>
+      </section>
+
+      <!-- Groups -->
+      <section class="panel hidden" data-panel="groups">
+        <div class="panel-head">
+          <h2>Группы планшетов</h2>
+          <div class="row">
+            <input id="newGroupName" type="text" placeholder="Название группы" />
+            <button id="addGroup" class="btn btn-primary">Добавить</button>
+          </div>
+        </div>
+        <p class="hint">Объединяйте планшеты в группы, чтобы отправлять контент сразу на группу (выбор «Кому» вверху).</p>
+        <div id="groupsList" class="simple-list"></div>
+      </section>
+
+      <!-- Workstations -->
+      <section class="panel hidden" data-panel="workstations">
+        <div class="panel-head">
+          <h2>Рабочие места</h2>
+          <button id="addWorkstation" class="btn btn-primary">+ Добавить место</button>
+        </div>
+        <p class="hint"><code>Внешний ID</code> — ключ вашей учётной системы (например <code>WS-204</code>). По нему привязка «планшет ↔ место» доступна из внешнего API.</p>
+        <div id="workstationsList" class="simple-list"></div>
+      </section>
+
+      <!-- API keys -->
+      <section class="panel hidden" data-panel="apikeys">
+        <div class="panel-head">
+          <h2>API-ключи (внешняя система)</h2>
+          <div class="row">
+            <input id="newKeyLabel" type="text" placeholder="Название ключа (напр. ERP)" />
+            <button id="addKey" class="btn btn-primary">Создать</button>
+          </div>
+        </div>
+        <p class="hint">Ключ даёт внешней системе доступ к <code>/api/ext/*</code>: список планшетов, статус, привязка к местам, создание кодов активации. Ключ показывается один раз при создании.</p>
+        <div id="keysList" class="simple-list"></div>
       </section>
     </main>
   </div>
 
-  <!-- Signature detail modal -->
+  <!-- Modal -->
   <div id="modal" class="modal hidden">
     <div class="modal-box">
       <button id="modalClose" class="modal-close">×</button>

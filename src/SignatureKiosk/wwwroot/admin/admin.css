@@ -36,6 +36,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 /* Topbar */
 .topbar { display: flex; align-items: center; gap: 18px; background: var(--panel); border-bottom: 1px solid var(--border); padding: 10px 20px; position: sticky; top: 0; z-index: 20; flex-wrap: wrap; }
 .brand { font-weight: 800; letter-spacing: .3px; }
+.brand-accent { color: var(--accent); }
 .tabs { display: flex; gap: 6px; }
 .tab { border: none; background: transparent; padding: 8px 14px; border-radius: 9px; cursor: pointer; font-weight: 600; color: var(--muted); }
 .tab.active { background: #eef4ff; color: var(--accent); }
@@ -109,3 +110,33 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .item.on .tick { color: var(--ok); }
 .item.off .tick { color: var(--danger); }
 .sig-image { border: 1px solid var(--border); border-radius: 12px; background: #fff; width: 100%; }
+
+/* ---- v2: fleet management ---- */
+.btn-sm { padding: 6px 11px; font-size: .84rem; }
+.chip { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; font-size: .74rem; font-weight: 600; }
+.chip-ok { background: #eef4ff; color: var(--accent); }
+.chip-danger { background: #fee2e2; color: var(--danger); }
+
+.dev-item { align-items: flex-start; flex-wrap: wrap; }
+.dev-info { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 4px; }
+.dev-name { display: flex; align-items: center; gap: 10px; font-size: 1.02rem; }
+.dev-meta { color: var(--muted); font-size: .84rem; }
+.dev-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.dev-item.revoked { opacity: .65; }
+.dot { margin-top: 6px; }
+
+.simple-list { display: flex; flex-direction: column; gap: 10px; }
+.simple-row { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; background: #fff; flex-wrap: wrap; }
+.simple-row input { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.simple-row .grow { flex: 1; min-width: 120px; }
+
+.check-group { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 8px 0; }
+.check-inline { display: flex; align-items: center; gap: 6px; font-weight: 400; color: var(--text); font-size: .95rem; }
+.field select { padding: 10px; border: 1px solid var(--border); border-radius: 9px; font-size: .98rem; color: var(--text); background: #fff; }
+
+.enroll-code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 2.4rem; font-weight: 800; letter-spacing: .1em; text-align: center; background: #eef4ff; color: var(--accent); border-radius: 12px; padding: 18px; margin: 6px 0; }
+.enroll-result { text-align: center; }
+.modal .field { text-align: left; margin-bottom: 12px; }
+.modal .btn-primary { width: 100%; margin-top: 8px; }
+
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111827; color: #fff; padding: 12px 20px; border-radius: 10px; font-size: .95rem; z-index: 100; box-shadow: 0 6px 20px rgba(0,0,0,.2); transition: opacity .2s; opacity: 0; }
