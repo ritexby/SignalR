@@ -64,14 +64,20 @@ public class KioskCoordinator
     {
         var state = _storage.ResolveState(deviceId);
         if (state.Mode == "document")
-            return new CurrentCommand { Mode = "document", Document = _storage.GetDocument() };
+        {
+            // Resolve with THIS device's own signer data only, so a tablet never receives
+            // another signer's fields or checkboxes.
+            var doc = DocumentTemplating.Resolve(_storage.GetDocument(), state.Fields, state.DynamicCheckboxes);
+            return new CurrentCommand { Mode = "document", Document = doc };
+        }
         return new CurrentCommand { Mode = "slides", Slides = BuildSlidesPayload(state) };
     }
 
     // ---------- State mutation ----------
 
-    /// <summary>Set a device override's mode (creating it from the default when absent).</summary>
-    private static void SetDeviceMode(StateStore states, IEnumerable<string> deviceIds, string mode)
+    /// <summary>Set a device override's mode, signer fields and per-signer checkboxes (creating it from the default when absent).</summary>
+    private static void SetDeviceState(StateStore states, IEnumerable<string> deviceIds, string mode,
+        Dictionary<string, string> fields, List<DocCheckbox> checkboxes)
     {
         foreach (var deviceId in deviceIds)
         {
@@ -81,6 +87,8 @@ public class KioskCoordinator
                 states.Devices[deviceId] = s;
             }
             s.Mode = mode;
+            s.Fields = new Dictionary<string, string>(fields);
+            s.DynamicCheckboxes = checkboxes.Select(c => new DocCheckbox { Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList();
         }
     }
 
@@ -100,9 +108,9 @@ public class KioskCoordinator
         var (kind, id) = Parse(target);
         var playlist = new List<string>(imageIds);
 
-        // Resolve the concrete device set outside the state lock (these read other files).
-        var online = _tracker.OnlineDeviceIds();
-        var targets = kind == Kind.All ? online.ToList() : DeviceIds(kind, id);
+        // Resolve the concrete device set outside the state lock (these read other files):
+        // "all" resolves to the currently online devices, group/device to storage membership.
+        var targets = DeviceIds(kind, id);
 
         // Atomically update stored state and, from that same consistent snapshot, decide who
         // should receive the slides now: everyone in scope except tablets currently showing a
@@ -146,50 +154,51 @@ public class KioskCoordinator
     private static bool IsShowingDocument(StateStore states, string deviceId) =>
         states.Devices.TryGetValue(deviceId, out var s) && s.Mode == "document";
 
-    public async Task ShowDocumentAsync(string target)
+    /// <summary>
+    /// Show the signing document on exactly ONE tablet, filling {{tags}} with <paramref name="fields"/>
+    /// and injecting any per-signer <paramref name="checkboxes"/>. A document is never shown to more
+    /// than one tablet: the signer data lives only on this device, so it can never reach anyone else.
+    /// </summary>
+    public async Task ShowDocumentAsync(string deviceId, IReadOnlyDictionary<string, string>? fields = null,
+        IReadOnlyList<DocCheckbox>? checkboxes = null)
     {
-        var (kind, id) = Parse(target);
-        var online = _tracker.OnlineDeviceIds();
-        var targets = kind == Kind.All ? online.ToList() : DeviceIds(kind, id);
+        var fieldMap = fields is null ? new Dictionary<string, string>() : new Dictionary<string, string>(fields);
+        var cbs = checkboxes is null ? new List<DocCheckbox>() : checkboxes.ToList();
 
-        _storage.MutateStates(states =>
-        {
-            if (kind == Kind.All)
-            {
-                // "All" also sets the default so tablets that connect later show the document too.
-                states.Default.Mode = "document";
-                foreach (var s in states.Devices.Values) s.Mode = "document";
-            }
-            else SetDeviceMode(states, targets, "document");
-        });
+        _storage.MutateStates(states => SetDeviceState(states, new[] { deviceId }, "document", fieldMap, cbs));
 
-        var doc = _storage.GetDocument();
-        foreach (var deviceId in targets)
-            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", doc);
+        var doc = DocumentTemplating.Resolve(_storage.GetDocument(), fieldMap, cbs);
+        await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", doc);
     }
 
-    public async Task ReturnToSlidesAsync(string target)
+    /// <summary>Return one tablet to advertising and clear its signer data, then push its slides.</summary>
+    public async Task ReturnToSlidesAsync(string deviceId)
     {
-        var (kind, id) = Parse(target);
-        var online = _tracker.OnlineDeviceIds();
-        var targets = kind == Kind.All ? online.ToList() : DeviceIds(kind, id);
+        ClearSignerSession(deviceId);
+        var payload = BuildSlidesPayload(_storage.ResolveState(deviceId));
+        await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
+    }
 
+    /// <summary>
+    /// Clear a device's signer data and return it to slides mode in storage WITHOUT pushing a
+    /// command (the tablet is showing its local thank-you screen). This closes the window where a
+    /// reconnect right after signing could redisplay the just-signed document with its data.
+    /// </summary>
+    public void ClearSignerSession(string deviceId)
+    {
         _storage.MutateStates(states =>
         {
-            if (kind == Kind.All)
+            // Always write a per-device slides override (creating it if needed) so this device
+            // returns to ads regardless of what the shared default is set to.
+            if (!states.Devices.TryGetValue(deviceId, out var s))
             {
-                states.Default.Mode = "slides";
-                foreach (var s in states.Devices.Values) s.Mode = "slides";
+                s = states.Default.Clone();
+                states.Devices[deviceId] = s;
             }
-            else SetDeviceMode(states, targets, "slides");
+            s.Mode = "slides";
+            s.Fields.Clear();
+            s.DynamicCheckboxes.Clear();
         });
-
-        // Each device may keep a different playlist, so send its own payload per device.
-        foreach (var deviceId in targets)
-        {
-            var payload = BuildSlidesPayload(_storage.ResolveState(deviceId));
-            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
-        }
     }
 
     /// <summary>Flash an identifying marker on one device; returns the code shown so the operator can match it.</summary>

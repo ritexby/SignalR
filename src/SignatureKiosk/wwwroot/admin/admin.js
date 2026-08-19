@@ -4,8 +4,8 @@
   "use strict";
 
   var state = {
-    slidesTarget: "all",   // recipient for advertising slides
-    docTarget: "all",      // recipient for the signing document (independent of slides)
+    slidesTarget: "all",   // recipient for advertising slides (all / group / device)
+    docTarget: "",         // recipient for the document: exactly ONE device, or "" if none yet
     images: [], playlist: [], interval: 6,
     doc: null,
     devices: [], groups: [], workstations: [], apikeys: []
@@ -100,9 +100,19 @@
     return sel.value;
   }
 
+  // The document is ALWAYS shown on exactly one tablet, so its selector lists devices only.
+  function fillDeviceSelect(sel, current) {
+    sel.innerHTML = "";
+    if (!state.devices.length) { sel.appendChild(new Option("Нет планшетов", "")); sel.value = ""; return ""; }
+    state.devices.forEach(function (d) { sel.appendChild(new Option(d.name + (d.online ? "" : " (офлайн)"), "device:" + d.id)); });
+    var exists = state.devices.some(function (d) { return "device:" + d.id === current; });
+    sel.value = exists ? current : ("device:" + state.devices[0].id);
+    return sel.value;
+  }
+
   function renderTargetOptions() {
     state.slidesTarget = fillTargetSelect($("slidesTarget"), state.slidesTarget);
-    state.docTarget = fillTargetSelect($("docTarget"), state.docTarget);
+    state.docTarget = fillDeviceSelect($("docTarget"), state.docTarget);
   }
 
   // ---------------- Images / slides ----------------
@@ -163,7 +173,28 @@
   function loadDoc() { return apiJson("/document").then(function (d) { state.doc = d; renderDoc(); }); }
   function renderDoc() {
     $("docTitle").value = state.doc.title || ""; $("signPrompt").value = state.doc.signPrompt || ""; $("thankYou").value = state.doc.thankYouText || "";
+    $("idleReturn").value = state.doc.idleReturnSec != null ? state.doc.idleReturnSec : 180;
     renderPages();
+    updatePlaceholders();
+  }
+
+  function scanPlaceholders() {
+    var texts = [$("docTitle").value, $("signPrompt").value, $("thankYou").value];
+    document.querySelectorAll('#pagesEditor [data-role="heading"], #pagesEditor [data-role="body"], #pagesEditor [data-role="cblabel"]')
+      .forEach(function (i) { texts.push(i.value); });
+    var re = /\{\{\s*(.+?)\s*\}\}/g, seen = [], known = {};
+    texts.forEach(function (t) {
+      if (!t) return; var m;
+      while ((m = re.exec(t))) { var k = m[1].trim(), lk = k.toLowerCase(); if (k && !known[lk]) { known[lk] = 1; seen.push(k); } }
+    });
+    return seen;
+  }
+  function updatePlaceholders() {
+    var wrap = $("docPlaceholders"); if (!wrap) return; wrap.innerHTML = "";
+    var ph = scanPlaceholders();
+    if (!ph.length) { wrap.appendChild(el("span", "ph-empty", "Плейсхолдеры не используются.")); return; }
+    wrap.appendChild(el("span", "ph-label", "Поля для передачи по API:"));
+    ph.forEach(function (k) { wrap.appendChild(el("code", "ph-tag", "{{" + k + "}}")); });
   }
   function renderPages() {
     var wrap = $("pagesEditor"); wrap.innerHTML = "";
@@ -172,7 +203,7 @@
       var title = el("div", "page-title");
       title.appendChild(el("strong", null, "Страница " + (pi + 1)));
       var delPage = el("button", "btn btn-danger", "Удалить страницу");
-      delPage.addEventListener("click", function () { collectDoc(); state.doc.pages.splice(pi, 1); renderPages(); });
+      delPage.addEventListener("click", function () { collectDoc(); state.doc.pages.splice(pi, 1); renderPages(); updatePlaceholders(); });
       title.appendChild(delPage); card.appendChild(title);
       card.appendChild(fieldInput("Заголовок", page.heading || "", "heading"));
       var body = el("label", "field"); body.textContent = "Текст";
@@ -183,6 +214,12 @@
       var addCb = el("button", "btn btn-ghost", "+ Чекбокс");
       addCb.addEventListener("click", function () { cbList.appendChild(checkboxRow({ label: "", required: true })); });
       card.appendChild(addCb);
+
+      var dyn = el("label", "check-inline dyn-anchor");
+      var dynCb = el("input"); dynCb.type = "checkbox"; dynCb.checked = !!page.includeDynamic; dynCb.setAttribute("data-role", "includedynamic");
+      dyn.appendChild(dynCb); dyn.appendChild(document.createTextNode(" Показывать здесь чекбоксы, присланные по API"));
+      card.appendChild(dyn);
+
       wrap.appendChild(card);
     });
   }
@@ -194,34 +231,72 @@
     var label = el("input"); label.type = "text"; label.placeholder = "Текст пункта"; label.value = cb.label || ""; label.setAttribute("data-role", "cblabel"); row.appendChild(label);
     var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = cb.required !== false; req.setAttribute("data-role", "cbreq");
     reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательный")); row.appendChild(reqLabel);
-    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { row.remove(); }); row.appendChild(del);
+    var chkLabel = el("label"); var chk = el("input"); chk.type = "checkbox"; chk.checked = !!cb.checked; chk.setAttribute("data-role", "cbchecked");
+    chkLabel.appendChild(chk); chkLabel.appendChild(document.createTextNode(" отмечен")); row.appendChild(chkLabel);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { row.remove(); updatePlaceholders(); }); row.appendChild(del);
     return row;
   }
   function collectDoc() {
     state.doc.title = $("docTitle").value; state.doc.signPrompt = $("signPrompt").value; state.doc.thankYouText = $("thankYou").value;
+    state.doc.idleReturnSec = parseInt($("idleReturn").value, 10) || 0;
     var pages = [];
     document.querySelectorAll("#pagesEditor .page-card").forEach(function (card) {
       var heading = card.querySelector('[data-role="heading"]').value;
       var body = card.querySelector('[data-role="body"]').value;
+      var includeDynamic = !!(card.querySelector('[data-role="includedynamic"]') || {}).checked;
       var checkboxes = [];
       card.querySelectorAll('[data-role="cbrow"]').forEach(function (r) {
         var lab = r.querySelector('[data-role="cblabel"]').value;
         var req = r.querySelector('[data-role="cbreq"]').checked;
-        if (lab.trim()) checkboxes.push({ label: lab, required: req });
+        var chk = !!(r.querySelector('[data-role="cbchecked"]') || {}).checked;
+        if (lab.trim()) checkboxes.push({ label: lab, required: req, checked: chk });
       });
-      pages.push({ heading: heading, body: body, checkboxes: checkboxes });
+      pages.push({ heading: heading, body: body, checkboxes: checkboxes, includeDynamic: includeDynamic });
     });
     state.doc.pages = pages;
   }
-  $("addPage").addEventListener("click", function () { collectDoc(); state.doc.pages.push({ heading: "Новая страница", body: "", checkboxes: [] }); renderPages(); });
+  $("addPage").addEventListener("click", function () { collectDoc(); state.doc.pages.push({ heading: "Новая страница", body: "", checkboxes: [], includeDynamic: false }); renderPages(); });
   $("saveDocument").addEventListener("click", function () { collectDoc(); apiSend("/document", "PUT", state.doc).then(function () { toast("Документ сохранён"); }); });
+
+  function doShowDocument(fields) {
+    apiSend("/show-document", "POST", { target: state.docTarget, fields: fields })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        toast("Документ показан (" + targetLabel(state.docTarget) + ")");
+        if (j && j.missingPlaceholders && j.missingPlaceholders.length)
+          setTimeout(function () { toast("Не заполнены: " + j.missingPlaceholders.join(", ")); }, 1500);
+      });
+  }
+  function openFieldsModal(placeholders) {
+    var c = el("div");
+    c.appendChild(el("h3", null, "Данные для документа"));
+    c.appendChild(el("p", "sig-meta", "Значения подставятся в плейсхолдеры и отправятся на: " + targetLabel(state.docTarget)));
+    var inputs = {};
+    placeholders.forEach(function (k) { var f = labeledInput(k, ""); c.appendChild(f.wrap); inputs[k] = f.input; });
+    var btn = el("button", "btn btn-primary", "Показать документ");
+    btn.addEventListener("click", function () {
+      var fields = {}; placeholders.forEach(function (k) { fields[k] = inputs[k].value; });
+      closeModal(); doShowDocument(fields);
+    });
+    c.appendChild(btn);
+    openModal(c);
+    if (inputs[placeholders[0]]) inputs[placeholders[0]].focus();
+  }
   $("showDocument").addEventListener("click", function () {
+    if (!/^device:/.test(state.docTarget)) { toast("Выберите планшет. Документ показывается только на один планшет."); return; }
     collectDoc();
-    apiSend("/document", "PUT", state.doc)
-      .then(function () { return apiSend("/show-document", "POST", { target: state.docTarget }); })
-      .then(function () { toast("Документ показан (" + targetLabel(state.docTarget) + ")"); });
+    var placeholders = scanPlaceholders();
+    apiSend("/document", "PUT", state.doc).then(function () {
+      if (placeholders.length) openFieldsModal(placeholders);
+      else doShowDocument(null);
+    });
   });
+  (function () {
+    var docPanel = document.querySelector('[data-panel="document"]');
+    if (docPanel) docPanel.addEventListener("input", updatePlaceholders);
+  })();
   $("showSlides").addEventListener("click", function () {
+    if (!/^device:/.test(state.docTarget)) { toast("Выберите планшет."); return; }
     apiSend("/show-slides", "POST", { target: state.docTarget }).then(function () { toast("Реклама возвращена (" + targetLabel(state.docTarget) + ")"); });
   });
 
@@ -249,6 +324,17 @@
       c.appendChild(el("h3", null, rec.documentTitle || "Подпись"));
       var where = (rec.workstationName ? rec.workstationName + " · " : "") + (rec.deviceName || rec.deviceId || "-");
       c.appendChild(el("div", "sig-meta", new Date(rec.createdUtc).toLocaleString("ru-RU") + " · " + where));
+      if (rec.fields && Object.keys(rec.fields).length) {
+        c.appendChild(el("div", "field-caption", "Данные подписанта"));
+        var fl = el("div", "field-list");
+        Object.keys(rec.fields).forEach(function (k) {
+          var row = el("div", "field-row");
+          row.appendChild(el("span", "field-key", k));
+          row.appendChild(el("span", "field-val", rec.fields[k]));
+          fl.appendChild(row);
+        });
+        c.appendChild(fl);
+      }
       var list = el("div", "item-list");
       (rec.items || []).forEach(function (it) {
         var row = el("div", "item " + (it.checked ? "on" : "off"));
@@ -319,7 +405,8 @@
       var nameRow = el("div", "dev-name");
       nameRow.appendChild(el("strong", null, d.name));
       if (d.status === "revoked") nameRow.appendChild(el("span", "chip chip-danger", "заблокирован"));
-      else nameRow.appendChild(el("span", "chip chip-ok", d.online ? "онлайн" : "офлайн"));
+      else if (d.online) nameRow.appendChild(el("span", "chip chip-ok", "онлайн"));
+      else nameRow.appendChild(el("span", "chip chip-muted", "офлайн"));
       info.appendChild(nameRow);
 
       // Workstation: name, external ID and description (location).
@@ -467,15 +554,22 @@
 
   // ---------------- Workstations ----------------
   function loadWorkstations() { return apiJson("/workstations").then(function (list) { state.workstations = list; renderWorkstations(); populateDeviceFilters(); }); }
+  function wsCol(labelText, value, placeholder, grow) {
+    var col = el("label", "ws-col" + (grow ? " grow" : ""), labelText);
+    var input = el("input"); input.value = value || ""; input.placeholder = placeholder;
+    col.appendChild(input);
+    return { col: col, input: input };
+  }
   function renderWorkstations() {
     var wrap = $("workstationsList"); wrap.innerHTML = "";
     if (!state.workstations.length) { wrap.innerHTML = '<div class="empty-note">Рабочих мест пока нет.</div>'; return; }
     state.workstations.forEach(function (w) {
-      var row = el("div", "simple-row");
-      var ext = el("input"); ext.value = w.externalId || ""; ext.placeholder = "Внешний ID"; ext.style.maxWidth = "130px";
-      var name = el("input"); name.value = w.name || ""; name.placeholder = "Название"; name.className = "grow";
-      var loc = el("input"); loc.value = w.location || ""; loc.placeholder = "Локация"; loc.className = "grow";
-      row.appendChild(ext); row.appendChild(name); row.appendChild(loc);
+      var row = el("div", "simple-row ws-row");
+      var extF = wsCol("Внешний ID", w.externalId, "напр. WS-204", false); extF.col.style.flex = "0 0 150px";
+      var nameF = wsCol("Название", w.name, "напр. Ресепшн 1", true);
+      var locF = wsCol("Описание", w.location, "напр. Главный холл", true);
+      var ext = extF.input, name = nameF.input, loc = locF.input;
+      row.appendChild(extF.col); row.appendChild(nameF.col); row.appendChild(locF.col);
       var save = el("button", "btn btn-ghost btn-sm", "Сохранить");
       save.addEventListener("click", function () { apiSend("/workstations/" + w.id, "PUT", { externalId: ext.value, name: name.value, location: loc.value }).then(loadWorkstations).then(function () { toast("Сохранено"); }); });
       row.appendChild(save);
@@ -544,6 +638,16 @@
       method: "PUT", path: "/api/ext/devices/{id}/workstation",
       desc: "Привязать планшет к рабочему месту по externalId места. Так внешняя система задаёт, какой планшет на каком месте.",
       sample: 'curl -X PUT -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"externalId":"WS-204"}\' \\\n  {BASE}/api/ext/devices/DEVICE_ID/workstation'
+    },
+    {
+      method: "POST", path: "/api/ext/show-document",
+      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{ФИО}} и т.п. в шаблоне (текст задаётся в админке) заполняются из fields. Массив checkboxes добавляет пункты согласия: checked - начальное состояние, required - обязателен. Цель: deviceId или workstationExternalId. В ответе missingPlaceholders - какие поля не переданы.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванов Иван","ДР":"01.01.1990","Адрес регистрации":"г. Минск, ул. Ленина 1"},\n       "checkboxes":[{"label":"Согласен на рассылку","checked":false,"required":false}]}\' \\\n  {BASE}/api/ext/show-document'
+    },
+    {
+      method: "POST", path: "/api/ext/return-slides",
+      desc: "Вернуть планшет к рекламе и очистить данные подписанта. Цель: deviceId или workstationExternalId.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/return-slides'
     }
   ];
 
@@ -596,12 +700,20 @@
   }
 
   // ---------------- Realtime ----------------
+  // Reconnects for the whole life of the page (24/7): the automatic policy handles brief blips,
+  // and onclose re-opens a fresh connection after longer outages (e.g. a server restart), then
+  // re-syncs so the dashboard is never left stale.
   function connectHub() {
-    var conn = new signalR.HubConnectionBuilder().withUrl("/hub/kiosk").withAutomaticReconnect().configureLogging(signalR.LogLevel.Warning).build();
+    var conn = new signalR.HubConnectionBuilder()
+      .withUrl("/hub/kiosk")
+      .withAutomaticReconnect([0, 2000, 5000, 10000, 15000, 30000])
+      .configureLogging(signalR.LogLevel.Warning)
+      .build();
     conn.on("SignatureReceived", function () { toast("Получена новая подпись"); loadSignatures(); });
     conn.on("DevicesChanged", function () { loadDevices(); });
     function reg() { conn.invoke("RegisterAdmin").catch(function () {}); }
-    conn.onreconnected(reg);
+    conn.onreconnected(function () { reg(); loadDevices(); });
+    conn.onclose(function () { setTimeout(connectHub, 4000); });
     conn.start().then(reg).catch(function () { setTimeout(connectHub, 4000); });
   }
 

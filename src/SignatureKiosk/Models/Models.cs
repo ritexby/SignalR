@@ -8,12 +8,16 @@ public class KioskState
     public string Mode { get; set; } = "slides"; // "slides" | "document"
     public List<string> PlaylistImageIds { get; set; } = new();
     public int IntervalSec { get; set; } = 6;
+    public Dictionary<string, string> Fields { get; set; } = new();       // per-signer values for {{tags}}
+    public List<DocCheckbox> DynamicCheckboxes { get; set; } = new();     // per-signer checkboxes from the API
 
     public KioskState Clone() => new()
     {
         Mode = Mode,
         PlaylistImageIds = new List<string>(PlaylistImageIds),
-        IntervalSec = IntervalSec
+        IntervalSec = IntervalSec,
+        Fields = new Dictionary<string, string>(Fields),
+        DynamicCheckboxes = DynamicCheckboxes.Select(c => new DocCheckbox { Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList()
     };
 }
 
@@ -90,6 +94,7 @@ public class DocCheckbox
 {
     public string Label { get; set; } = "";
     public bool Required { get; set; } = true;
+    public bool Checked { get; set; } = false; // initial state (used by API-supplied checkboxes)
 }
 
 public class DocPage
@@ -97,6 +102,7 @@ public class DocPage
     public string Heading { get; set; } = "";
     public string Body { get; set; } = "";
     public List<DocCheckbox> Checkboxes { get; set; } = new();
+    public bool IncludeDynamic { get; set; } = false; // anchor: API-supplied checkboxes render here
 }
 
 public class DocumentConfig
@@ -105,6 +111,7 @@ public class DocumentConfig
     public List<DocPage> Pages { get; set; } = new();
     public string SignPrompt { get; set; } = "Пожалуйста, поставьте вашу подпись в поле ниже";
     public string ThankYouText { get; set; } = "Спасибо! Ваша подпись принята.";
+    public int IdleReturnSec { get; set; } = 180; // auto-return to ads after this idle time (0 = off)
 }
 
 // ---------- Signature submission / record ----------
@@ -131,6 +138,7 @@ public class SignatureRecord
     public string? WorkstationId { get; set; }
     public string? WorkstationName { get; set; }
     public List<SubmittedItem> Items { get; set; } = new();
+    public Dictionary<string, string>? Fields { get; set; } // signer data used to fill {{tags}}
 }
 
 // ---------- Realtime payloads (server -> kiosk) ----------
@@ -153,6 +161,7 @@ public class CurrentCommand
 public record LoginDto(string? Password);
 public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec);
 public record TargetDto(string? Target);
+public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes);
 
 public record EnrollRequest(string? Code);
 public record CreateEnrollmentDto(string? Name, string? WorkstationId, List<string>? GroupIds, int? TtlMinutes);
@@ -163,3 +172,4 @@ public record ApiKeyDto(string? Label);
 
 public record ExtEnrollmentDto(string? WorkstationExternalId, string? Name);
 public record ExtWorkstationAssignDto(string? ExternalId);
+public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes);

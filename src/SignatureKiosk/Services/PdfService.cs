@@ -54,6 +54,15 @@ public class PdfService
         w.Line(meta, w.Small);
         w.Gap(14);
 
+        if (rec.Fields is { Count: > 0 })
+        {
+            w.Line("Данные подписанта:", w.H2);
+            w.Gap(3);
+            foreach (var kv in rec.Fields)
+                w.Paragraph(kv.Key + ": " + kv.Value, w.Body);
+            w.Gap(12);
+        }
+
         foreach (var page in doc.Pages ?? new List<DocPage>())
         {
             if (!string.IsNullOrWhiteSpace(page.Heading)) { w.Line(page.Heading, w.H2); w.Gap(2); }
@@ -75,7 +84,10 @@ public class PdfService
         var img = XImage.FromStream(ms);
         w.Signature("Подпись клиента:", img);
 
+        // ms and img must stay alive across Save: PDFsharp reads the image bytes lazily there.
         pdf.Save(path);
+        w.Finish();
+        img.Dispose();
         return path;
     }
 
@@ -96,6 +108,9 @@ public class PdfService
 
         private void NewPage()
         {
+            // Release the finished page's graphics before starting the next, so at most one
+            // XGraphics is live at a time during generation.
+            _gfx?.Dispose();
             var page = _doc.AddPage();
             page.Size = PageSize.A4;
             _gfx = XGraphics.FromPdfPage(page);
@@ -103,6 +118,9 @@ public class PdfService
             _contentW = page.Width.Point - 2 * Margin;
             _y = Margin;
         }
+
+        /// <summary>Release the last page's graphics (call after the document has been saved).</summary>
+        public void Finish() => _gfx?.Dispose();
 
         public void Gap(double h) => _y += h;
 
@@ -148,7 +166,9 @@ public class PdfService
             _gfx.DrawString(label, H2, XBrushes.Black, new XPoint(Margin, _y + H2.GetHeight()));
             _y += H2.GetHeight() * 1.5;
 
-            double scale = Math.Min(boxW / img.PixelWidth, boxH / img.PixelHeight);
+            double scale = img.PixelWidth > 0 && img.PixelHeight > 0
+                ? Math.Min(boxW / img.PixelWidth, boxH / img.PixelHeight)
+                : 1;
             double dw = img.PixelWidth * scale, dh = img.PixelHeight * scale;
             _gfx.DrawImage(img, Margin, _y, dw, dh);
             _y += Math.Max(dh, 40) + 4;

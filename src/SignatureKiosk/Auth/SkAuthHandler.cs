@@ -43,7 +43,10 @@ public class SkAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions>
         var authz = Request.Headers.Authorization.ToString();
         if (authz.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
             token = authz["Bearer ".Length..].Trim();
-        if (string.IsNullOrEmpty(token))
+        // The access_token query fallback exists only for the SignalR WebSocket handshake, which
+        // cannot send an Authorization header. Restricting it to the hub path keeps device tokens
+        // out of query strings (and proxy access logs) on every other request.
+        if (string.IsNullOrEmpty(token) && Request.Path.StartsWithSegments("/hub"))
         {
             var q = Request.Query["access_token"].ToString();
             if (!string.IsNullOrEmpty(q)) token = q;

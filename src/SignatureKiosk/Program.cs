@@ -74,6 +74,14 @@ var forwardedOptions = new ForwardedHeadersOptions
 };
 forwardedOptions.KnownIPNetworks.Clear();
 forwardedOptions.KnownProxies.Clear();
+// If the proxy IP(s) are configured, honour X-Forwarded-* ONLY from them (ForwardLimit = 1).
+// This stops a client from spoofing X-Forwarded-For to rotate its per-IP rate-limit bucket.
+// When unset, the header is trusted from any caller, which is safe only because the deploy guide
+// firewalls the app port so the proxy is the only reachable client (see deploy/README.md).
+foreach (var p in (app.Configuration["KnownProxies"] ?? "")
+             .Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    if (System.Net.IPAddress.TryParse(p, out var ip)) forwardedOptions.KnownProxies.Add(ip);
+if (forwardedOptions.KnownProxies.Count > 0) forwardedOptions.ForwardLimit = 1;
 app.UseForwardedHeaders(forwardedOptions);
 
 // Security response headers. The app serves its own first-party assets only (SignalR +
@@ -128,6 +136,9 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.MapHub<KioskHub>("/hub/kiosk");
 
+// Liveness probe for 24/7 monitoring (systemd, uptime checks). Anonymous, unthrottled.
+app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
+
 // ==================== Public: tablet enrollment ====================
 
 app.MapPost("/api/kiosk/enroll", (EnrollRequest req) =>
@@ -156,11 +167,19 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         ? null
         : storage.GetWorkstations().FirstOrDefault(w => w.Id == device.WorkstationId);
 
-    var doc = storage.GetDocument();
-    var rec = storage.AddSignature(sub, doc.Title, device, ws, png);
+    // Resolve the document with THIS device's signer data so the PDF and the stored record
+    // show the real values, not the {{tags}}.
+    var state = deviceId is null ? null : storage.ResolveState(deviceId);
+    var fields = state?.Fields is { Count: > 0 } ? state.Fields : null;
+    var resolvedDoc = DocumentTemplating.Resolve(storage.GetDocument(), fields, state?.DynamicCheckboxes);
+    var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, fields);
 
-    try { pdf.Generate(rec, doc, png); }
+    try { pdf.Generate(rec, resolvedDoc, png); }
     catch (Exception ex) { app.Logger.LogError(ex, "PDF generation failed for {Id}", rec.Id); }
+
+    // Privacy: clear this device's signer data and drop it out of document mode immediately, so a
+    // reconnect during the local thank-you screen cannot redisplay the signed data.
+    if (deviceId is not null) coord.ClearSignerSession(deviceId);
 
     await coord.NotifyAdminsSignatureAsync(rec);
     return Results.Ok(new { id = rec.Id });
@@ -333,24 +352,43 @@ admin.MapGet("/playlist", (string? target) =>
 
 admin.MapPut("/playlist", async (PlaylistSaveDto dto, KioskCoordinator coord) =>
 {
-    var target = string.IsNullOrWhiteSpace(dto.Target) ? KioskCoordinator.AllTarget : dto.Target!;
-    await coord.SaveAndShowSlidesAsync(target, dto.ImageIds ?? new List<string>(), dto.IntervalSec);
+    var target = string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!;
+    await coord.SaveAndShowSlidesAsync(target, dto?.ImageIds ?? new List<string>(), dto?.IntervalSec ?? 8);
     return Results.Ok(new { ok = true });
 });
 
 // ---- Document ----
 admin.MapGet("/document", () => Results.Ok(storage.GetDocument()));
-admin.MapPut("/document", (DocumentConfig doc) => { storage.SaveDocument(doc); return Results.Ok(new { ok = true }); });
-
-admin.MapPost("/show-document", async (TargetDto dto, KioskCoordinator coord) =>
+admin.MapPut("/document", (DocumentConfig? doc) =>
 {
-    await coord.ShowDocumentAsync(string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!);
+    if (doc is null) return Results.BadRequest(new { error = "document required" });
+    storage.SaveDocument(doc);
     return Results.Ok(new { ok = true });
+});
+
+// Placeholders currently used in the template, so operators and integrators know which
+// fields to provide.
+admin.MapGet("/document/placeholders", () =>
+    Results.Ok(new { placeholders = DocumentTemplating.Placeholders(storage.GetDocument()) }));
+
+// A document is ALWAYS shown on exactly one tablet (never all/group), so the signer's
+// personal data can only ever reach that one device.
+admin.MapPost("/show-document", async (ShowDocumentDto dto, KioskCoordinator coord) =>
+{
+    var deviceId = DeviceFromTarget(dto?.Target);
+    if (deviceId is null)
+        return Results.BadRequest(new { error = "Документ показывается только на один планшет. Выберите планшет." });
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes);
+    var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
+    return Results.Ok(new { ok = true, missingPlaceholders = missing });
 });
 
 admin.MapPost("/show-slides", async (TargetDto dto, KioskCoordinator coord) =>
 {
-    await coord.ReturnToSlidesAsync(string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!);
+    var deviceId = DeviceFromTarget(dto?.Target);
+    if (deviceId is null)
+        return Results.BadRequest(new { error = "Возврат к рекламе выполняется для одного планшета." });
+    await coord.ReturnToSlidesAsync(deviceId);
     return Results.Ok(new { ok = true });
 });
 
@@ -374,9 +412,23 @@ admin.MapGet("/signatures/{id}/image", (string id) =>
     return path is null ? Results.NotFound() : Results.File(path, "image/png");
 });
 
-admin.MapGet("/signatures/{id}/pdf", (string id) =>
+admin.MapGet("/signatures/{id}/pdf", (string id, PdfService pdf) =>
 {
     var path = storage.GetPdfPath(id);
+    if (path is null)
+    {
+        // The PDF is missing only if generation failed at sign time. Regenerate it on demand
+        // from the exact stored record, document and signature image, so a transient failure
+        // does not leave a signed record permanently without a downloadable PDF.
+        var rec = storage.GetSignature(id);
+        var doc = storage.GetSignatureDocument(id);
+        var png = storage.GetSignatureImageBytes(id);
+        if (rec is not null && doc is not null && png is not null)
+        {
+            try { path = pdf.Generate(rec, doc, png); }
+            catch (Exception ex) { app.Logger.LogError(ex, "On-demand PDF regeneration failed for {Id}", id); }
+        }
+    }
     return path is null ? Results.NotFound() : Results.File(path, "application/pdf", id + ".pdf");
 });
 
@@ -431,6 +483,58 @@ ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto)
     storage.AssignWorkstationByExternalId(id, dto?.ExternalId)
         ? Results.Ok(new { ok = true })
         : Results.Json(new { error = "device or workstation not found" }, statusCode: StatusCodes.Status404NotFound));
+
+// Resolve a device by its id, or by the external id of the workstation it is assigned to.
+// A document carries the signer's personal data, so this must resolve to exactly ONE device:
+// if a workstation has several tablets, we refuse rather than pick one arbitrarily and risk
+// showing one client's data on another client's screen. status is 0 on success.
+(string? id, int status, string? error) ResolveExtDeviceId(string? deviceId, string? workstationExternalId)
+{
+    if (!string.IsNullOrWhiteSpace(deviceId))
+        return storage.GetDevice(deviceId!) is not null
+            ? (deviceId, 0, null)
+            : (null, StatusCodes.Status404NotFound, "device not found");
+    if (!string.IsNullOrWhiteSpace(workstationExternalId))
+    {
+        var ws = storage.GetWorkstations().FirstOrDefault(w => w.ExternalId == workstationExternalId);
+        if (ws is null) return (null, StatusCodes.Status404NotFound, "workstation not found");
+        var matches = storage.GetDevices().Where(d => d.WorkstationId == ws.Id).Select(d => d.Id).ToList();
+        if (matches.Count == 0) return (null, StatusCodes.Status404NotFound, "no tablet is assigned to this workstation");
+        if (matches.Count > 1) return (null, StatusCodes.Status409Conflict, "several tablets are assigned to this workstation; pass deviceId to choose one");
+        return (matches[0], 0, null);
+    }
+    return (null, StatusCodes.Status400BadRequest, "pass deviceId or workstationExternalId");
+}
+
+// A single device id from an admin target ("device:{id}" or a bare id); null for all/group/unknown.
+string? DeviceFromTarget(string? target)
+{
+    if (string.IsNullOrWhiteSpace(target)) return null;
+    var id = target.StartsWith("device:", StringComparison.Ordinal) ? target["device:".Length..] : target;
+    return storage.GetDevice(id) is not null ? id : null;
+}
+
+// Show the signing document on one tablet with per-signer data. Placeholders {{...}} in the
+// admin-authored template are filled from `fields`; `checkboxes` add per-signer consent items.
+ext.MapPost("/show-document", async (ExtShowDocumentDto dto, KioskCoordinator coord) =>
+{
+    var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
+    if (deviceId is null)
+        return Results.Json(new { error }, statusCode: status);
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes);
+    var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
+    return Results.Ok(new { ok = true, deviceId, missingPlaceholders = missing });
+});
+
+// Return one tablet to advertising and clear its signer data.
+ext.MapPost("/return-slides", async (ExtShowDocumentDto dto, KioskCoordinator coord) =>
+{
+    var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
+    if (deviceId is null)
+        return Results.Json(new { error }, statusCode: status);
+    await coord.ReturnToSlidesAsync(deviceId);
+    return Results.Ok(new { ok = true, deviceId });
+});
 
 app.Run();
 

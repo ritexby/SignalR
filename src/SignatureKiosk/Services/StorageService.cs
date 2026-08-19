@@ -57,11 +57,6 @@ public class StorageService
         lock (_lock) return ReadOr(StatesPath, () => new StateStore());
     }
 
-    public void SaveStates(StateStore states)
-    {
-        lock (_lock) Write(StatesPath, states);
-    }
-
     /// <summary>
     /// Atomically read-modify-write the state store under the storage lock, so concurrent
     /// admin operations cannot lose each other's updates (no read/modify/write race).
@@ -407,25 +402,30 @@ public class StorageService
 
     public ImageInfo AddImage(Stream content, string originalName, string ext)
     {
+        var id = Guid.NewGuid().ToString("N");
+        ext = ext.StartsWith('.') ? ext : "." + ext;
+        var fileName = id + ext;
+
+        // Copy the (possibly large, network-backed) upload to disk WITHOUT holding the storage
+        // lock, so a slow upload cannot stall concurrent state mutations or SignalR pushes. The
+        // file name is a fresh GUID, so there is no collision with any other writer.
+        using (var fs = File.Create(Path.Combine(ImagesDir, fileName)))
+            content.CopyTo(fs);
+
+        var info = new ImageInfo
+        {
+            Id = id,
+            FileName = fileName,
+            OriginalName = originalName,
+            UploadedUtc = DateTime.UtcNow
+        };
         lock (_lock)
         {
-            var id = Guid.NewGuid().ToString("N");
-            ext = ext.StartsWith('.') ? ext : "." + ext;
-            var fileName = id + ext;
-            using (var fs = File.Create(Path.Combine(ImagesDir, fileName)))
-                content.CopyTo(fs);
             var list = ReadOr(ImagesIndexPath, () => new List<ImageInfo>());
-            var info = new ImageInfo
-            {
-                Id = id,
-                FileName = fileName,
-                OriginalName = originalName,
-                UploadedUtc = DateTime.UtcNow
-            };
             list.Add(info);
             Write(ImagesIndexPath, list);
-            return info;
         }
+        return info;
     }
 
     public bool DeleteImage(string id)
@@ -464,7 +464,7 @@ public class StorageService
 
     // ---------------- Signatures ----------------
 
-    public SignatureRecord AddSignature(SignatureSubmission sub, string documentTitle, Device? device, Workstation? workstation, byte[] pngBytes)
+    public SignatureRecord AddSignature(SignatureSubmission sub, DocumentConfig resolvedDoc, Device? device, Workstation? workstation, byte[] pngBytes, Dictionary<string, string>? fields = null)
     {
         lock (_lock)
         {
@@ -475,16 +475,45 @@ public class StorageService
             {
                 Id = id,
                 CreatedUtc = DateTime.UtcNow,
-                DocumentTitle = documentTitle,
+                DocumentTitle = resolvedDoc.Title,
                 DeviceId = device?.Id,
                 DeviceName = device?.Name,
                 WorkstationId = workstation?.Id,
                 WorkstationName = workstation?.Name,
-                Items = sub.Items ?? new List<SubmittedItem>()
+                Items = sub.Items ?? new List<SubmittedItem>(),
+                Fields = fields is { Count: > 0 } ? new Dictionary<string, string>(fields) : null
             };
             Write(Path.Combine(dir, "meta.json"), rec);
             File.WriteAllBytes(Path.Combine(dir, "signature.png"), pngBytes);
+            // Persist the exact resolved document so a failed PDF can be regenerated later
+            // from precisely what the signer saw, not from a template that may have changed.
+            Write(Path.Combine(dir, "document.json"), resolvedDoc);
             return rec;
+        }
+    }
+
+    /// <summary>The exact document that was signed (for faithful PDF regeneration); null if absent.</summary>
+    public DocumentConfig? GetSignatureDocument(string id)
+    {
+        if (!IsSafeId(id)) return null;
+        lock (_lock)
+        {
+            var path = Path.Combine(SignaturesDir, id, "document.json");
+            if (!File.Exists(path)) return null;
+            try { return JsonSerializer.Deserialize<DocumentConfig>(File.ReadAllText(path), Json); }
+            catch { return null; }
+        }
+    }
+
+    /// <summary>Raw signature PNG bytes for a record; null if the file is missing.</summary>
+    public byte[]? GetSignatureImageBytes(string id)
+    {
+        var path = GetSignatureImagePath(id);
+        if (path is null) return null;
+        lock (_lock)
+        {
+            try { return File.ReadAllBytes(path); }
+            catch { return null; }
         }
     }
 

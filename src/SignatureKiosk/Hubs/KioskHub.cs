@@ -62,7 +62,7 @@ public class KioskHub : Hub
     public async Task FinishDocument()
     {
         if (Context.Items.TryGetValue(DeviceItemKey, out var value) && value is string deviceId)
-            await _coord.ReturnToSlidesAsync("device:" + deviceId);
+            await _coord.ReturnToSlidesAsync(deviceId);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)

@@ -43,6 +43,7 @@
   function stopSlides() { if (slides.timer) { clearInterval(slides.timer); slides.timer = null; } }
 
   function applySlides(payload) {
+    clearDocState();
     showLayer("slides");
     stopSlides();
     var images = (payload && payload.images) || [];
@@ -85,22 +86,57 @@
   // ==================================================================
   // Signing document flow
   // ==================================================================
-  var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null };
+  var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null, idleTimer: null, idleMs: 0, thankTimer: null, session: 0 };
 
   function applyDocument(config) {
     stopSlides();
+    endDocSession();               // cancel any timers from a previous session; invalidates in-flight submits
     showLayer("document");
     doc.config = config || { title: "", pages: [] };
     doc.checks = {};
     doc.pad = null;
     doc.submitting = false;
     doc.screens = [];
-    (doc.config.pages || []).forEach(function (p, i) { doc.screens.push({ type: "page", pageIndex: i }); });
+    (doc.config.pages || []).forEach(function (p, i) {
+      doc.screens.push({ type: "page", pageIndex: i });
+      // Honour the initial checked state of API-supplied checkboxes.
+      (p.checkboxes || []).forEach(function (cb, ci) { if (cb && cb.checked) doc.checks[checkKey(i, ci)] = true; });
+    });
     doc.screens.push({ type: "signature" });
     doc.screens.push({ type: "thankyou" });
     doc.index = 0;
     el.docTitle.textContent = doc.config.title || "";
+    doc.idleMs = Math.max(0, parseInt(doc.config.idleReturnSec, 10) || 0) * 1000;
+    startIdle();
     renderScreen();
+  }
+
+  // A monotonic session id lets async callbacks (submit) detect that the document has been
+  // replaced or cleared meanwhile and quietly stop, avoiding cross-session jumps / null refs.
+  function endDocSession() {
+    doc.session++;
+    stopIdle();
+    if (doc.thankTimer) { clearTimeout(doc.thankTimer); doc.thankTimer = null; }
+  }
+
+  // Idle auto-return: if the signer walks away without signing, go back to ads and let the
+  // server clear their data. Any interaction on the document resets the timer.
+  function stopIdle() { if (doc.idleTimer) { clearTimeout(doc.idleTimer); doc.idleTimer = null; } }
+  function startIdle() { stopIdle(); if (doc.idleMs > 0) doc.idleTimer = setTimeout(onIdle, doc.idleMs); }
+  function resetIdle() { if (doc.idleMs > 0 && doc.config) startIdle(); }
+  function onIdle() {
+    // Return to ads via the server (which also clears the signer data). If the call fails
+    // (server briefly unreachable), re-arm so it retries rather than leaving data on screen.
+    if (conn) conn.invoke("FinishDocument").catch(function () { startIdle(); });
+  }
+
+  // Wipe every trace of the signer session from the tablet when returning to ads.
+  function clearDocState() {
+    endDocSession();
+    doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {};
+    doc.pad = null; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
+    el.docBody.innerHTML = ""; el.docFooter.innerHTML = "";
+    el.docTitle.textContent = ""; el.docProgress.textContent = "";
   }
 
   function checkKey(page, idx) { return "p" + page + "_c" + idx; }
@@ -174,6 +210,7 @@
   function renderSignature() {
     doc.docPadResize = null;
     var body = document.createElement("div");
+    body.className = "sign-screen";
 
     var prompt = document.createElement("div");
     prompt.className = "sign-prompt";
@@ -203,13 +240,17 @@
     doc.pad.addEventListener("beginStroke", function () { hint.style.display = "none"; });
     doc.pad.addEventListener("endStroke", updateFooter);
     sizeCanvas();
+    // Re-measure once the flex layout has settled so the pad fills its final size.
+    requestAnimationFrame(sizeCanvas);
     doc.docPadResize = sizeCanvas;
 
-    renderFooter({ back: true, clear: true, sign: true });
+    renderFooter({ back: doc.index > 0, clear: true, sign: true });
   }
 
   function renderThankYou() {
     doc.docPadResize = null;
+    stopIdle();
+    doc.idleMs = 0;                 // no idle timer on the thank-you screen (a touch must not re-arm it)
     el.docProgress.textContent = "";
     var body = document.createElement("div");
     body.className = "thankyou";
@@ -218,7 +259,8 @@
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
     el.docFooter.innerHTML = "";
-    setTimeout(function () { if (conn) conn.invoke("FinishDocument").catch(function () {}); }, 6000);
+    if (doc.thankTimer) clearTimeout(doc.thankTimer);
+    doc.thankTimer = setTimeout(function () { doc.thankTimer = null; if (conn) conn.invoke("FinishDocument").catch(function () {}); }, 6000);
   }
 
   function renderFooter(opts) {
@@ -288,24 +330,30 @@
   function submitSignature() {
     if (doc.submitting || !doc.pad || doc.pad.isEmpty()) return;
     doc.submitting = true;
+    var session = doc.session;     // this signing session; abandon the callbacks if it changed
     updateFooter();
     fetch("/api/sign", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + (getToken() || "") },
       body: JSON.stringify({ items: collectItems(), signature: doc.pad.toDataURL("image/png") })
     }).then(function (r) {
+      if (doc.session !== session) return;          // document was replaced/cleared while sending
       if (!r.ok) throw new Error("bad status " + r.status);
       doc.index = doc.screens.length - 1;
       renderScreen();
     }).catch(function () {
+      if (doc.session !== session) return;
       doc.submitting = false;
+      updateFooter();                               // re-enable the button first...
       var note = document.getElementById("footerNote");
-      if (note) note.textContent = "Ошибка отправки. Попробуйте ещё раз.";
-      updateFooter();
+      if (note) note.textContent = "Ошибка отправки. Попробуйте ещё раз."; // ...then show the error so it is not wiped
     });
   }
 
   window.addEventListener("resize", function () { if (doc.docPadResize) doc.docPadResize(); });
+  ["pointerdown", "keydown"].forEach(function (ev) {
+    el.document.addEventListener(ev, resetIdle, true);
+  });
 
   // ==================================================================
   // Identify overlay

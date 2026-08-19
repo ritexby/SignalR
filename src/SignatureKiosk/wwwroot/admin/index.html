@@ -10,6 +10,7 @@
   <!-- Login -->
   <div id="login" class="login hidden">
     <form id="loginForm" class="login-box">
+      <div class="login-brand">HELIX <span class="brand-accent">SignTablet</span></div>
       <h1>Вход в админку</h1>
       <input id="password" type="password" placeholder="Пароль" autocomplete="current-password" />
       <button type="submit" class="btn btn-primary">Войти</button>
@@ -20,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v4</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -48,12 +49,13 @@
           <label class="field-inline">Интервал, сек:
             <input id="intervalInput" type="number" min="1" max="3600" value="6" />
           </label>
-          <span class="spacer"></span>
-          <label class="upload-btn btn btn-ghost">
-            Загрузить картинки
-            <input id="imageUpload" type="file" accept="image/*" multiple hidden />
-          </label>
-          <button id="saveSlides" class="btn btn-primary">Сохранить и показать</button>
+          <div class="toolbar-actions">
+            <label class="upload-btn btn btn-ghost">
+              Загрузить картинки
+              <input id="imageUpload" type="file" accept="image/*" multiple hidden />
+            </label>
+            <button id="saveSlides" class="btn btn-primary">Сохранить и показать</button>
+          </div>
         </div>
         <div id="imageGrid" class="grid"></div>
       </section>
@@ -63,15 +65,20 @@
         <div class="panel-head">
           <h2>Документ для подписанта</h2>
         </div>
-        <p class="hint">«Показать документ» переключит выбранного здесь адресата с рекламы на этот документ. Этот выбор независим от вкладки «Слайды»: например, реклама идёт на все планшеты, а документ - только на один.</p>
+        <p class="hint">Документ показывается только на один выбранный планшет (вместе с его персональными данными). Реклама (вкладка «Слайды») настраивается отдельно и может идти на все планшеты, группу или один - это независимо.</p>
         <div class="toolbar">
-          <label class="target-inline">Кому:
+          <label class="target-inline">Планшет:
             <select id="docTarget"></select>
           </label>
-          <span class="spacer"></span>
-          <button id="saveDocument" class="btn btn-ghost">Сохранить документ</button>
-          <button id="showSlides" class="btn btn-ghost">Вернуть рекламу</button>
-          <button id="showDocument" class="btn btn-primary">Показать документ подписанту</button>
+          <div class="toolbar-actions">
+            <button id="saveDocument" class="btn btn-ghost">Сохранить</button>
+            <button id="showSlides" class="btn btn-ghost">Вернуть рекламу</button>
+            <button id="showDocument" class="btn btn-primary">Показать документ</button>
+          </div>
+        </div>
+        <div class="note-box">
+          <div>Подстановка данных: пишите в тексте <code>{{ФИО}}</code>, <code>{{ДР}}</code>, <code>{{Адрес регистрации}}</code> - при показе через API на их место подставляются значения. Можно использовать в заголовках, тексте и пунктах чекбоксов.</div>
+          <div id="docPlaceholders" class="placeholders"></div>
         </div>
         <div class="doc-editor">
           <label class="field">Заголовок документа
@@ -85,6 +92,9 @@
             </label>
             <label class="field">Текст экрана «Спасибо»
               <input id="thankYou" type="text" />
+            </label>
+            <label class="field">Автовозврат к рекламе при простое, сек (0 = выкл)
+              <input id="idleReturn" type="number" min="0" max="3600" />
             </label>
           </div>
         </div>
