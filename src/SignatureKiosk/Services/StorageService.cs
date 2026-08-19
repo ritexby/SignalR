@@ -62,6 +62,26 @@ public class StorageService
         lock (_lock) Write(StatesPath, states);
     }
 
+    /// <summary>
+    /// Atomically read-modify-write the state store under the storage lock, so concurrent
+    /// admin operations cannot lose each other's updates (no read/modify/write race).
+    /// The mutate callback runs while the lock is held; it must not perform I/O or block.
+    /// Returns whatever the callback computes (e.g. the list of devices to notify).
+    /// </summary>
+    public T MutateStates<T>(Func<StateStore, T> mutate)
+    {
+        lock (_lock)
+        {
+            var states = ReadOr(StatesPath, () => new StateStore());
+            var result = mutate(states);
+            Write(StatesPath, states);
+            return result;
+        }
+    }
+
+    public void MutateStates(Action<StateStore> mutate) =>
+        MutateStates<object?>(states => { mutate(states); return null; });
+
     /// <summary>Resolve the effective state for a device (its override, or a copy of the default).</summary>
     public KioskState ResolveState(string deviceId)
     {
@@ -460,7 +480,7 @@ public class StorageService
                 DeviceName = device?.Name,
                 WorkstationId = workstation?.Id,
                 WorkstationName = workstation?.Name,
-                Items = sub.Items
+                Items = sub.Items ?? new List<SubmittedItem>()
             };
             Write(Path.Combine(dir, "meta.json"), rec);
             File.WriteAllBytes(Path.Combine(dir, "signature.png"), pngBytes);
@@ -511,7 +531,7 @@ public class StorageService
     // ---------------- Helpers ----------------
 
     public static bool IsSafeId(string id) =>
-        !string.IsNullOrEmpty(id) && id.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.');
+        !string.IsNullOrEmpty(id) && !id.Contains("..") && id.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.');
 
     public static string Sha256Hex(string s) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s)));

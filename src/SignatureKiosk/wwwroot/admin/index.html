@@ -39,21 +39,22 @@
       <section class="panel" data-panel="slides">
         <div class="panel-head">
           <h2>Слайды (реклама)</h2>
-          <div class="row">
-            <label class="target-inline">Кому:
-              <select id="slidesTarget"></select>
-            </label>
-            <label>Интервал, сек:
-              <input id="intervalInput" type="number" min="1" max="3600" value="6" />
-            </label>
-            <label class="upload-btn btn btn-ghost">
-              Загрузить картинки
-              <input id="imageUpload" type="file" accept="image/*" multiple hidden />
-            </label>
-            <button id="saveSlides" class="btn btn-primary">Сохранить и показать</button>
-          </div>
         </div>
         <p class="hint">Реклама отправится выбранному адресату («Кому»): все / группа / конкретный планшет. Выбор здесь не зависит от вкладки «Документ». Номер на картинке - её порядок.</p>
+        <div class="toolbar">
+          <label class="target-inline">Кому:
+            <select id="slidesTarget"></select>
+          </label>
+          <label class="field-inline">Интервал, сек:
+            <input id="intervalInput" type="number" min="1" max="3600" value="6" />
+          </label>
+          <span class="spacer"></span>
+          <label class="upload-btn btn btn-ghost">
+            Загрузить картинки
+            <input id="imageUpload" type="file" accept="image/*" multiple hidden />
+          </label>
+          <button id="saveSlides" class="btn btn-primary">Сохранить и показать</button>
+        </div>
         <div id="imageGrid" class="grid"></div>
       </section>
 
@@ -61,16 +62,17 @@
       <section class="panel hidden" data-panel="document">
         <div class="panel-head">
           <h2>Документ для подписанта</h2>
-          <div class="row">
-            <label class="target-inline">Кому:
-              <select id="docTarget"></select>
-            </label>
-            <button id="saveDocument" class="btn btn-ghost">Сохранить документ</button>
-            <button id="showDocument" class="btn btn-primary">Показать документ подписанту</button>
-            <button id="showSlides" class="btn btn-ghost">Вернуть рекламу</button>
-          </div>
         </div>
         <p class="hint">«Показать документ» переключит выбранного здесь адресата с рекламы на этот документ. Этот выбор независим от вкладки «Слайды»: например, реклама идёт на все планшеты, а документ - только на один.</p>
+        <div class="toolbar">
+          <label class="target-inline">Кому:
+            <select id="docTarget"></select>
+          </label>
+          <span class="spacer"></span>
+          <button id="saveDocument" class="btn btn-ghost">Сохранить документ</button>
+          <button id="showSlides" class="btn btn-ghost">Вернуть рекламу</button>
+          <button id="showDocument" class="btn btn-primary">Показать документ подписанту</button>
+        </div>
         <div class="doc-editor">
           <label class="field">Заголовок документа
             <input id="docTitle" type="text" />
@@ -124,12 +126,12 @@
       <section class="panel hidden" data-panel="groups">
         <div class="panel-head">
           <h2>Группы планшетов</h2>
-          <div class="row">
-            <input id="newGroupName" type="text" placeholder="Название группы" />
-            <button id="addGroup" class="btn btn-primary">Добавить</button>
-          </div>
         </div>
-        <p class="hint">Объединяйте планшеты в группы, чтобы отправлять контент сразу на группу (выбор «Кому» вверху).</p>
+        <p class="hint">Объединяйте планшеты в группы, чтобы отправлять контент сразу на группу (выбор «Кому» на вкладках «Слайды» и «Документ»).</p>
+        <div class="toolbar">
+          <input id="newGroupName" class="grow" type="text" placeholder="Название группы" />
+          <button id="addGroup" class="btn btn-primary">Добавить</button>
+        </div>
         <div id="groupsList" class="simple-list"></div>
       </section>
 
@@ -147,12 +149,12 @@
       <section class="panel hidden" data-panel="apikeys">
         <div class="panel-head">
           <h2>API-ключи (внешняя система)</h2>
-          <div class="row">
-            <input id="newKeyLabel" type="text" placeholder="Название ключа (напр. ERP)" />
-            <button id="addKey" class="btn btn-primary">Создать</button>
-          </div>
         </div>
         <p class="hint">Ключ даёт внешней системе доступ к <code>/api/ext/*</code>: список планшетов, статус, привязка к местам, создание кодов активации. Ключ показывается один раз при создании.</p>
+        <div class="toolbar">
+          <input id="newKeyLabel" class="grow" type="text" placeholder="Название ключа (напр. ERP)" />
+          <button id="addKey" class="btn btn-primary">Создать</button>
+        </div>
         <div id="keysList" class="simple-list"></div>
       </section>
 

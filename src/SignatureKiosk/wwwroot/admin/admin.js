@@ -321,11 +321,24 @@
       if (d.status === "revoked") nameRow.appendChild(el("span", "chip chip-danger", "заблокирован"));
       else nameRow.appendChild(el("span", "chip chip-ok", d.online ? "онлайн" : "офлайн"));
       info.appendChild(nameRow);
-      var meta = [];
-      if (d.workstationName) meta.push("Место: " + d.workstationName);
-      if (d.groups && d.groups.length) meta.push("Группы: " + d.groups.join(", "));
-      meta.push("посл. связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "-"));
-      info.appendChild(el("div", "dev-meta", meta.join("   ·   ")));
+
+      // Workstation: name, external ID and description (location).
+      var ws = d.workstation;
+      if (ws) {
+        var wsParts = [];
+        if (ws.name) wsParts.push(ws.name);
+        if (ws.externalId) wsParts.push("ID: " + ws.externalId);
+        if (ws.location) wsParts.push("Описание: " + ws.location);
+        info.appendChild(el("div", "dev-meta", "Рабочее место: " + (wsParts.length ? wsParts.join("   ·   ") : "-")));
+      } else {
+        info.appendChild(el("div", "dev-meta", "Рабочее место: не привязано"));
+      }
+
+      // Group(s) the tablet belongs to.
+      var groupsText = (d.groups && d.groups.length) ? d.groups.join(", ") : "без группы";
+      info.appendChild(el("div", "dev-meta", "Группа: " + groupsText));
+
+      info.appendChild(el("div", "dev-meta", "Последняя связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "-")));
       item.appendChild(info);
 
       var actions = el("div", "dev-actions");

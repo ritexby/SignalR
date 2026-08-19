@@ -147,7 +147,7 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         return Results.BadRequest(new { error = "signature required" });
 
     var png = DecodeDataUrlPng(sub.Signature);
-    if (png is null)
+    if (png is null || !IsPng(png))
         return Results.BadRequest(new { error = "invalid signature image" });
 
     var deviceId = ctx.User.FindFirst("device_id")?.Value;
@@ -203,21 +203,26 @@ admin.MapGet("/devices", () =>
 {
     var online = tracker.OnlineDeviceIds();
     var groups = storage.GetGroups().ToDictionary(g => g.Id, g => g.Name);
-    var wss = storage.GetWorkstations().ToDictionary(w => w.Id, w => w.Name);
+    var wss = storage.GetWorkstations().ToDictionary(w => w.Id, w => w);
     var devices = storage.GetDevices()
         .OrderBy(d => d.Name)
-        .Select(d => new
+        .Select(d =>
         {
-            d.Id,
-            d.Name,
-            d.Status,
-            d.GroupIds,
-            groups = d.GroupIds.Where(groups.ContainsKey).Select(g => groups[g]).ToList(),
-            d.WorkstationId,
-            workstationName = d.WorkstationId != null && wss.TryGetValue(d.WorkstationId, out var wn) ? wn : null,
-            online = online.Contains(d.Id),
-            d.LastSeenUtc,
-            d.EnrolledUtc
+            Workstation? w = d.WorkstationId != null && wss.TryGetValue(d.WorkstationId, out var found) ? found : null;
+            return new
+            {
+                d.Id,
+                d.Name,
+                d.Status,
+                d.GroupIds,
+                groups = d.GroupIds.Where(groups.ContainsKey).Select(g => groups[g]).ToList(),
+                d.WorkstationId,
+                workstationName = w?.Name,
+                workstation = w is null ? null : new { w.ExternalId, w.Name, w.Location },
+                online = online.Contains(d.Id),
+                d.LastSeenUtc,
+                d.EnrolledUtc
+            };
         });
     return Results.Ok(devices);
 });
@@ -461,3 +466,8 @@ static byte[]? DecodeDataUrlPng(string dataUrl)
     try { return Convert.FromBase64String(payload); }
     catch { return null; }
 }
+
+// PNG magic number: 89 50 4E 47 0D 0A 1A 0A. Guards against storing non-image bytes.
+static bool IsPng(byte[] b) =>
+    b.Length > 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47
+    && b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A;

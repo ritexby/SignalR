@@ -18,13 +18,16 @@ body {
 code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9em; }
 
 /* Buttons */
-.btn { appearance: none; border: 1px solid transparent; border-radius: 9px; padding: 9px 16px; font-size: .95rem; font-weight: 600; cursor: pointer; }
+.btn { appearance: none; border: 1px solid transparent; border-radius: 9px; padding: 9px 16px; font-size: .95rem; font-weight: 600; cursor: pointer; transition: background .15s, border-color .15s, transform .05s, box-shadow .15s; }
+.btn:active { transform: translateY(1px); }
 .btn-primary { background: var(--accent); color: #fff; }
 .btn-primary:hover { background: var(--accent-dark); }
 .btn-ghost { background: #eef1f6; color: #374151; border-color: var(--border); }
 .btn-ghost:hover { background: #e2e6ee; }
 .btn-danger { background: #fee2e2; color: var(--danger); }
+.btn-danger:hover { background: #fecaca; }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(22,163,74,.30); }
 
 /* Login */
 .login { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg); }
@@ -48,14 +51,28 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* Content */
 .content { padding: 22px; max-width: 1100px; margin: 0 auto; }
-.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 20px; }
-.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 22px 24px; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
 .panel-head h2 { margin: 0; font-size: 1.2rem; }
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .row label { display: flex; align-items: center; gap: 6px; font-size: .92rem; color: var(--muted); }
 .row input[type=number] { width: 80px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
-.hint { color: var(--muted); font-size: .9rem; margin: 6px 0 16px; }
+.hint { color: var(--muted); font-size: .9rem; line-height: 1.5; margin: 6px 0 16px; }
 .upload-btn { cursor: pointer; display: inline-flex; }
+
+/* Action toolbar: title above, controls in a full-width row that wraps cleanly.
+   The recipient selector and settings sit on the left, actions anchor to the
+   right on wide screens and drop below (left-aligned) when space runs out. */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin: 0 0 18px; }
+.toolbar .spacer { flex: 1 1 0; min-width: 0; }
+.toolbar > .btn { white-space: nowrap; }
+.toolbar .grow { flex: 1 1 220px; min-width: 180px; }
+.toolbar input[type=text], .toolbar input[type=search] { padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px; font-size: .95rem; color: var(--text); background: #fff; }
+.toolbar input:focus, .toolbar select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
+
+/* Inline labelled field (e.g. interval) inside a toolbar */
+.field-inline { display: flex; align-items: center; gap: 8px; font-size: .92rem; color: var(--muted); font-weight: 600; }
+.field-inline input[type=number] { width: 84px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; font-size: .95rem; color: var(--text); font-weight: 400; }
 
 /* Image grid */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
@@ -128,9 +145,9 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .chip-danger { background: #fee2e2; color: var(--danger); }
 
 .dev-item { align-items: flex-start; flex-wrap: wrap; }
-.dev-info { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 4px; }
-.dev-name { display: flex; align-items: center; gap: 10px; font-size: 1.02rem; }
-.dev-meta { color: var(--muted); font-size: .84rem; }
+.dev-info { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 3px; }
+.dev-name { display: flex; align-items: center; gap: 10px; font-size: 1.02rem; margin-bottom: 3px; }
+.dev-meta { color: var(--muted); font-size: .84rem; line-height: 1.5; }
 .dev-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .dev-item.revoked { opacity: .65; }
 .dot { margin-top: 6px; }

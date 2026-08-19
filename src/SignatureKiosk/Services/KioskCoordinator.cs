@@ -36,13 +36,11 @@ public class KioskCoordinator
         return (Kind.Device, target); // bare id → device
     }
 
-    private IClientProxy Clients(Kind kind, string id) => kind switch
-    {
-        Kind.All => _hub.Clients.Group("kiosks"),
-        Kind.Group => _hub.Clients.Group(RoomGroup(id)),
-        _ => _hub.Clients.Group(DeviceGroup(id))
-    };
-
+    /// <summary>
+    /// Resolve a target to the concrete set of device ids from storage (the source of truth
+    /// for group membership), so targeting reflects the current device configuration without
+    /// waiting for a reconnect. "All" resolves to the currently online devices.
+    /// </summary>
     private List<string> DeviceIds(Kind kind, string id) => kind switch
     {
         Kind.All => _tracker.OnlineDeviceIds().ToList(),
@@ -72,24 +70,17 @@ public class KioskCoordinator
 
     // ---------- State mutation ----------
 
-    private void ApplyToState(StateStore states, Kind kind, string id, Action<KioskState> mutate)
+    /// <summary>Set a device override's mode (creating it from the default when absent).</summary>
+    private static void SetDeviceMode(StateStore states, IEnumerable<string> deviceIds, string mode)
     {
-        if (kind == Kind.All)
-        {
-            mutate(states.Default);
-            foreach (var s in states.Devices.Values) mutate(s);
-            return;
-        }
-        foreach (var deviceId in kind == Kind.Group
-                     ? _storage.GetDevices().Where(d => d.GroupIds.Contains(id)).Select(d => d.Id)
-                     : new[] { id })
+        foreach (var deviceId in deviceIds)
         {
             if (!states.Devices.TryGetValue(deviceId, out var s))
             {
                 s = states.Default.Clone();
                 states.Devices[deviceId] = s;
             }
-            mutate(s);
+            s.Mode = mode;
         }
     }
 
@@ -107,52 +98,49 @@ public class KioskCoordinator
     {
         intervalSec = Math.Clamp(intervalSec, 1, 3600);
         var (kind, id) = Parse(target);
-        var states = _storage.GetStates();
+        var playlist = new List<string>(imageIds);
 
-        if (kind == Kind.All)
+        // Resolve the concrete device set outside the state lock (these read other files).
+        var online = _tracker.OnlineDeviceIds();
+        var targets = kind == Kind.All ? online.ToList() : DeviceIds(kind, id);
+
+        // Atomically update stored state and, from that same consistent snapshot, decide who
+        // should receive the slides now: everyone in scope except tablets currently showing a
+        // document (a document always has priority over ads).
+        var recipients = _storage.MutateStates(states =>
         {
-            states.Default.Mode = "slides";
-            states.Default.PlaylistImageIds = new List<string>(imageIds);
-            states.Default.IntervalSec = intervalSec;
-            foreach (var s in states.Devices.Values)
+            if (kind == Kind.All)
             {
-                s.PlaylistImageIds = new List<string>(imageIds);
-                s.IntervalSec = intervalSec;
-                if (s.Mode != "document") s.Mode = "slides";
+                states.Default.Mode = "slides";
+                states.Default.PlaylistImageIds = new List<string>(playlist);
+                states.Default.IntervalSec = intervalSec;
+                foreach (var s in states.Devices.Values)
+                {
+                    s.PlaylistImageIds = new List<string>(playlist);
+                    s.IntervalSec = intervalSec;
+                    if (s.Mode != "document") s.Mode = "slides";
+                }
             }
-            _storage.SaveStates(states);
-
-            var payloadAll = BuildSlidesPayload(states.Default);
-            foreach (var deviceId in _tracker.OnlineDeviceIds())
+            else
             {
-                if (IsShowingDocument(states, deviceId)) continue; // document wins
-                await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payloadAll);
+                foreach (var deviceId in targets)
+                {
+                    if (!states.Devices.TryGetValue(deviceId, out var s))
+                    {
+                        s = states.Default.Clone();
+                        states.Devices[deviceId] = s;
+                    }
+                    s.PlaylistImageIds = new List<string>(playlist);
+                    s.IntervalSec = intervalSec;
+                    if (s.Mode != "document") s.Mode = "slides";
+                }
             }
-            return;
-        }
+            return targets.Where(did => !IsShowingDocument(states, did)).ToList();
+        });
 
-        // Group or single device: update each concrete device's stored playlist, but
-        // apply the same document-priority rule per device.
-        var targetDevices = DeviceIds(kind, id);
-        foreach (var deviceId in targetDevices)
-        {
-            if (!states.Devices.TryGetValue(deviceId, out var s))
-            {
-                s = states.Default.Clone();
-                states.Devices[deviceId] = s;
-            }
-            s.PlaylistImageIds = new List<string>(imageIds);
-            s.IntervalSec = intervalSec;
-            if (s.Mode != "document") s.Mode = "slides";
-        }
-        _storage.SaveStates(states);
-
-        var payload = BuildSlidesPayload(new KioskState { PlaylistImageIds = imageIds, IntervalSec = intervalSec });
-        foreach (var deviceId in targetDevices)
-        {
-            if (IsShowingDocument(states, deviceId)) continue; // document wins
+        var payload = BuildSlidesPayload(new KioskState { PlaylistImageIds = playlist, IntervalSec = intervalSec });
+        foreach (var deviceId in recipients)
             await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
-        }
     }
 
     private static bool IsShowingDocument(StateStore states, string deviceId) =>
@@ -161,22 +149,43 @@ public class KioskCoordinator
     public async Task ShowDocumentAsync(string target)
     {
         var (kind, id) = Parse(target);
-        var states = _storage.GetStates();
-        ApplyToState(states, kind, id, s => s.Mode = "document");
-        _storage.SaveStates(states);
+        var online = _tracker.OnlineDeviceIds();
+        var targets = kind == Kind.All ? online.ToList() : DeviceIds(kind, id);
 
-        await Clients(kind, id).SendAsync("ShowDocument", _storage.GetDocument());
+        _storage.MutateStates(states =>
+        {
+            if (kind == Kind.All)
+            {
+                // "All" also sets the default so tablets that connect later show the document too.
+                states.Default.Mode = "document";
+                foreach (var s in states.Devices.Values) s.Mode = "document";
+            }
+            else SetDeviceMode(states, targets, "document");
+        });
+
+        var doc = _storage.GetDocument();
+        foreach (var deviceId in targets)
+            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", doc);
     }
 
     public async Task ReturnToSlidesAsync(string target)
     {
         var (kind, id) = Parse(target);
-        var states = _storage.GetStates();
-        ApplyToState(states, kind, id, s => s.Mode = "slides");
-        _storage.SaveStates(states);
+        var online = _tracker.OnlineDeviceIds();
+        var targets = kind == Kind.All ? online.ToList() : DeviceIds(kind, id);
 
-        // Each device may keep a different playlist → send its own payload per device.
-        foreach (var deviceId in DeviceIds(kind, id))
+        _storage.MutateStates(states =>
+        {
+            if (kind == Kind.All)
+            {
+                states.Default.Mode = "slides";
+                foreach (var s in states.Devices.Values) s.Mode = "slides";
+            }
+            else SetDeviceMode(states, targets, "slides");
+        });
+
+        // Each device may keep a different playlist, so send its own payload per device.
+        foreach (var deviceId in targets)
         {
             var payload = BuildSlidesPayload(_storage.ResolveState(deviceId));
             await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
