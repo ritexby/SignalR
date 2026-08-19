@@ -99,7 +99,7 @@ public class StorageService
         lock (_lock) return ReadOr(DevicesPath, () => new List<Device>()).FirstOrDefault(d => d.Id == id);
     }
 
-    public void TouchDevice(string id)
+    public void TouchDevice(string id, string? ip = null)
     {
         lock (_lock)
         {
@@ -107,6 +107,7 @@ public class StorageService
             var dev = list.FirstOrDefault(d => d.Id == id);
             if (dev == null) return;
             dev.LastSeenUtc = DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(ip)) dev.LastIp = ip;
             Write(DevicesPath, list);
         }
     }

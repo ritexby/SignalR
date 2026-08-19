@@ -40,6 +40,7 @@ public class Device
     public string? WorkstationId { get; set; }
     public DateTime EnrolledUtc { get; set; }
     public DateTime LastSeenUtc { get; set; }
+    public string? LastIp { get; set; }                       // client IP seen at the last connection
     public string Status { get; set; } = "active";            // "active" | "revoked"
 }
 

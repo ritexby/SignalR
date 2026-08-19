@@ -127,11 +127,21 @@ app.UseAuthorization();
 app.UseRateLimiter();
 
 app.UseDefaultFiles();
-app.UseStaticFiles();
+// Kiosk tablets (Android WebView) and browsers cache JS/CSS aggressively; without this they
+// can keep showing an old UI after a deploy. Tell every client to revalidate a cached asset
+// before using it, so a new build is always picked up: a 304 when unchanged (ETags are still
+// sent, so this stays cheap), the new file when changed.
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx => ctx.Context.Response.Headers["Cache-Control"] = "no-cache, must-revalidate"
+});
+// Uploaded slide images are content-addressed by a GUID file name, so a given URL never
+// changes; they may be cached for a long time.
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(storage.ImagesDir),
-    RequestPath = "/media"
+    RequestPath = "/media",
+    OnPrepareResponse = ctx => ctx.Context.Response.Headers["Cache-Control"] = "public, max-age=604800"
 });
 
 app.MapHub<KioskHub>("/hub/kiosk");
@@ -221,6 +231,7 @@ var admin = app.MapGroup("/api/admin").RequireAuthorization("Admin");
 admin.MapGet("/devices", () =>
 {
     var online = tracker.OnlineDeviceIds();
+    var liveIps = tracker.OnlineIps();
     var groups = storage.GetGroups().ToDictionary(g => g.Id, g => g.Name);
     var wss = storage.GetWorkstations().ToDictionary(w => w.Id, w => w);
     var devices = storage.GetDevices()
@@ -228,6 +239,10 @@ admin.MapGet("/devices", () =>
         .Select(d =>
         {
             Workstation? w = d.WorkstationId != null && wss.TryGetValue(d.WorkstationId, out var found) ? found : null;
+            bool isOnline = online.Contains(d.Id);
+            // For an online tablet show the IP of its live connection; for an offline one, the
+            // last IP we saw it from.
+            string? ip = isOnline && liveIps.TryGetValue(d.Id, out var live) ? live : d.LastIp;
             return new
             {
                 d.Id,
@@ -238,8 +253,9 @@ admin.MapGet("/devices", () =>
                 d.WorkstationId,
                 workstationName = w?.Name,
                 workstation = w is null ? null : new { w.ExternalId, w.Name, w.Location },
-                online = online.Contains(d.Id),
+                online = isOnline,
                 d.LastSeenUtc,
+                lastIp = ip,
                 d.EnrolledUtc
             };
         });
@@ -445,18 +461,24 @@ var ext = app.MapGroup("/api/ext").AddEndpointFilter(async (ctx, next) =>
 ext.MapGet("/devices", () =>
 {
     var online = tracker.OnlineDeviceIds();
+    var liveIps = tracker.OnlineIps();
     var wss = storage.GetWorkstations().ToDictionary(w => w.Id, w => w);
     var groups = storage.GetGroups().ToDictionary(g => g.Id, g => g.Name);
-    return Results.Ok(storage.GetDevices().Select(d => new
+    return Results.Ok(storage.GetDevices().Select(d =>
     {
-        deviceId = d.Id,
-        d.Name,
-        d.Status,
-        online = online.Contains(d.Id),
-        d.LastSeenUtc,
-        groups = d.GroupIds.Where(groups.ContainsKey).Select(g => groups[g]),
-        workstation = d.WorkstationId != null && wss.TryGetValue(d.WorkstationId, out var w)
-            ? new { w.Id, w.ExternalId, w.Name, w.Location } : null
+        bool isOnline = online.Contains(d.Id);
+        return new
+        {
+            deviceId = d.Id,
+            d.Name,
+            d.Status,
+            online = isOnline,
+            d.LastSeenUtc,
+            lastIp = isOnline && liveIps.TryGetValue(d.Id, out var live) ? live : d.LastIp,
+            groups = d.GroupIds.Where(groups.ContainsKey).Select(g => groups[g]),
+            workstation = d.WorkstationId != null && wss.TryGetValue(d.WorkstationId, out var w)
+                ? new { w.Id, w.ExternalId, w.Name, w.Location } : null
+        };
     }));
 });
 

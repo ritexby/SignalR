@@ -425,7 +425,10 @@
       var groupsText = (d.groups && d.groups.length) ? d.groups.join(", ") : "без группы";
       info.appendChild(el("div", "dev-meta", "Группа: " + groupsText));
 
-      info.appendChild(el("div", "dev-meta", "Последняя связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "-")));
+      info.appendChild(el("div", "dev-meta", d.online
+        ? "Связь: на связи сейчас"
+        : "Последняя связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "-")));
+      info.appendChild(el("div", "dev-meta", (d.online ? "Текущий IP: " : "Последний IP: ") + (d.lastIp || "-")));
       item.appendChild(info);
 
       var actions = el("div", "dev-actions");

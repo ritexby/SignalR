@@ -6,10 +6,11 @@ namespace SignatureKiosk.Services;
 public class DeviceTracker
 {
     private readonly ConcurrentDictionary<string, HashSet<string>> _connections = new();
+    private readonly Dictionary<string, string> _ips = new();  // deviceId -> IP of its live connection
     private readonly object _lock = new();
 
     /// <summary>Register a connection for a device. Returns true if the device just came online.</summary>
-    public bool Add(string deviceId, string connectionId)
+    public bool Add(string deviceId, string connectionId, string? ip = null)
     {
         lock (_lock)
         {
@@ -20,6 +21,7 @@ public class DeviceTracker
             }
             bool wasEmpty = set.Count == 0;
             set.Add(connectionId);
+            if (!string.IsNullOrWhiteSpace(ip)) _ips[deviceId] = ip;
             return wasEmpty;
         }
     }
@@ -35,11 +37,18 @@ public class DeviceTracker
                 if (set.Count == 0)
                 {
                     _connections.TryRemove(deviceId, out _);
+                    _ips.Remove(deviceId);
                     return true;
                 }
             }
             return false;
         }
+    }
+
+    /// <summary>The current IP of each online device's live connection.</summary>
+    public Dictionary<string, string> OnlineIps()
+    {
+        lock (_lock) return new Dictionary<string, string>(_ips);
     }
 
     public bool IsOnline(string deviceId)

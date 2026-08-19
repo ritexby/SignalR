@@ -44,11 +44,23 @@ public class KioskHub : Hub
             foreach (var groupId in dev.GroupIds)
                 await Groups.AddToGroupAsync(Context.ConnectionId, KioskCoordinator.RoomGroup(groupId));
 
-        _storage.TouchDevice(deviceId);
-        _tracker.Add(deviceId, Context.ConnectionId);
+        var ip = ClientIp();
+        _storage.TouchDevice(deviceId, ip);
+        _tracker.Add(deviceId, Context.ConnectionId, ip);
         await _coord.NotifyAdminsDevicesAsync();
 
         return _coord.BuildCurrentCommand(deviceId);
+    }
+
+    /// <summary>The tablet's real IP. UseForwardedHeaders has already applied X-Forwarded-For,
+    /// so this is the client behind the reverse proxy, not the proxy itself. IPv4-mapped IPv6
+    /// addresses are normalised to plain dotted-quad.</summary>
+    private string? ClientIp()
+    {
+        var ip = Context.GetHttpContext()?.Connection.RemoteIpAddress;
+        if (ip is null) return null;
+        if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+        return ip.ToString();
     }
 
     /// <summary>The admin page subscribes to live notifications. Admins only.</summary>
@@ -69,6 +81,9 @@ public class KioskHub : Hub
     {
         if (Context.Items.TryGetValue(DeviceItemKey, out var value) && value is string deviceId)
         {
+            // Stamp the moment the tablet dropped, so "last seen" reflects when it actually went
+            // off air (while it stays connected the admin shows "online now" instead of a time).
+            _storage.TouchDevice(deviceId);
             _tracker.Remove(deviceId, Context.ConnectionId);
             await _coord.NotifyAdminsDevicesAsync();
         }
