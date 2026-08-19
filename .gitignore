@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+publish/
+*.user
+
+# Runtime data (uploaded images, signatures, state)
+data/
+
+# Local .NET install used for building in CI/sandbox
+.dotnet/
+
+# Vendored browser libs — fetched at build/deploy time by deploy/fetch-libs.sh
+src/SignatureKiosk/wwwroot/lib/
+
+# OS / editor
+.DS_Store
+.vs/
+.vscode/

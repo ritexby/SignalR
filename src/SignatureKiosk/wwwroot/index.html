@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <title>Kiosk</title>
+  <link rel="stylesheet" href="/kiosk.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Slideshow layer -->
+    <section id="slideshow" class="layer">
+      <img id="slideA" class="slide" alt="" />
+      <img id="slideB" class="slide" alt="" />
+      <div id="slidesEmpty" class="empty hidden">Ожидание контента…</div>
+    </section>
+
+    <!-- Signing document layer -->
+    <section id="document" class="layer hidden">
+      <div class="doc-frame">
+        <header class="doc-header">
+          <h1 id="docTitle"></h1>
+          <div id="docProgress" class="doc-progress"></div>
+        </header>
+        <main id="docBody" class="doc-body"></main>
+        <footer id="docFooter" class="doc-footer"></footer>
+      </div>
+    </section>
+
+    <!-- Connection status -->
+    <div id="statusOverlay" class="status hidden"><div class="status-box"><span id="statusText"></span></div></div>
+    <div id="deviceBadge" class="badge hidden"></div>
+  </div>
+
+  <script src="/lib/signalr.min.js"></script>
+  <script src="/lib/signature_pad.umd.min.js"></script>
+  <script src="/kiosk.js"></script>
+</body>
+</html>

@@ -1,0 +1,115 @@
+namespace SignatureKiosk.Models;
+
+// ---------- Kiosk / slideshow state ----------
+
+/// <summary>Per-device (or default) screen state.</summary>
+public class KioskState
+{
+    public string Mode { get; set; } = "slides"; // "slides" | "document"
+    public List<string> PlaylistImageIds { get; set; } = new();
+    public int IntervalSec { get; set; } = 6;
+
+    public KioskState Clone() => new()
+    {
+        Mode = Mode,
+        PlaylistImageIds = new List<string>(PlaylistImageIds),
+        IntervalSec = IntervalSec
+    };
+}
+
+/// <summary>Persisted collection of states: one shared default plus per-device overrides.</summary>
+public class StateStore
+{
+    public KioskState Default { get; set; } = new();
+    public Dictionary<string, KioskState> Devices { get; set; } = new();
+}
+
+// ---------- Devices ----------
+
+public class DeviceInfo
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+}
+
+// ---------- Images ----------
+
+public class ImageInfo
+{
+    public string Id { get; set; } = "";
+    public string FileName { get; set; } = "";
+    public string OriginalName { get; set; } = "";
+    public DateTime UploadedUtc { get; set; }
+}
+
+// ---------- Signing document ----------
+
+public class DocCheckbox
+{
+    public string Label { get; set; } = "";
+    public bool Required { get; set; } = true;
+}
+
+public class DocPage
+{
+    public string Heading { get; set; } = "";
+    public string Body { get; set; } = "";
+    public List<DocCheckbox> Checkboxes { get; set; } = new();
+}
+
+public class DocumentConfig
+{
+    public string Title { get; set; } = "Документ";
+    public List<DocPage> Pages { get; set; } = new();
+    public string SignPrompt { get; set; } = "Пожалуйста, поставьте вашу подпись в поле ниже";
+    public string ThankYouText { get; set; } = "Спасибо! Ваша подпись принята.";
+}
+
+// ---------- Signature submission / record ----------
+
+public class SubmittedItem
+{
+    public string Label { get; set; } = "";
+    public bool Checked { get; set; }
+}
+
+public class SignatureSubmission
+{
+    public string? DeviceId { get; set; }
+    public List<SubmittedItem> Items { get; set; } = new();
+    public string Signature { get; set; } = ""; // data URL (image/png)
+}
+
+public class SignatureRecord
+{
+    public string Id { get; set; } = "";
+    public DateTime CreatedUtc { get; set; }
+    public string DocumentTitle { get; set; } = "";
+    public string? DeviceId { get; set; }
+    public string? DeviceName { get; set; }
+    public List<SubmittedItem> Items { get; set; } = new();
+}
+
+// ---------- Realtime payloads (server -> kiosk) ----------
+
+public class SlidesPayload
+{
+    public List<string> Images { get; set; } = new(); // resolved URLs
+    public int IntervalSec { get; set; } = 6;
+}
+
+public class CurrentCommand
+{
+    public string Mode { get; set; } = "slides"; // "slides" | "document"
+    public SlidesPayload? Slides { get; set; }
+    public DocumentConfig? Document { get; set; }
+}
+
+// ---------- API DTOs ----------
+
+public record LoginDto(string? Password);
+public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec);
+public record TargetDto(string? Target);
+public record DeviceRenameDto(string? Name);

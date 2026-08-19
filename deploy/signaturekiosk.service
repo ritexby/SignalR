@@ -1,0 +1,26 @@
+[Unit]
+Description=Signature Kiosk (ASP.NET Core + SignalR)
+After=network.target
+
+[Service]
+# Runtime configuration (admin password, port, data dir) comes from this file.
+# The leading "-" makes it optional so the service still starts with defaults.
+EnvironmentFile=-/etc/signaturekiosk.env
+WorkingDirectory=/opt/signaturekiosk/app
+ExecStart=/opt/signaturekiosk/app/SignatureKiosk
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+SyslogIdentifier=signaturekiosk
+User=www-data
+Group=www-data
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/signaturekiosk
+
+[Install]
+WantedBy=multi-user.target
