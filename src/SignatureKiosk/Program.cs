@@ -603,9 +603,6 @@ admin.MapPut("/document", (DocumentConfig? doc) =>
     return Results.Ok(new { ok = true });
 });
 
-// The documented set of API fields (tags) so the editor and integrators use the same names.
-admin.MapGet("/document/fields", () => Results.Ok(new { fields = DocumentTemplating.KnownFields }));
-
 // Preview: resolve the template with operator-supplied test values EXACTLY as a tablet would see
 // it (tags substituted, conditions applied, API checkboxes injected), without touching any tablet
 // and without storing anything. If a document is posted, the unsaved editor state is previewed.
@@ -853,25 +850,9 @@ admin.MapGet("/scans", (int? limit) => Results.Ok(storage.GetScans(Math.Clamp(li
 admin.MapDelete("/scans/{id}", (string id) =>
     storage.DeleteScan(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
 
-// ---- Document backup: export the whole template to a file, import it back ----
-// Export is a plain JSON snapshot with a kind/version header so an import can be validated.
-admin.MapGet("/document/export", () =>
-{
-    var doc = storage.GetDocument();
-    var payload = new DocumentBackup
-    {
-        Kind = DocumentBackup.KindValue,
-        Version = 1,
-        ExportedUtc = DateTime.UtcNow,
-        Document = doc
-    };
-    var json = System.Text.Json.JsonSerializer.Serialize(payload,
-        new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web) { WriteIndented = true });
-    var name = "signtablet-document-" + DateTime.Now.ToString("yyyyMMdd-HHmm") + ".json";
-    return Results.File(System.Text.Encoding.UTF8.GetBytes(json), "application/json", name);
-});
-
-// Import replaces the current template with a previously exported one (restore a backup).
+// ---- Document backup: import a template file back ----
+// Файл экспорта собирает сама админка: в него должны попадать и несохранённые правки редактора,
+// поэтому серверной выгрузки нет. Импорт проверяет заголовок файла, чтобы не подсунули чужой JSON.
 admin.MapPost("/document/import", (DocumentBackup? backup) =>
 {
     var doc = backup?.Document;
@@ -887,11 +868,6 @@ admin.MapPost("/document/import", (DocumentBackup? backup) =>
     storage.SaveDocument(doc);
     return Results.Ok(new { ok = true, pages = doc.Pages.Count });
 });
-
-// Placeholders currently used in the template, so operators and integrators know which
-// fields to provide.
-admin.MapGet("/document/placeholders", () =>
-    Results.Ok(new { placeholders = DocumentTemplating.Placeholders(storage.GetDocument()) }));
 
 // A document is ALWAYS shown on exactly one tablet (never all/group), so the signer's
 // personal data can only ever reach that one device.

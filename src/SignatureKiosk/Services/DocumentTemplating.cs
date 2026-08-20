@@ -82,7 +82,8 @@ public static partial class DocumentTemplating
             Label = Apply(c.Label, map),
             Required = c.Required,
             Checked = isChecked,
-            VisibleWhen = live is null ? null : LiveCondition(c.VisibleWhen, live)
+            VisibleWhen = live is null ? null : LiveCondition(c.VisibleWhen, live),
+            Ord = c.Ord
         };
     }
 
@@ -110,7 +111,8 @@ public static partial class DocumentTemplating
             Options = options,
             Required = g.Required,
             Selected = selected.Length == 0 ? null : selected,
-            VisibleWhen = LiveCondition(g.VisibleWhen, live)
+            VisibleWhen = LiveCondition(g.VisibleWhen, live),
+            Ord = g.Ord
         };
     }
 
@@ -202,8 +204,19 @@ public static partial class DocumentTemplating
         {
             var injected = dynamicCheckboxes!.Where(c => c is not null).Select(c => Cb(c, map, live, checkboxStates)).ToList();
             var anchor = pages.FirstOrDefault(p => p.IncludeDynamic) ?? pages.LastOrDefault();
-            if (anchor != null) anchor.Checkboxes.AddRange(injected);
-            else pages.Add(new DocPage { Checkboxes = injected });
+            if (anchor != null)
+            {
+                // Место присланного по API чекбокса в шаблоне не задано, поэтому он встаёт в конец
+                // страницы-якоря, следом за всем, что оператор расставил сам.
+                var next = PageOrdinalEnd(anchor);
+                foreach (var c in injected) c.Ord = next++;
+                anchor.Checkboxes.AddRange(injected);
+            }
+            else
+            {
+                for (var i = 0; i < injected.Count; i++) injected[i].Ord = i;
+                pages.Add(new DocPage { Checkboxes = injected });
+            }
         }
 
         return new DocumentConfig
@@ -298,7 +311,8 @@ public static partial class DocumentTemplating
                 Runs = (b.Runs ?? new List<TextRun>()).Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
                 ImageUrl = b.ImageUrl,
                 ImageWidth = b.ImageWidth,
-                VisibleWhen = LiveCondition(b.VisibleWhen, live)
+                VisibleWhen = LiveCondition(b.VisibleWhen, live),
+                Ord = b.Ord
             });
         }
         return result;
@@ -386,12 +400,61 @@ public static partial class DocumentTemplating
             // такую нечего. Оператору о ней сообщает проверка документа в редакторе.
             p.Groups = p.Groups.Where(g => g.Key.Length > 0 && g.Options.Count >= 2).ToList();
             if (p.Groups.Count > MaxGroups) p.Groups = p.Groups.Take(MaxGroups).ToList();
+
+            NormalizeOrder(p);
         }
 
         doc.SignBlocks = Compact(doc.SignBlocks);
         foreach (var b in doc.SignBlocks) CleanBlock(b);
         doc.SignBlocksBelow = Compact(doc.SignBlocksBelow);
         foreach (var b in doc.SignBlocksBelow) CleanBlock(b);
+    }
+
+    /// <summary>Номер, следующий за последним занятым на странице.</summary>
+    private static int PageOrdinalEnd(DocPage p)
+    {
+        var max = -1;
+        foreach (var b in p.Blocks) if (b.Ord > max) max = b.Ord;
+        foreach (var c in p.Checkboxes) if (c.Ord > max) max = c.Ord;
+        foreach (var g in p.Groups) if (g.Ord > max) max = g.Ord;
+        return max + 1;
+    }
+
+    /// <summary>
+    /// Привести порядок элементов страницы к сквозной нумерации 0..N-1. Блоки текста, чекбоксы и
+    /// группы стоят на странице вперемешку, в том порядке, в котором их расставил оператор, поэтому
+    /// номер общий для всех трёх видов. Документ, сохранённый до появления свободного порядка,
+    /// номеров не имеет: ему они проставляются по прежнему правилу (сначала текст, потом чекбоксы,
+    /// потом группы), и внешне он не меняется.
+    /// </summary>
+    private static void NormalizeOrder(DocPage p)
+    {
+        var items = new List<(int Ord, int Kind, int Index, Action<int> Set)>();
+        for (var i = 0; i < p.Blocks.Count; i++)
+        {
+            var b = p.Blocks[i];
+            items.Add((b.Ord, 0, i, v => b.Ord = v));
+        }
+        for (var i = 0; i < p.Checkboxes.Count; i++)
+        {
+            var c = p.Checkboxes[i];
+            items.Add((c.Ord, 1, i, v => c.Ord = v));
+        }
+        for (var i = 0; i < p.Groups.Count; i++)
+        {
+            var g = p.Groups[i];
+            items.Add((g.Ord, 2, i, v => g.Ord = v));
+        }
+        if (items.Count == 0) return;
+
+        // Элемент без номера встаёт туда, где он оказался бы в старом документе: в конец своего
+        // вида. Так добавленный извне чекбокс не оказывается вдруг посреди текста.
+        var maxOrd = items.Count;
+        var ordered = items
+            .Select(x => (Key: x.Ord >= 0 ? x.Ord : maxOrd + x.Kind * maxOrd + x.Index, x.Kind, x.Index, x.Set))
+            .OrderBy(x => x.Key).ThenBy(x => x.Kind).ThenBy(x => x.Index)
+            .ToList();
+        for (var i = 0; i < ordered.Count; i++) ordered[i].Set(i);
     }
 
     /// <summary>A non-null list without null elements.</summary>

@@ -116,6 +116,10 @@ public class DocCheckbox
     // Shown only while its condition holds. A condition on another checkbox is evaluated on the
     // tablet as the signer ticks; a condition on a tag is evaluated on the server, as before.
     public VisibleWhen? VisibleWhen { get; set; }
+    // Место элемента внутри страницы. Блоки текста, чекбоксы и группы стоят в одном общем порядке,
+    // поэтому номер сквозной для всех трёх видов. -1 означает "не задан": так выглядят документы,
+    // сохранённые до появления свободного порядка, и им номера проставляются при сохранении.
+    public int Ord { get; set; } = -1;
 }
 
 /// <summary>One option inside a group. Its key is what the API sends to select it.</summary>
@@ -138,6 +142,10 @@ public class DocGroup
     public bool Required { get; set; } = false;   // true: nothing chosen blocks the signer
     public string? Selected { get; set; }         // option key, or null for nothing chosen
     public VisibleWhen? VisibleWhen { get; set; }
+    // Место элемента внутри страницы. Блоки текста, чекбоксы и группы стоят в одном общем порядке,
+    // поэтому номер сквозной для всех трёх видов. -1 означает "не задан": так выглядят документы,
+    // сохранённые до появления свободного порядка, и им номера проставляются при сохранении.
+    public int Ord { get; set; } = -1;
 }
 
 /// <summary>A styled piece of text. Formatting is a curated set so it renders identically on the
@@ -168,6 +176,10 @@ public class DocBlock
     public string? ImageUrl { get; set; }        // "/media/{file}" when this block is an image
     public int ImageWidth { get; set; } = 100;   // image width as a percent of the content width (10..100)
     public VisibleWhen? VisibleWhen { get; set; }
+    // Место элемента внутри страницы. Блоки текста, чекбоксы и группы стоят в одном общем порядке,
+    // поэтому номер сквозной для всех трёх видов. -1 означает "не задан": так выглядят документы,
+    // сохранённые до появления свободного порядка, и им номера проставляются при сохранении.
+    public int Ord { get; set; } = -1;
 }
 
 public class DocPage

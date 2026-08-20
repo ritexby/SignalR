@@ -304,6 +304,26 @@
     }
   }
 
+  // Элементы страницы стоят в одном общем порядке: оператор чередует текст, чекбоксы и группы
+  // так, как того требует соглашение. У документа, сохранённого до появления свободного порядка,
+  // номеров нет, и тогда порядок остаётся прежним: сначала текст, потом чекбоксы, потом группы.
+  var ORD_TAIL = 100000;
+  function pageItems(page, blocks) {
+    var items = [];
+    function add(list, kind) {
+      (list || []).forEach(function (it, i) {
+        if (!it) return;
+        var ord = (typeof it.ord === "number" && it.ord >= 0) ? it.ord : ORD_TAIL + kind * ORD_TAIL + i;
+        items.push({ ord: ord, kind: kind, index: i, item: it });
+      });
+    }
+    add(blocks, 0);
+    add(page.checkboxes, 1);
+    add(page.groups, 2);
+    items.sort(function (a, b) { return (a.ord - b.ord) || (a.kind - b.kind) || (a.index - b.index); });
+    return items;
+  }
+
   function renderPage(pageIndex) {
     var page = doc.config.pages[pageIndex];
     doc.docPadResize = null;
@@ -319,48 +339,41 @@
 
     var blocks = (page.blocks && page.blocks.length) ? page.blocks
       : (page.body ? [{ runs: [{ text: page.body }] }] : []);
-    visible(blocks).forEach(function (b) { appendBlock(body, b); });
 
     // Нажатие меняет то, что показано: блок или пункт может появиться или исчезнуть, поэтому
     // страница перерисовывается целиком, а не правится по месту.
     function rerender() { renderPage(pageIndex); }
 
-    if (page.checkboxes && page.checkboxes.length) {
-      var checks = document.createElement("div");
-      checks.className = "checks";
-      page.checkboxes.forEach(function (cb, i) {
-        if (!condHolds(cb.visibleWhen)) return;
-        var key = checkKey(pageIndex, i);
-        var label = document.createElement("label");
-        label.className = "check" + (doc.checks[key] ? " checked" : "");
-        var input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = !!doc.checks[key];
-        input.addEventListener("change", function () {
-          doc.checks[key] = input.checked;
-          label.classList.toggle("checked", input.checked);
-          // Перерисовываем, только если от этого пункта что-то зависит: иначе страница
-          // дёргалась бы под пальцем на каждой галочке без всякой причины.
-          if (cb.key && dependsOn(cb.key)) rerender(); else updateFooter();
-        });
-        var span = document.createElement("span");
-        span.className = "label";
-        span.textContent = cb.label || "";
-        if (cb.required) {
-          var req = document.createElement("span");
-          req.className = "req"; req.textContent = "*";
-          span.appendChild(req);
-        }
-        label.appendChild(input);
-        label.appendChild(span);
-        checks.appendChild(label);
+    function makeCheckbox(cb, i) {
+      var key = checkKey(pageIndex, i);
+      var label = document.createElement("label");
+      label.className = "check" + (doc.checks[key] ? " checked" : "");
+      var input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = !!doc.checks[key];
+      input.addEventListener("change", function () {
+        doc.checks[key] = input.checked;
+        label.classList.toggle("checked", input.checked);
+        // Перерисовываем, только если от этого пункта что-то зависит: иначе страница
+        // дёргалась бы под пальцем на каждой галочке без всякой причины.
+        if (cb.key && dependsOn(cb.key)) rerender(); else updateFooter();
       });
-      if (checks.childNodes.length) body.appendChild(checks);
+      var span = document.createElement("span");
+      span.className = "label";
+      span.textContent = cb.label || "";
+      if (cb.required) {
+        var req = document.createElement("span");
+        req.className = "req"; req.textContent = "*";
+        span.appendChild(req);
+      }
+      label.appendChild(input);
+      label.appendChild(span);
+      return label;
     }
 
     // Группы: выбрать можно один вариант, и «ни одного» это тоже состояние. Поэтому это
     // чекбоксы, а не радиокнопки: нажатие по уже выбранному снимает выбор.
-    visible(page.groups).forEach(function (g) {
+    function makeGroup(g) {
       var box = document.createElement("div");
       box.className = "group";
       if (g.title) {
@@ -395,7 +408,22 @@
         opts.appendChild(label);
       });
       box.appendChild(opts);
-      body.appendChild(box);
+      return box;
+    }
+
+    // Идущие подряд чекбоксы собираются в один блок: между ними должен быть тесный отступ,
+    // а не такой же, как между чекбоксом и абзацем текста.
+    var checks = null;
+    function checksBox() {
+      if (!checks) { checks = document.createElement("div"); checks.className = "checks"; body.appendChild(checks); }
+      return checks;
+    }
+    pageItems(page, blocks).forEach(function (it) {
+      if (!condHolds(it.item.visibleWhen)) return;
+      if (it.kind === 1) { checksBox().appendChild(makeCheckbox(it.item, it.index)); return; }
+      checks = null;
+      if (it.kind === 0) appendBlock(body, it.item);
+      else body.appendChild(makeGroup(it.item));
     });
 
     el.docBody.innerHTML = "";
@@ -590,13 +618,15 @@
 
   // В запись уходит только то, что клиент действительно видел: скрытый условием пункт нельзя
   // считать ни отмеченным, ни сознательно пропущенным.
+  // Порядок отметок в записи и в PDF должен совпадать с тем, в каком клиент видел их на экране:
+  // пункт относится к абзацу над ним, и переставленный список читался бы уже про другое.
   function collectItems() {
     var items = [];
     (doc.config.pages || []).forEach(function (page, pi) {
       if (!condHolds(page.visibleWhen)) return;
-      (page.checkboxes || []).forEach(function (cb, ci) {
-        if (!condHolds(cb.visibleWhen)) return;
-        items.push({ key: cb.key || "", label: cb.label, checked: !!doc.checks[checkKey(pi, ci)] });
+      pageItems(page, page.blocks || []).forEach(function (it) {
+        if (it.kind !== 1 || !condHolds(it.item.visibleWhen)) return;
+        items.push({ key: it.item.key || "", label: it.item.label, checked: !!doc.checks[checkKey(pi, it.index)] });
       });
     });
     return items;
@@ -606,7 +636,8 @@
     var groups = [];
     (doc.config.pages || []).forEach(function (page) {
       if (!condHolds(page.visibleWhen)) return;
-      visible(page.groups).forEach(function (g) {
+      var ordered = pageItems(page, []).filter(function (it) { return it.kind === 2; }).map(function (it) { return it.item; });
+      visible(ordered).forEach(function (g) {
         var selected = doc.picks[g.key] || "";
         var chosen = (g.options || []).filter(function (o) { return o.key === selected; })[0];
         groups.push({
@@ -927,7 +958,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "4.8";
+  var APP_VERSION = "4.9";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {

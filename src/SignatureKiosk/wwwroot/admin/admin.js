@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "4.8";
+  var APP_VERSION = "4.9";
 
   var state = {
     slidesTarget: "all",   // recipient for advertising slides (all / group / device)
@@ -21,6 +21,38 @@
   var devFilter = { q: "", status: "", groupId: "", wsId: "" };
 
   var $ = function (id) { return document.getElementById(id); };
+  /// Иконка из вшитого набора Lucide. Цвет и размер задаются в CSS через currentColor,
+  /// поэтому одна и та же иконка одинаково смотрится в кнопке, в заголовке и в списке.
+  function icon(name, cls) {
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("class", "ic" + (cls ? " " + cls : ""));
+    svg.innerHTML = (window.SK_ICONS && window.SK_ICONS[name]) || "";
+    return svg;
+  }
+
+  /// Кнопка с иконкой и подписью: везде одинаковый порядок и отступ.
+  function iconBtn(name, label, cls) {
+    var b = el("button", "btn " + (cls || "btn-ghost"));
+    b.appendChild(icon(name));
+    if (label) b.appendChild(el("span", null, label));
+    return b;
+  }
+
+  /// Подпись раздела внутри страницы, с иконкой.
+  function sectionLabel(name, text) {
+    var d = el("div", "section-label");
+    d.appendChild(icon(name));
+    d.appendChild(el("span", null, text));
+    return d;
+  }
+
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 
   // ---------------- API ----------------
@@ -370,6 +402,163 @@
     return runs.map(function (r) { return { text: r.text, bold: r.bold || undefined, italic: r.italic || undefined, color: r.color || undefined, size: r.size || undefined }; });
   }
 
+  // ---------- Вставка из буфера ----------
+  // Из Word, PDF и с сайтов приходит чужая разметка: свои шрифты, размеры в пунктах, таблицы,
+  // списки, неразрывные пробелы и переносы строк прямо в исходнике. contentEditable всё это
+  // показывал как есть, а документ такого не хранит - на планшет уезжал другой текст. Поэтому
+  // вставляемое приводится ровно к тому, что документ умеет: жирный, курсив, цвет, размер,
+  // переносы строк. Что показал редактор, то и увидит клиент.
+
+  var PASTE_JUNK = /[\u00AD\u200B\u200C\u200D\uFEFF]/g;   // мягкий перенос и нулевая ширина
+  var PASTE_BLOCKS = "li,tr,h1,h2,h3,h4,h5,h6,blockquote,pre,section,article,header,footer,figcaption,dt,dd";
+
+  // Разбор в отдельном документе: ничего не грузится и не выполняется, в отличие от innerHTML.
+  function parseInert(html) {
+    var doc = new DOMParser().parseFromString(String(html || ""), "text/html");
+    var body = doc.body;
+    if (!body) return null;
+    body.querySelectorAll("script,style,link,meta,title,noscript,iframe,object,embed,svg,img,input,button,select,textarea")
+      .forEach(function (n) { if (n.parentNode) n.parentNode.removeChild(n); });
+    return body;
+  }
+
+  function preparePasted(root) {
+    // В <pre> переносы значимы, в остальном HTML - нет. Превращаем их в <br> до того,
+    // как схлопнем пробелы, иначе стихотворная вёрстка склеится в одну строку.
+    root.querySelectorAll("pre").forEach(function (pre) {
+      var parts = String(pre.textContent || "").split("\n");
+      pre.textContent = "";
+      parts.forEach(function (line, i) {
+        if (i > 0) pre.appendChild(root.ownerDocument.createElement("br"));
+        pre.appendChild(root.ownerDocument.createTextNode(line));
+      });
+    });
+
+    // Маркер и номер пункта становятся обычным текстом: списков документ не знает, а без них
+    // перечисление из соглашения превратилось бы на планшете в сплошную строку.
+    root.querySelectorAll("ol,ul").forEach(function (list) {
+      var ordered = list.tagName === "OL", n = parseInt(list.getAttribute("start"), 10) || 1;
+      Array.prototype.slice.call(list.children).forEach(function (li) {
+        if (li.tagName !== "LI") return;
+        li.insertBefore(root.ownerDocument.createTextNode(ordered ? (n++) + ". " : "• "), li.firstChild);
+      });
+    });
+
+    // Ячейки таблицы разделяем пробелом, строки ниже станут отдельными абзацами.
+    root.querySelectorAll("td,th").forEach(function (c) { c.appendChild(root.ownerDocument.createTextNode(" ")); });
+
+    // Всё, что в исходнике было абзацем, заголовком, пунктом или строкой таблицы, приводим к
+    // <div>: перенос строки редактор понимает именно так. Обход идёт сверху вниз, поэтому
+    // вложенные элементы остаются на месте и обрабатываются следом.
+    root.querySelectorAll(PASTE_BLOCKS).forEach(function (n) {
+      if (!n.parentNode) return;
+      var d = root.ownerDocument.createElement("div");
+      // Заголовок в чужой вёрстке задан тегом, а не стилем; сохраняем хотя бы насыщенность.
+      if (/^H[1-6]$/.test(n.tagName)) d.style.fontWeight = "700";
+      while (n.firstChild) d.appendChild(n.firstChild);
+      n.parentNode.replaceChild(d, n);
+    });
+
+    // Схлопываем пробелы по правилам HTML: перевод строки в исходнике - это пробел, а не
+    // новая строка. Без этого разметка Word рассыпала бы текст на десятки строк.
+    var walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      node.nodeValue = String(node.nodeValue || "")
+        .replace(PASTE_JUNK, "")
+        .replace(/\u00A0/g, " ")
+        .replace(/[\t\r\n]+/g, " ")
+        .replace(/ {2,}/g, " ");
+    }
+    return root;
+  }
+
+  // Пробелы у краёв строк и пустые строки подряд убираем уже на готовых кусках текста:
+  // в исходнике они стоят между тегами и на экране не значат ничего.
+  function tidyRuns(runs) {
+    var out = [], lineStart = true;
+    (runs || []).forEach(function (r) {
+      var t = String(r.text == null ? "" : r.text).replace(/ +\n/g, "\n").replace(/\n +/g, "\n");
+      if (lineStart) t = t.replace(/^ +/, "");
+      if (!t) return;
+      lineStart = /\n$/.test(t);
+      out.push({ text: t, bold: r.bold, italic: r.italic, color: r.color, size: r.size });
+    });
+    while (out.length && /^\n+$/.test(out[0].text)) out.shift();
+    if (out.length) {
+      var last = out[out.length - 1];
+      last.text = last.text.replace(/[ \n]+$/, "");
+      if (!last.text) out.pop();
+    }
+    // Больше одной пустой строки подряд документ всё равно не показывает осмысленно.
+    out.forEach(function (r) { r.text = r.text.replace(/\n{3,}/g, "\n\n"); });
+    return out.filter(function (r) { return r.text.length > 0; });
+  }
+
+  function pastedRuns(dt) {
+    if (!dt) return [];
+    var html = "";
+    try { html = dt.getData("text/html") || ""; } catch (e) { html = ""; }
+    if (html) {
+      var body = parseInert(html);
+      if (body) {
+        var runs = tidyRuns(editorToRuns(preparePasted(body)));
+        if (runs.length) return runs;
+      }
+    }
+    var plain = "";
+    try { plain = dt.getData("text/plain") || ""; } catch (e) { plain = ""; }
+    plain = plain.replace(PASTE_JUNK, "").replace(/\u00A0/g, " ").replace(/\r\n?/g, "\n");
+    return tidyRuns(plain ? [{ text: plain }] : []);
+  }
+
+  // Вставляем уже собственную разметку, поэтому в редакторе оказывается ровно то, что документ
+  // умеет сохранить. Через execCommand - чтобы отмена по Ctrl+Z продолжала работать.
+  function insertRuns(ed, runs) {
+    if (!runs.length) return false;
+    ed.focus();
+    var html = runsToHtml(runs);
+    var done = false;
+    try { done = document.execCommand("insertHTML", false, html); } catch (e) { done = false; }
+    if (!done) {
+      var s = window.getSelection();
+      if (!s || !s.rangeCount || !ed.contains(s.anchorNode)) return false;
+      var range = s.getRangeAt(0); range.deleteContents();
+      var tmp = document.createElement("div"); tmp.innerHTML = html;
+      var frag = document.createDocumentFragment(), lastNode = null;
+      while (tmp.firstChild) { lastNode = tmp.firstChild; frag.appendChild(lastNode); }
+      range.insertNode(frag);
+      if (lastNode) { range.setStartAfter(lastNode); range.collapse(true); s.removeAllRanges(); s.addRange(range); }
+    }
+    ed.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
+  }
+
+  function attachPasteGuard(ed) {
+    ed.addEventListener("paste", function (e) {
+      var runs = pastedRuns(e.clipboardData || window.clipboardData);
+      if (!runs.length) return;               // пустой буфер - пусть браузер делает как обычно
+      e.preventDefault();
+      insertRuns(ed, runs);
+    });
+    // Текст, перетянутый мышью из другого окна, приходит той же чужой разметкой.
+    ed.addEventListener("drop", function (e) {
+      var runs = pastedRuns(e.dataTransfer);
+      if (!runs.length) return;
+      e.preventDefault();
+      var range = null;
+      if (document.caretRangeFromPoint) range = document.caretRangeFromPoint(e.clientX, e.clientY);
+      else if (document.caretPositionFromPoint) {
+        var cp = document.caretPositionFromPoint(e.clientX, e.clientY);
+        if (cp) { range = document.createRange(); range.setStart(cp.offsetNode, cp.offset); range.collapse(true); }
+      }
+      if (range && ed.contains(range.startContainer)) {
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(range);
+      }
+      insertRuns(ed, runs);
+    });
+  }
+
   // BOTH ends of the selection must be inside this editor: a selection dragged from one block into
   // the next would otherwise have its whole span (including the other block's toolbar and text)
   // extracted into this one.
@@ -417,6 +606,48 @@
     } else ed.appendChild(document.createTextNode(text));
     ed.dispatchEvent(new Event("input", { bubbles: true }));
   }
+  // Текст, скопированный из PDF, приходит разорванным по строкам показа: перенос стоит там, где
+  // строка кончилась на бумаге. На планшете ширина другая, и такой текст выглядит рваным. Здесь
+  // одиночные переносы становятся пробелами, а пустая строка между абзацами остаётся границей
+  // абзаца. Операция явная, потому что в адресе или в реквизитах переносы бывают осмысленными.
+  function unwrapLines(ed) {
+    var runs = editorToRuns(ed);
+    if (!runs.length) return;
+
+    // Разбираем текст посимвольно, помня, какому куску оформления принадлежит каждый символ.
+    // Иначе перенос на стыке жирного и обычного текста попал бы в разные строки и не опознался.
+    var chars = [], owner = [];
+    runs.forEach(function (r, i) {
+      String(r.text == null ? "" : r.text).split("").forEach(function (ch) { chars.push(ch); owner.push(i); });
+    });
+
+    var out = [], own = [];
+    function drop() { while (out.length && out[out.length - 1] === " ") { out.pop(); own.pop(); } }
+    for (var i = 0; i < chars.length; i++) {
+      if (chars[i] !== "\n") { out.push(chars[i]); own.push(owner[i]); continue; }
+      var j = i, breaks = 0;
+      while (j < chars.length && (chars[j] === "\n" || chars[j] === " " || chars[j] === "\t")) {
+        if (chars[j] === "\n") breaks++;
+        j++;
+      }
+      drop();
+      if (breaks >= 2) { out.push("\n"); own.push(owner[i]); out.push("\n"); own.push(owner[i]); }
+      else if (out.length) { out.push(" "); own.push(owner[i]); }
+      i = j - 1;
+    }
+    drop();
+
+    var joined = [];
+    for (var k = 0; k < out.length; k++) {
+      var src = runs[own[k]] || {};
+      var last = joined[joined.length - 1];
+      if (last && last.owner === own[k]) last.text += out[k];
+      else joined.push({ owner: own[k], text: out[k], bold: src.bold, italic: src.italic, color: src.color, size: src.size });
+    }
+    ed.innerHTML = runsToHtml(joined);
+    ed.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
   function tbBtn(label, title, fn, italicLabel) {
     var b = el("button", "rt-btn", label); b.type = "button"; b.title = title || "";
     if (italicLabel) b.style.fontStyle = "italic";
@@ -428,6 +659,7 @@
     var wrap = el("div", "rt-field");
     if (labelText) wrap.appendChild(el("div", "rt-label", labelText));
     var ed = el("div", "rt-editor"); ed.contentEditable = "true"; ed.setAttribute("data-role", role); ed.innerHTML = runsToHtml(runs);
+    attachPasteGuard(ed);
     var bar = el("div", "rt-toolbar");
     bar.appendChild(tbBtn("Ж", "Жирный", function () { if (insideEditor(ed)) { document.execCommand("bold", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); } }));
     bar.appendChild(tbBtn("К", "Курсив", function () { if (insideEditor(ed)) { document.execCommand("italic", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); } }, true));
@@ -441,6 +673,8 @@
       bar.appendChild(sw);
     });
     bar.appendChild(tbBtn("○", "Цвет по умолчанию", function () { wrapSelection(ed, function (s) { s.style.color = "inherit"; }, "color"); }));
+    bar.appendChild(tbBtn("¶", "Склеить перенесённые строки: абзацы останутся абзацами, а разрывы посреди предложения уйдут. Нужно после копирования из PDF, где каждая строка приходит отдельной.",
+      function () { unwrapLines(ed); }));
     var tsel = el("select", "rt-tag"); tsel.appendChild(new Option("+ тег", ""));
     KNOWN_FIELDS.forEach(function (f) { tsel.appendChild(new Option(f, f)); });
     tsel.addEventListener("change", function () { if (tsel.value) { insertTag(ed, tsel.value); tsel.value = ""; } });
@@ -610,6 +844,26 @@
     return { field: field, op: op, value: (value || "").trim() };
   }
 
+  // Блоки текста, чекбоксы и группы живут на странице в одном общем порядке: оператор
+  // расставляет их так, как того требует соглашение. Документ, сохранённый до появления
+  // свободного порядка, номеров не имеет, и тогда порядок прежний: текст, чекбоксы, группы.
+  var ORD_TAIL = 100000;
+  function pageOrder(page, blocks) {
+    var items = [];
+    function add(list, kind) {
+      (list || []).forEach(function (it, i) {
+        if (!it) return;
+        var ord = (typeof it.ord === "number" && it.ord >= 0) ? it.ord : ORD_TAIL + kind * ORD_TAIL + i;
+        items.push({ ord: ord, kind: kind, index: i, item: it });
+      });
+    }
+    add(blocks || page.blocks, 0);
+    add(page.checkboxes, 1);
+    add(page.groups, 2);
+    items.sort(function (a, b) { return (a.ord - b.ord) || (a.kind - b.kind) || (a.index - b.index); });
+    return items;
+  }
+
   function headingRunsOf(page) { return (page.headingRuns && page.headingRuns.length) ? page.headingRuns : (page.heading ? [{ text: page.heading }] : []); }
   function blocksOf(page) { return (page.blocks && page.blocks.length) ? page.blocks : (page.body ? [{ runs: [{ text: page.body }] }] : []); }
 
@@ -634,16 +888,20 @@
 
   function blockCard(b) {
     b = b || {};
-    var bc = el("div", "block-card"); bc.setAttribute("data-role", "blockcard");
+    var bc = el("div", "block-card page-item"); bc.setAttribute("data-role", "blockcard");
+    bc.setAttribute("data-kind", "block");
     var isImage = !!b.imageUrl;
 
     var modeBar = el("div", "block-mode");
-    var handle = el("span", "drag-handle", "⠿");
+    var handle = el("span", "drag-handle");
+    handle.appendChild(icon("grip"));
     handle.title = "Перетащите, чтобы изменить порядок блоков";
     modeBar.appendChild(handle);
-    var btnText = el("button", "btn btn-ghost btn-sm", "Текст"); btnText.type = "button";
-    var btnImg = el("button", "btn btn-ghost btn-sm", "Картинка"); btnImg.type = "button";
-    modeBar.appendChild(btnText); modeBar.appendChild(btnImg);
+    var seg = el("div", "seg");
+    var btnText = el("button", "btn btn-sm", "Текст"); btnText.type = "button";
+    var btnImg = el("button", "btn btn-sm", "Картинка"); btnImg.type = "button";
+    seg.appendChild(btnText); seg.appendChild(btnImg);
+    modeBar.appendChild(seg);
     bc.appendChild(modeBar);
 
     var textWrap = richEditor("", b.runs || [], "blockbody");
@@ -678,31 +936,75 @@
     btnImg.addEventListener("click", function () { setMode("image"); });
     setMode(isImage ? "image" : "text");
 
-    bc.appendChild(el("div", "field-sm", "Условие показа блока"));
+    bc.appendChild(el("div", "sub-label", "Условие показа блока"));
     bc.appendChild(conditionEditor(b.visibleWhen, "blockcond"));
-    var del = el("button", "btn btn-danger btn-sm", "Удалить блок");
+    var del = iconBtn("trash", "Удалить блок", "btn-danger btn-sm");
     del.addEventListener("click", function () { bc.remove(); updatePlaceholders(); });
     bc.appendChild(del);
     return bc;
   }
 
-  // Read all block cards inside a container into an array of blocks (text or image).
+  // Один блок текста или картинки. Возвращает null, если в нём нечего сохранять.
+  function readBlockCard(bc) {
+    var cond = readCondition(bc.querySelector('[data-role="blockcond"]'));
+    if (bc.getAttribute("data-mode") === "image") {
+      var url = bc.getAttribute("data-imgurl");
+      if (!url) return null;
+      var w = parseInt((bc.querySelector('[data-role="blockimgw"]') || {}).value, 10) || 100;
+      var blk = { imageUrl: url, imageWidth: w }; if (cond) blk.visibleWhen = cond; return blk;
+    }
+    var ed = bc.querySelector('[data-role="blockbody"]');
+    var runs = ed ? editorToRuns(ed) : [];
+    var hasText = runs.some(function (r) { return (r.text || "").trim().length; });
+    if (!hasText && !cond) return null;
+    var blk2 = { runs: runs }; if (cond) blk2.visibleWhen = cond; return blk2;
+  }
+
+  function readCheckboxRow(r) {
+    var lab = r.querySelector('[data-role="cblabel"]').value;
+    if (!lab.trim()) return null;
+    var item = {
+      key: ((r.querySelector('[data-role="cbkey"]') || {}).value || "").trim(),
+      label: lab,
+      required: r.querySelector('[data-role="cbreq"]').checked,
+      checked: !!(r.querySelector('[data-role="cbchecked"]') || {}).checked
+    };
+    var cond = readCondition(r.querySelector('[data-role="cbcond"]'));
+    if (cond) item.visibleWhen = cond;
+    return item;
+  }
+
+  function readGroupRow(r) {
+    var options = [], used = [];
+    r.querySelectorAll('[data-role="optrow"]').forEach(function (o, i) {
+      var okey = (o.querySelector('[data-role="okey"]').value || "").trim();
+      var olabel = o.querySelector('[data-role="olabel"]').value || "";
+      // Вариант с текстом, но без имени, раньше молча пропадал, и проверка потом сообщала, что
+      // вариантов нет, хотя оператор видел их на экране. Теперь имя достраивается здесь же.
+      if (!okey && olabel.trim()) okey = uniqueKey(slugKey(olabel) || ("opt" + (i + 1)), used);
+      if (!okey) return;
+      used.push(okey);
+      options.push({ key: okey, label: olabel });
+    });
+    var gkey = (r.querySelector('[data-role="gkey"]').value || "").trim();
+    var gtitle = r.querySelector('[data-role="gtitle"]').value || "";
+    // То же самое для имени самой группы: заголовок есть, значит группа нужна.
+    if (!gkey && gtitle.trim()) gkey = slugKey(gtitle);
+    // Совсем пустую заготовку выбрасываем, а недоделанную оставляем: молча стирать работу
+    // оператора нельзя, о недостающем имени и вариантах ему скажет проверка документа.
+    if (!gkey && !options.length && !gtitle.trim()) return null;
+    var grp = { key: gkey, title: gtitle, required: r.querySelector('[data-role="greq"]').checked, options: options };
+    var gcond = readCondition(r.querySelector('[data-role="gcond"]'));
+    if (gcond) grp.visibleWhen = gcond;
+    return grp;
+  }
+
   function collectBlocks(container) {
     var out = [];
     if (!container) return out;
     container.querySelectorAll('[data-role="blockcard"]').forEach(function (bc) {
-      var cond = readCondition(bc.querySelector('[data-role="blockcond"]'));
-      if (bc.getAttribute("data-mode") === "image") {
-        var url = bc.getAttribute("data-imgurl");
-        if (!url) return;
-        var w = parseInt((bc.querySelector('[data-role="blockimgw"]') || {}).value, 10) || 100;
-        var blk = { imageUrl: url, imageWidth: w }; if (cond) blk.visibleWhen = cond; out.push(blk);
-      } else {
-        var ed = bc.querySelector('[data-role="blockbody"]');
-        var runs = ed ? editorToRuns(ed) : [];
-        var hasText = runs.some(function (r) { return (r.text || "").trim().length; });
-        if (hasText || cond) { var blk2 = { runs: runs }; if (cond) blk2.visibleWhen = cond; out.push(blk2); }
-      }
+      var blk = readBlockCard(bc);
+      if (blk) out.push(blk);
     });
     return out;
   }
@@ -896,6 +1198,7 @@
       // Порядок изменился: перечитываем документ из DOM. Для страниц ещё и перерисовываем,
       // иначе номера страниц и оглавление разойдутся с тем, что на экране.
       if (list === $("pagesEditor")) { collectDoc(); collapsedPages = {}; renderPages(); }
+      else if (list.getAttribute("data-role") === "itemlist") normalizeBars(list);
       updatePlaceholders();
     }
 
@@ -914,6 +1217,54 @@
       // Иначе браузер начнёт выделять текст соседних блоков вместо перетаскивания.
       e.preventDefault();
     });
+  }
+
+  // После перетаскивания полосы вставки оказываются не там, где нужно: расставляем заново,
+  // по одной перед списком и после каждого элемента.
+  function normalizeBars(list) {
+    Array.prototype.slice.call(list.querySelectorAll(":scope > .insert-bar")).forEach(function (b) { b.remove(); });
+    var nodes = Array.prototype.slice.call(list.children).filter(function (n) { return n.classList.contains("page-item"); });
+    list.insertBefore(insertBar(list, null), list.firstChild);
+    nodes.forEach(function (n) { list.insertBefore(insertBar(list, n), n.nextSibling); });
+  }
+
+  // Полоса вставки между элементами страницы. Нужна потому, что дотащить новый пункт из конца
+  // длинной страницы на нужное место мышью тяжело: проще поставить его сразу туда, где он нужен.
+  // Полоса видна всегда, а не только при наведении: иначе о ней просто не догадаться.
+  function insertBar(list, afterNode) {
+    var bar = el("div", "insert-bar");
+    var chip = el("button", "insert-chip"); chip.type = "button";
+    chip.appendChild(icon("plus"));
+    chip.appendChild(el("span", null, "вставить сюда"));
+    bar.appendChild(chip);
+
+    function place(node) {
+      if (afterNode && afterNode.parentNode === list) list.insertBefore(node, bar);
+      else list.insertBefore(node, list.firstChild === bar ? bar.nextSibling : bar);
+      list.insertBefore(insertBar(list, node), node.nextSibling);
+      collapse();
+      updatePlaceholders();
+    }
+
+    function collapse() { bar.innerHTML = ""; bar.appendChild(chip); bar.classList.remove("open"); }
+
+    chip.addEventListener("click", function () {
+      bar.innerHTML = ""; bar.classList.add("open");
+      var opts = [
+        ["Блок текста", function () { place(blockCard({ runs: [] })); }],
+        ["Чекбокс", function () { place(checkboxRow({ label: "", required: true })); }],
+        ["Двойные зависимые чекбоксы", function () { place(groupCard({ options: [{ key: "", label: "" }, { key: "", label: "" }] })); }]
+      ];
+      opts.forEach(function (o) {
+        var b = iconBtn("plus", o[0], "btn-sm");
+        b.addEventListener("click", o[1]);
+        bar.appendChild(b);
+      });
+      var cancel = iconBtn("x", "Отмена", "btn-ghost btn-sm");
+      cancel.addEventListener("click", collapse);
+      bar.appendChild(cancel);
+    });
+    return bar;
   }
 
   // ---------- Оглавление ----------
@@ -940,32 +1291,56 @@
     if (!toc) return;
     toc.innerHTML = "";
     var pages = state.doc.pages || [];
-    toc.appendChild(el("div", "toc-title", "Страницы"));
+
+    var head = el("div", "toc-title");
+    head.appendChild(icon("layout"));
+    head.appendChild(el("span", null, "Страницы"));
+    toc.appendChild(head);
+
+    // Добавить страницу можно прямо отсюда: оглавление всегда на виду, а единственная кнопка
+    // внизу списка означала бы прокрутку через весь документ каждый раз.
+    var addTop = iconBtn("plus", "Добавить страницу", "btn-primary btn-sm toc-add");
+    addTop.addEventListener("click", function () { addPage(); });
+    toc.appendChild(addTop);
+
+    var list = el("div", "toc-list");
     pages.forEach(function (page, pi) {
       var heading = runsText(headingRunsOf(page)).trim();
-      var item = el("button", "toc-item" + (collapsedPages[pi] ? " folded" : ""),
-        (pi + 1) + ". " + (heading || "без заголовка"));
+      var item = el("button", "toc-item" + (collapsedPages[pi] ? " folded" : ""));
+      item.type = "button";
+      item.appendChild(el("span", "toc-num", String(pi + 1)));
+      item.appendChild(el("span", "toc-text", heading || "без заголовка"));
+      if (page.visibleWhen && page.visibleWhen.field) item.appendChild(icon("filter", "toc-mark"));
       item.title = pageSummary(page);
       item.addEventListener("click", function () {
         var cards = document.querySelectorAll('#pagesEditor [data-role="pagecard"]');
         if (cards[pi]) cards[pi].scrollIntoView({ behavior: "smooth", block: "start" });
       });
-      toc.appendChild(item);
+      list.appendChild(item);
     });
+    toc.appendChild(list);
+
     // Экран подписи и «Спасибо» клиент тоже видит, поэтому в оглавлении они есть.
-    toc.appendChild(el("div", "toc-fixed", "Подпись"));
-    toc.appendChild(el("div", "toc-fixed", "Спасибо"));
-    var all = el("div", "toc-actions");
-    var foldAll = el("button", "btn btn-ghost btn-sm", "Свернуть все");
+    var fixed = el("div", "toc-list");
+    [["pen", "Подпись"], ["tick", "Спасибо"]].forEach(function (pair) {
+      var row = el("div", "toc-fixed");
+      row.appendChild(icon(pair[0]));
+      row.appendChild(el("span", null, pair[1]));
+      fixed.appendChild(row);
+    });
+    toc.appendChild(fixed);
+
+    var actions = el("div", "toc-actions");
+    var foldAll = iconBtn("right", "Свернуть все", "btn-ghost btn-sm");
     foldAll.addEventListener("click", function () {
       collectDoc();
       (state.doc.pages || []).forEach(function (_, i) { collapsedPages[i] = true; });
       renderPages();
     });
-    var openAll = el("button", "btn btn-ghost btn-sm", "Развернуть все");
+    var openAll = iconBtn("down", "Развернуть все", "btn-ghost btn-sm");
     openAll.addEventListener("click", function () { collectDoc(); collapsedPages = {}; renderPages(); });
-    all.appendChild(foldAll); all.appendChild(openAll);
-    toc.appendChild(all);
+    actions.appendChild(foldAll); actions.appendChild(openAll);
+    toc.appendChild(actions);
   }
 
   // Какие страницы свёрнуты. Хранится по номеру и переживает перерисовку: иначе любое
@@ -980,19 +1355,29 @@
 
       // За эту ручку страницу перетаскивают. Само перетаскивание включается только по ней,
       // иначе оно перехватывало бы выделение текста в редакторах внутри страницы.
-      var handle = el("span", "drag-handle", "⠿");
+      var handle = el("span", "drag-handle");
+      handle.appendChild(icon("grip"));
       handle.title = "Перетащите, чтобы изменить порядок страниц";
       title.appendChild(handle);
 
-      var toggle = el("button", "btn btn-ghost btn-sm page-toggle");
-      var name = el("strong", null, "Страница " + (pi + 1));
+      var toggle = el("button", "page-toggle");
+      toggle.type = "button";
       title.appendChild(toggle);
+
+      var name = el("span", "page-name", "Страница " + (pi + 1));
       title.appendChild(name);
+
+      // Сводка занимает всё свободное место, поэтому кнопка удаления всегда у правого края,
+      // а не плавает по середине, как было при распределении по краям.
       var summary = el("span", "page-summary", "");
       title.appendChild(summary);
 
-      var delPage = el("button", "btn btn-danger", "Удалить страницу");
-      delPage.addEventListener("click", function () { collectDoc(); state.doc.pages.splice(pi, 1); renderPages(); updatePlaceholders(); });
+      var delPage = iconBtn("trash", "Удалить", "btn-danger btn-sm");
+      delPage.title = "Удалить страницу";
+      delPage.addEventListener("click", function () {
+        if (!confirm("Удалить страницу " + (pi + 1) + " целиком?")) return;
+        collectDoc(); state.doc.pages.splice(pi, 1); renderPages(); updatePlaceholders();
+      });
       title.appendChild(delPage); card.appendChild(title);
 
       var body = el("div", "page-body");
@@ -1002,7 +1387,9 @@
         var off = !!collapsedPages[pi];
         card.classList.toggle("collapsed", off);
         body.classList.toggle("hidden", off);
-        toggle.textContent = off ? "▶ Развернуть" : "▼ Свернуть";
+        toggle.innerHTML = "";
+        toggle.appendChild(icon(off ? "right" : "down"));
+        toggle.title = off ? "Развернуть страницу" : "Свернуть страницу";
         summary.textContent = off ? pageSummary(page) : "";
       }
       toggle.addEventListener("click", function () {
@@ -1013,38 +1400,27 @@
         applyCollapsed();
       });
 
-      body.appendChild(el("div", "field-sm", "Условие показа страницы"));
+      body.appendChild(sectionLabel("filter", "Условие показа страницы"));
       body.appendChild(conditionEditor(page.visibleWhen, "pagecond"));
 
       body.appendChild(richEditor("Заголовок", headingRunsOf(page), "heading"));
 
-      body.appendChild(el("div", "field", "Блоки текста"));
-      var blist = el("div", "block-list"); blist.setAttribute("data-role", "blocklist");
-      var blocks = blocksOf(page); if (!blocks.length) blocks = [{ runs: [] }];
-      blocks.forEach(function (b) { blist.appendChild(blockCard(b)); });
-      makeSortable(blist, ".block-card");
-      body.appendChild(blist);
-      var addB = el("button", "btn btn-ghost", "+ Блок текста");
-      addB.addEventListener("click", function () { blist.appendChild(blockCard({ runs: [] })); });
-      body.appendChild(addB);
-
-      body.appendChild(el("div", "field", "Чекбоксы"));
-      var cbList = el("div", "cb-list"); cbList.setAttribute("data-role", "cblist");
-      (page.checkboxes || []).forEach(function (cb) { cbList.appendChild(checkboxRow(cb)); });
-      makeSortable(cbList, ".cb-item");
-      body.appendChild(cbList);
-      var addCb = el("button", "btn btn-ghost", "+ Чекбокс");
-      addCb.addEventListener("click", function () { cbList.appendChild(checkboxRow({ label: "", required: true })); });
-      body.appendChild(addCb);
-
-      body.appendChild(el("div", "field", "Двойные зависимые чекбоксы (выбрать можно только один)"));
-      var grpList = el("div", "cb-list"); grpList.setAttribute("data-role", "grouplist");
-      (page.groups || []).forEach(function (g) { grpList.appendChild(groupCard(g)); });
-      makeSortable(grpList, ".group-card");
-      body.appendChild(grpList);
-      var addGrp = el("button", "btn btn-ghost", "+ Двойные зависимые чекбоксы");
-      addGrp.addEventListener("click", function () { grpList.appendChild(groupCard({ options: [{ key: "", label: "" }, { key: "", label: "" }] })); });
-      body.appendChild(addGrp);
+      // Один список на всю страницу: текст, чекбоксы и выбор одного варианта стоят вперемешку,
+      // в том порядке, в каком их читает клиент. Пункт должен идти сразу за своим абзацем, а не
+      // в общей куче внизу страницы.
+      body.appendChild(sectionLabel("layout", "Содержимое страницы (порядок такой же, как увидит клиент)"));
+      var items = el("div", "item-list"); items.setAttribute("data-role", "itemlist");
+      var blocks = blocksOf(page);
+      if (!blocks.length && !(page.checkboxes || []).length && !(page.groups || []).length) blocks = [{ runs: [] }];
+      var built = pageOrder(page, blocks).map(function (it) {
+        return it.kind === 0 ? blockCard(it.item)
+          : it.kind === 1 ? checkboxRow(it.item)
+            : groupCard(it.item);
+      });
+      items.appendChild(insertBar(items, null));
+      built.forEach(function (node) { items.appendChild(node); items.appendChild(insertBar(items, node)); });
+      makeSortable(items, ".page-item");
+      body.appendChild(items);
 
       var dyn = el("label", "check-inline dyn-anchor");
       var dynCb = el("input"); dynCb.type = "checkbox"; dynCb.checked = !!page.includeDynamic; dynCb.setAttribute("data-role", "includedynamic");
@@ -1059,32 +1435,75 @@
 
     // Signature page: custom content (text / image) on either side of the signature field.
     var signCard = el("div", "page-card sign-page-card");
-    var st = el("div", "page-title"); st.appendChild(el("strong", null, "Страница подписи")); signCard.appendChild(st);
+    var st = el("div", "page-title");
+    st.appendChild(icon("pen", "page-icon"));
+    st.appendChild(el("span", "page-name", "Страница подписи"));
+    st.appendChild(el("span", "page-summary", "клиент видит её последней, перед экраном «Спасибо»"));
+    signCard.appendChild(st);
     signCard.appendChild(el("p", "sig-meta", "Здесь можно разместить текст или картинку (реквизиты, печать, пояснение) над полем подписи и под ним. То же самое попадёт в PDF."));
 
-    signCard.appendChild(el("div", "field", "Над полем подписи"));
+    signCard.appendChild(sectionLabel("text", "Над полем подписи"));
     var sblist = el("div", "block-list"); sblist.setAttribute("data-role", "signblocklist");
     (state.doc.signBlocks || []).forEach(function (b) { sblist.appendChild(blockCard(b)); });
     signCard.appendChild(sblist);
-    var addSb = el("button", "btn btn-ghost", "+ Блок над подписью");
+    var addSb = iconBtn("plus", "Блок над подписью");
     addSb.addEventListener("click", function () { sblist.appendChild(blockCard({ runs: [] })); });
     signCard.appendChild(addSb);
 
     signCard.appendChild(el("div", "sign-divider", "Поле подписи"));
 
-    signCard.appendChild(el("div", "field", "Под полем подписи"));
+    signCard.appendChild(sectionLabel("text", "Под полем подписи"));
     var sblistBelow = el("div", "block-list"); sblistBelow.setAttribute("data-role", "signblocklistbelow");
     (state.doc.signBlocksBelow || []).forEach(function (b) { sblistBelow.appendChild(blockCard(b)); });
     signCard.appendChild(sblistBelow);
-    var addSbBelow = el("button", "btn btn-ghost", "+ Блок под подписью");
+    var addSbBelow = iconBtn("plus", "Блок под подписью");
     addSbBelow.addEventListener("click", function () { sblistBelow.appendChild(blockCard({ runs: [] })); });
     signCard.appendChild(addSbBelow);
     wrap.appendChild(signCard);
   }
+  // Имя для API у группы и у её вариантов обязательно: без него выбор неадресуем извне, и сервер
+  // такой вариант не сохранит. Раньше оператор видел на экране два варианта, а проверка говорила,
+  // что вариантов нет: они молча отбрасывались из-за пустого имени. Теперь имя подставляется само,
+  // латиницей, из текста, и остаётся на виду - его можно поправить руками.
+  var TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh", "з": "z",
+    "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+    "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya"
+  };
+  function slugKey(text) {
+    var out = String(text || "").toLowerCase().split("").map(function (ch) {
+      if (TRANSLIT[ch] != null) return TRANSLIT[ch];
+      return /[a-z0-9]/.test(ch) ? ch : "-";
+    }).join("").replace(/-+/g, "-").replace(/^-|-$/g, "");
+    return out.slice(0, 40);
+  }
+  function uniqueKey(base, taken) {
+    var k = base || "opt", n = 2;
+    while (taken.indexOf(k) >= 0) { k = base + "-" + n; n++; }
+    return k;
+  }
+
+  // Связать поле текста с полем имени: пока имя не правили руками, оно следует за текстом.
+  function linkAutoKey(source, keyInput, siblingsOf) {
+    if ((keyInput.value || "").trim()) keyInput.removeAttribute("data-auto");
+    else keyInput.setAttribute("data-auto", "1");
+    keyInput.addEventListener("input", function () { keyInput.removeAttribute("data-auto"); });
+    source.addEventListener("input", function () {
+      if (!keyInput.hasAttribute("data-auto")) return;
+      var taken = (siblingsOf() || []).filter(function (i) { return i !== keyInput; })
+        .map(function (i) { return (i.value || "").trim(); });
+      var base = slugKey(source.value);
+      keyInput.value = base ? uniqueKey(base, taken) : "";
+    });
+  }
+
   function checkboxRow(cb) {
-    var box = el("div", "cb-item"); box.setAttribute("data-role", "cbrow");
+    var box = el("div", "cb-item page-item"); box.setAttribute("data-role", "cbrow");
+    box.setAttribute("data-kind", "checkbox");
     var row = el("div", "cb-row");
-    var handle = el("span", "drag-handle", "⠿");
+    var handle = el("span", "drag-handle");
+    handle.appendChild(icon("grip"));
     handle.title = "Перетащите, чтобы изменить порядок";
     row.appendChild(handle);
     var label = el("input"); label.type = "text"; label.placeholder = "Текст пункта"; label.value = cb.label || ""; label.setAttribute("data-role", "cblabel"); row.appendChild(label);
@@ -1103,13 +1522,16 @@
 
   // --- группа вариантов: выбрать можно один, «ни одного» тоже состояние ---
   function groupCard(g) {
-    var card = el("div", "group-card"); card.setAttribute("data-role", "grouprow");
+    var card = el("div", "group-card page-item"); card.setAttribute("data-role", "grouprow");
+    card.setAttribute("data-kind", "group");
     var head = el("div", "cb-row");
-    var handle = el("span", "drag-handle", "⠿");
+    var handle = el("span", "drag-handle");
+    handle.appendChild(icon("grip"));
     handle.title = "Перетащите, чтобы изменить порядок";
     head.appendChild(handle);
     var title = el("input"); title.type = "text"; title.placeholder = "Общий заголовок"; title.value = g.title || ""; title.setAttribute("data-role", "gtitle"); head.appendChild(title);
     var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = g.key || ""; key.setAttribute("data-role", "gkey"); head.appendChild(key);
+    linkAutoKey(title, key, function () { return []; });
     var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = !!g.required; req.setAttribute("data-role", "greq");
     reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательно выбрать")); head.appendChild(reqLabel);
     var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { card.remove(); updatePlaceholders(); }); head.appendChild(del);
@@ -1118,7 +1540,7 @@
     var opts = el("div", "opt-list"); opts.setAttribute("data-role", "optlist");
     (g.options || []).forEach(function (o) { opts.appendChild(optionRow(o)); });
     card.appendChild(opts);
-    var addOpt = el("button", "btn btn-ghost btn-sm", "+ Вариант");
+    var addOpt = iconBtn("plus", "Вариант", "btn-ghost btn-sm");
     addOpt.addEventListener("click", function () { opts.appendChild(optionRow({ key: "", label: "" })); });
     card.appendChild(addOpt);
     card.appendChild(conditionEditor(g.visibleWhen, "gcond"));
@@ -1129,6 +1551,10 @@
     var row = el("div", "cb-row"); row.setAttribute("data-role", "optrow");
     var label = el("input"); label.type = "text"; label.placeholder = "Текст варианта"; label.value = o.label || ""; label.setAttribute("data-role", "olabel"); row.appendChild(label);
     var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = o.key || ""; key.setAttribute("data-role", "okey"); row.appendChild(key);
+    linkAutoKey(label, key, function () {
+      var list = row.closest('[data-role="optlist"]');
+      return list ? Array.prototype.slice.call(list.querySelectorAll('[data-role="okey"]')) : [];
+    });
     var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { row.remove(); updatePlaceholders(); }); row.appendChild(del);
     return row;
   }
@@ -1141,41 +1567,21 @@
       var headingRuns = hEd ? editorToRuns(hEd) : [];
       var pageCond = readCondition(card.querySelector('[data-role="pagecond"]'));
       var includeDynamic = !!(card.querySelector('[data-role="includedynamic"]') || {}).checked;
-      var blocks = collectBlocks(card);
-      var checkboxes = [];
-      card.querySelectorAll('[data-role="cbrow"]').forEach(function (r) {
-        var lab = r.querySelector('[data-role="cblabel"]').value;
-        var req = r.querySelector('[data-role="cbreq"]').checked;
-        var chk = !!(r.querySelector('[data-role="cbchecked"]') || {}).checked;
-        var key = (r.querySelector('[data-role="cbkey"]') || {}).value || "";
-        if (!lab.trim()) return;
-        var item = { key: key.trim(), label: lab, required: req, checked: chk };
-        var cond = readCondition(r.querySelector('[data-role="cbcond"]'));
-        if (cond) item.visibleWhen = cond;
-        checkboxes.push(item);
-      });
-      var groups = [];
-      card.querySelectorAll('[data-role="grouprow"]').forEach(function (r) {
-        var options = [];
-        r.querySelectorAll('[data-role="optrow"]').forEach(function (o) {
-          var okey = (o.querySelector('[data-role="okey"]').value || "").trim();
-          var olabel = o.querySelector('[data-role="olabel"]').value || "";
-          if (okey) options.push({ key: okey, label: olabel });
-        });
-        var gkey = (r.querySelector('[data-role="gkey"]').value || "").trim();
-        var gtitle = r.querySelector('[data-role="gtitle"]').value || "";
-        // Совсем пустую заготовку выбрасываем, а недоделанную оставляем: молча стирать работу
-        // оператора нельзя, о недостающем имени и вариантах ему скажет проверка документа.
-        if (!gkey && !options.length && !gtitle.trim()) return;
-        var grp = {
-          key: gkey,
-          title: gtitle,
-          required: r.querySelector('[data-role="greq"]').checked,
-          options: options
-        };
-        var gcond = readCondition(r.querySelector('[data-role="gcond"]'));
-        if (gcond) grp.visibleWhen = gcond;
-        groups.push(grp);
+
+      // Блоки текста, чекбоксы и группы лежат в одном списке в том порядке, в каком их
+      // расставил оператор. Номер берётся прямо из положения в списке, поэтому на планшете
+      // страница выглядит ровно так, как в редакторе.
+      var blocks = [], checkboxes = [], groups = [], ord = 0;
+      card.querySelectorAll('[data-role="itemlist"] > .page-item').forEach(function (node) {
+        var kind = node.getAttribute("data-kind");
+        var got = kind === "block" ? readBlockCard(node)
+          : kind === "checkbox" ? readCheckboxRow(node)
+            : kind === "group" ? readGroupRow(node) : null;
+        if (!got) return;
+        got.ord = ord++;
+        if (kind === "block") blocks.push(got);
+        else if (kind === "checkbox") checkboxes.push(got);
+        else groups.push(got);
       });
       var page = { heading: "", body: "", headingRuns: headingRuns, blocks: blocks, checkboxes: checkboxes, groups: groups, includeDynamic: includeDynamic };
       if (pageCond) page.visibleWhen = pageCond;
@@ -1185,7 +1591,17 @@
     state.doc.signBlocks = collectBlocks(document.querySelector('[data-role="signblocklist"]'));
     state.doc.signBlocksBelow = collectBlocks(document.querySelector('[data-role="signblocklistbelow"]'));
   }
-  $("addPage").addEventListener("click", function () { collectDoc(); state.doc.pages.push({ headingRuns: [{ text: "Новая страница" }], blocks: [], checkboxes: [], includeDynamic: false }); renderPages(); });
+  // Новая страница встаёт в конец и сразу показывается: иначе после нажатия непонятно,
+  // добавилось ли что-нибудь, особенно если кнопку нажали из оглавления.
+  function addPage() {
+    collectDoc();
+    state.doc.pages.push({ headingRuns: [{ text: "Новая страница" }], blocks: [], checkboxes: [], groups: [], includeDynamic: false });
+    renderPages();
+    var cards = document.querySelectorAll('#pagesEditor [data-role="pagecard"]');
+    var last = cards[cards.length - 1];
+    if (last) last.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  $("addPage").addEventListener("click", addPage);
   $("saveDocument").addEventListener("click", function () { collectDoc(); apiSend("/document", "PUT", state.doc).then(function () { toast("Документ сохранён"); }); });
 
   // ---- Preview: see the document exactly as the tablet will render it ----
@@ -1276,7 +1692,11 @@
     apiSend("/document/preview", "POST", { document: state.doc, fields: fields, checkboxes: checkboxes })
       .then(function (r) { return r.json(); })
       .then(function (data) { renderPreview(data, fields, checkboxes); })
-      .catch(function () { /* already reported by api() */ });
+      .catch(function (e) {
+        // Сетевую ошибку уже показал api(). А вот поломку самой отрисовки раньше глушил пустой
+        // catch: окно просто не открывалось, и понять почему было нельзя.
+        if (e) { console.error(e); toast("Не удалось построить предпросмотр: " + (e.message || e)); }
+      });
   }
 
   // Mirrors the tablet renderer (kiosk.js): styled runs, images, checkboxes, page steps.
@@ -1343,23 +1763,28 @@
       if (s.type === "page") {
         var p = pages[s.index];
         var h = el("h2", "pv-heading"); previewRuns(h, p.headingRuns || []); body.appendChild(h);
-        (p.blocks || []).forEach(function (b) { previewBlock(body, b); });
-        (p.checkboxes || []).forEach(function (cb) {
-          var row = el("div", "pv-check" + (cb.checked ? " on" : ""));
-          row.appendChild(el("span", "pv-box", cb.checked ? "✓" : ""));
-          row.appendChild(el("span", null, (cb.label || "") + (cb.required ? " *" : "")));
-          body.appendChild(row);
-        });
-        // Группы показываются целиком, вместе с невыбранными вариантами: оператор должен видеть,
-        // из чего клиент будет выбирать, а не только присланный выбор.
-        (page.groups || []).forEach(function (g) {
+        // Порядок ровно тот же, что покажет планшет: иначе предпросмотр обещал бы одно, а
+        // клиент видел другое, и проверять по нему было бы нечего.
+        pageOrder(p).forEach(function (it) {
+          if (it.kind === 0) { previewBlock(body, it.item); return; }
+          if (it.kind === 1) {
+            var cb = it.item;
+            var row = el("div", "pv-check" + (cb.checked ? " on" : ""));
+            row.appendChild(el("span", "pv-box", cb.checked ? "✓" : ""));
+            row.appendChild(el("span", null, (cb.label || "") + (cb.required ? " *" : "")));
+            body.appendChild(row);
+            return;
+          }
+          // Группы показываются целиком, вместе с невыбранными вариантами: оператор должен видеть,
+          // из чего клиент будет выбирать, а не только присланный выбор.
+          var g = it.item;
           body.appendChild(el("div", "pv-group-title", (g.title || g.key || "") + (g.required ? " *" : "")));
           (g.options || []).forEach(function (o) {
             var chosen = g.selected && o.key === g.selected;
-            var row = el("div", "pv-check" + (chosen ? " on" : ""));
-            row.appendChild(el("span", "pv-box", chosen ? "✓" : ""));
-            row.appendChild(el("span", null, o.label || o.key || ""));
-            body.appendChild(row);
+            var orow = el("div", "pv-check" + (chosen ? " on" : ""));
+            orow.appendChild(el("span", "pv-box", chosen ? "✓" : ""));
+            orow.appendChild(el("span", null, o.label || o.key || ""));
+            body.appendChild(orow);
           });
           if (!g.selected) body.appendChild(el("div", "sig-meta", "Вариант не выбран."));
         });
@@ -1484,7 +1909,7 @@
 
   // ---------------- Signatures ----------------
   function loadSignatures() {
-    apiJson("/signatures").then(function (list) {
+    return apiJson("/signatures").then(function (list) {
       var wrap = $("signaturesList"); wrap.innerHTML = "";
       if (!list.length) { wrap.innerHTML = '<div class="empty-note">Пока нет подписей.</div>'; return; }
       list.forEach(function (s) {
@@ -2518,7 +2943,21 @@
   }
 
   // ---------------- Init ----------------
+  /// Кнопкам, объявленным в разметке, иконка проставляется по data-icon: так подпись и
+  /// иконка не разъезжаются между разметкой и кодом.
+  function applyMarkupIcons() {
+    document.querySelectorAll("[data-icon]").forEach(function (b) {
+      if (b.dataset.iconDone) return;
+      b.dataset.iconDone = "1";
+      var label = b.textContent;
+      b.textContent = "";
+      b.appendChild(icon(b.getAttribute("data-icon")));
+      b.appendChild(el("span", null, label));
+    });
+  }
+
   function init() {
+    applyMarkupIcons();
     // Realtime first and unconditionally: it drives alerts, live device state and new signatures.
     // It used to sit behind six data loads, so one transient error left the panel with no live
     // connection (and no alerts) until the operator reloaded the page.

@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v4.8</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v4.9</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -74,14 +74,16 @@
             <select id="docTarget"></select>
           </label>
           <div class="toolbar-actions">
-            <button id="checkDoc" class="btn btn-ghost" title="Найти ошибки в документе до того, как он попадёт к клиенту">Проверить</button>
-            <button id="previewDoc" class="btn btn-ghost" title="Посмотреть, как документ будет выглядеть на планшете, с тестовыми значениями тегов">Предпросмотр</button>
-            <button id="exportDoc" class="btn btn-ghost" title="Сохранить все страницы в файл как резервную копию">Экспорт</button>
-            <button id="importDoc" class="btn btn-ghost" title="Восстановить страницы из ранее сохранённого файла">Импорт</button>
+            <button id="checkDoc" class="btn btn-ghost" data-icon="shield" title="Найти ошибки в документе до того, как он попадёт к клиенту">Проверить</button>
+            <button id="previewDoc" class="btn btn-ghost" data-icon="eye" title="Посмотреть, как документ будет выглядеть на планшете, с тестовыми значениями тегов">Предпросмотр</button>
+            <span class="tb-sep"></span>
+            <button id="exportDoc" class="btn btn-ghost" data-icon="download" title="Сохранить все страницы в файл как резервную копию">Экспорт</button>
+            <button id="importDoc" class="btn btn-ghost" data-icon="upload" title="Восстановить страницы из ранее сохранённого файла">Импорт</button>
             <input id="importDocFile" type="file" accept="application/json,.json" hidden />
-            <button id="saveDocument" class="btn btn-ghost">Сохранить</button>
-            <button id="showSlides" class="btn btn-ghost">Вернуть рекламу</button>
-            <button id="showDocument" class="btn btn-primary">Отправить на планшет</button>
+            <button id="saveDocument" class="btn btn-ghost" data-icon="save">Сохранить</button>
+            <span class="tb-sep"></span>
+            <button id="showSlides" class="btn btn-ghost" data-icon="back">Вернуть рекламу</button>
+            <button id="showDocument" class="btn btn-primary" data-icon="send">Отправить на планшет</button>
           </div>
         </div>
         <div class="note-box">
@@ -95,7 +97,7 @@
             <input id="docTitle" type="text" />
           </label>
           <div id="pagesEditor" class="pages-editor"></div>
-          <button id="addPage" class="btn btn-ghost">+ Добавить страницу</button>
+          <button id="addPage" class="btn btn-ghost btn-add" data-icon="plus">Добавить страницу</button>
           <div class="doc-extra">
             <label class="field">Текст над полем подписи
               <input id="signPrompt" type="text" />
@@ -328,6 +330,7 @@
   </div>
 
   <script src="/lib/signalr.min.js"></script>
+  <script src="/admin/icons.js"></script>
   <script src="/admin/admin.js"></script>
 </body>
 </html>
