@@ -382,6 +382,9 @@ public static partial class DocumentTemplating
                 var sel = (g.Selected ?? "").Trim();
                 g.Selected = g.Options.Any(o => string.Equals(o.Key, sel, StringComparison.OrdinalIgnoreCase)) ? sel : null;
             }
+            // Группа без имени неадресуема по API, а с одним вариантом не даёт выбора: хранить
+            // такую нечего. Оператору о ней сообщает проверка документа в редакторе.
+            p.Groups = p.Groups.Where(g => g.Key.Length > 0 && g.Options.Count >= 2).ToList();
             if (p.Groups.Count > MaxGroups) p.Groups = p.Groups.Take(MaxGroups).ToList();
         }
 

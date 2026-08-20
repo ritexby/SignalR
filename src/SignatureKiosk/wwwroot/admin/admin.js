@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "4.7";
+  var APP_VERSION = "4.8";
 
   var state = {
     slidesTarget: "all",   // recipient for advertising slides (all / group / device)
@@ -93,6 +93,8 @@
       var name = tab.getAttribute("data-tab");
       document.querySelectorAll(".panel").forEach(function (p) { p.classList.toggle("hidden", p.getAttribute("data-panel") !== name); });
       if (name === "signatures") loadSignatures();
+      var content = document.querySelector(".content");
+      if (content) content.classList.toggle("content-wide", name === "document");
       if (name === "devices") { loadDevices(); loadKioskControl(); }
       if (name === "groups") loadGroups();
       if (name === "workstations") loadWorkstations();
@@ -472,7 +474,7 @@
     }
     var groupNames = Object.keys(keys.groups);
     if (groupNames.length) {
-      var gg = document.createElement("optgroup"); gg.label = "Группы вариантов";
+      var gg = document.createElement("optgroup"); gg.label = "Двойные зависимые чекбоксы";
       groupNames.forEach(function (k) { gg.appendChild(new Option(k, k)); });
       fld.appendChild(gg);
     }
@@ -533,7 +535,13 @@
 
     if (cond && cond.field) {
       mode.value = "cond";
-      if (KNOWN_FIELDS.indexOf(cond.field) >= 0) fld.value = cond.field;
+      // Регистр не важен: тег ПОЛ, сохранённый до переименования, должен выбраться как Пол,
+      // а не выпасть в «другой тег».
+      var match = null;
+      for (var mi = 0; mi < fld.options.length; mi++)
+        if (fld.options[mi].value && fld.options[mi].value !== OTHER_OPTION &&
+            fld.options[mi].value.toLowerCase() === String(cond.field).toLowerCase()) { match = fld.options[mi].value; break; }
+      if (match) fld.value = match;
       else { fld.value = OTHER_OPTION; fldOther.value = cond.field; }
       op.value = cond.op || "eq";
       syncValues(cond.value || "");
@@ -541,7 +549,49 @@
       syncValues(null);
     }
     sync();
+
+    // Свёрнутый вид: пока условия нет, это одна ссылка, а когда есть, короткая строка вида
+    // «только если Пол = F». Три выпадающих списка у каждого элемента занимали треть высоты
+    // страницы, даже когда условие не задано ни у одного.
+    var badge = el("button", "cond-badge");
+    var open = false;
+    function describe() {
+      var c = readCondition(box);
+      if (!c) return "+ условие показа";
+      var opName = "";
+      COND_OPS.forEach(function (o) { if (o[0] === c.op) opName = o[1]; });
+      if (c.op === "empty" || c.op === "notempty") return "только если «" + c.field + "» " + opName;
+      return "только если «" + c.field + "» " + opName + " " + (c.value || "(пусто)");
+    }
+    function applyOpen() {
+      box.classList.toggle("cond-open", open);
+      mode.classList.toggle("hidden", !open);
+      fields.classList.toggle("hidden", !open || mode.value !== "cond");
+      badge.classList.toggle("hidden", open);
+      badge.textContent = describe();
+      badge.classList.toggle("set", !!readCondition(box));
+    }
+    badge.addEventListener("click", function () {
+      open = true;
+      // Первое открытие сразу переводит в режим условия: иначе оператор жмёт «+ условие»
+      // и видит список «Показывать всегда», то есть ничего не произошло.
+      if (mode.value !== "cond") { mode.value = "cond"; sync(); }
+      applyOpen();
+      var first = fields.querySelector("select");
+      if (first) first.focus();
+    });
+    mode.addEventListener("change", function () {
+      // Вернули «Показывать всегда»: сворачиваем обратно, показывать нечего.
+      if (mode.value !== "cond") { open = false; applyOpen(); }
+    });
+    [fld, fldOther, op, val, valSel].forEach(function (e) {
+      e.addEventListener("change", function () { badge.textContent = describe(); });
+      e.addEventListener("input", function () { badge.textContent = describe(); });
+    });
+
+    box.appendChild(badge);
     box.appendChild(mode); box.appendChild(fields);
+    applyOpen();   // всегда начинаем со свёрнутого вида, и с условием, и без него
     return box;
   }
   function readCondition(box) {
@@ -588,6 +638,9 @@
     var isImage = !!b.imageUrl;
 
     var modeBar = el("div", "block-mode");
+    var handle = el("span", "drag-handle", "⠿");
+    handle.title = "Перетащите, чтобы изменить порядок блоков";
+    modeBar.appendChild(handle);
     var btnText = el("button", "btn btn-ghost btn-sm", "Текст"); btnText.type = "button";
     var btnImg = el("button", "btn btn-ghost btn-sm", "Картинка"); btnImg.type = "button";
     modeBar.appendChild(btnText); modeBar.appendChild(btnImg);
@@ -689,51 +742,320 @@
     upLabel.appendChild(up); c.appendChild(upLabel);
     openModal(c);
   }
+  // ---------- Проверка документа ----------
+  // Ошибки такого рода иначе выясняются на планшете перед клиентом: условие ссылается на
+  // несуществующий чекбокс, у группы нет имени, тег написан с опечаткой. Всё это видно
+  // заранее, если посмотреть.
+  function validateDoc() {
+    var problems = [];
+    var pages = state.doc.pages || [];
+    var keys = docKeys();
+    var known = keys.checks.concat(Object.keys(keys.groups));
+    var seenKeys = {};
+
+    function checkCondition(cond, where) {
+      if (!cond || !cond.field) return;
+      var f = cond.field;
+      var isTag = KNOWN_FIELDS.some(function (k) { return k.toLowerCase() === f.toLowerCase(); });
+      var isKey = known.some(function (k) { return k === f; });
+      if (!isTag && !isKey)
+        problems.push({ level: "warn", text: where + ": условие ссылается на «" + f + "», такого тега и такого имени в документе нет. Блок не покажется никогда." });
+      if (cond.op !== "empty" && cond.op !== "notempty" && !String(cond.value || "").trim())
+        problems.push({ level: "error", text: where + ": в условии не задано значение." });
+      if (isKey && keys.groups[f] && cond.op !== "empty" && cond.op !== "notempty") {
+        var opts = keys.groups[f];
+        if (opts.length && opts.indexOf(cond.value) < 0)
+          problems.push({ level: "warn", text: where + ": в условии значение «" + cond.value + "», а у «" + f + "» есть только " + opts.join(", ") + "." });
+      }
+    }
+
+    function noteKey(key, where) {
+      if (!key) return;
+      if (seenKeys[key]) problems.push({ level: "error", text: where + ": имя «" + key + "» уже занято (" + seenKeys[key] + ")." });
+      else seenKeys[key] = where;
+    }
+
+    if (!pages.length) problems.push({ level: "error", text: "В документе нет ни одной страницы." });
+
+    pages.forEach(function (page, pi) {
+      var where = "Страница " + (pi + 1);
+      checkCondition(page.visibleWhen, where);
+      var blocks = blocksOf(page) || [];
+      var empty = blocks.filter(function (b) { return !b.imageUrl && !runsText(b.runs).trim(); }).length;
+      if (empty) problems.push({ level: "warn", text: where + ": пустых блоков без текста и без картинки: " + empty + "." });
+      blocks.forEach(function (b, bi) { checkCondition(b.visibleWhen, where + ", блок " + (bi + 1)); });
+
+      (page.checkboxes || []).forEach(function (cb, ci) {
+        var w = where + ", чекбокс " + (ci + 1);
+        if (!String(cb.label || "").trim()) problems.push({ level: "error", text: w + ": нет текста, на планшете он будет пустой строкой." });
+        noteKey(cb.key, w);
+        checkCondition(cb.visibleWhen, w);
+      });
+
+      (page.groups || []).forEach(function (g, gi) {
+        var w = where + ", зависимые чекбоксы " + (gi + 1);
+        if (!String(g.key || "").trim()) problems.push({ level: "error", text: w + ": нет имени для API, задать выбор извне будет нельзя." });
+        noteKey(g.key, w);
+        var opts = g.options || [];
+        if (opts.length < 2) problems.push({ level: "error", text: w + ": нужно хотя бы два варианта, иначе выбирать не из чего." });
+        opts.forEach(function (o, oi) {
+          if (!String(o.key || "").trim()) problems.push({ level: "error", text: w + ", вариант " + (oi + 1) + ": нет имени для API, он не сохранится." });
+          if (!String(o.label || "").trim()) problems.push({ level: "warn", text: w + ", вариант " + (oi + 1) + ": нет текста, клиент увидит имя для API." });
+        });
+        checkCondition(g.visibleWhen, w);
+      });
+
+      if (!blocks.length && !(page.checkboxes || []).length && !(page.groups || []).length && !page.includeDynamic)
+        problems.push({ level: "warn", text: where + ": на странице ничего нет." });
+    });
+
+    (state.doc.signBlocks || []).concat(state.doc.signBlocksBelow || []).forEach(function (b, i) {
+      checkCondition(b.visibleWhen, "Страница подписи, блок " + (i + 1));
+    });
+
+    // Тег с опечаткой остаётся в тексте как {{вот так}} и виден клиенту.
+    scanPlaceholders().forEach(function (t) {
+      var isTag = KNOWN_FIELDS.some(function (k) { return k.toLowerCase() === t.toLowerCase(); });
+      if (!isTag) problems.push({ level: "warn", text: "Тег {{" + t + "}} не входит в список известных. Проверьте написание, иначе он останется в тексте как есть." });
+    });
+
+    return problems;
+  }
+
+  /// Показать список замечаний. onProceed вызывается, если оператор решил продолжить.
+  function showProblems(problems, onProceed) {
+    var c = el("div", "problems");
+    var errors = problems.filter(function (p) { return p.level === "error"; });
+    c.appendChild(el("h3", null, errors.length ? "Документ можно отправить, но есть ошибки" : "Замечания к документу"));
+    c.appendChild(el("p", "sig-meta", errors.length
+      ? "Красное почти наверняка сломает сценарий у клиента. Серое стоит просто проверить."
+      : "Ничего критичного, но стоит проверить."));
+    var list = el("div", "problem-list");
+    problems.forEach(function (p) {
+      list.appendChild(el("div", "problem " + (p.level === "error" ? "problem-error" : "problem-warn"), p.text));
+    });
+    c.appendChild(list);
+    var row = el("div", "toolbar-actions");
+    var back = el("button", "btn btn-ghost", "Вернуться и исправить");
+    back.addEventListener("click", closeModal);
+    var go = el("button", "btn btn-primary", "Всё равно продолжить");
+    go.addEventListener("click", function () { closeModal(); onProceed(); });
+    row.appendChild(back); row.appendChild(go);
+    c.appendChild(row);
+    openModal(c);
+  }
+
+  $("checkDoc").addEventListener("click", function () {
+    collectDoc();
+    var problems = validateDoc();
+    if (!problems.length) { toast("Замечаний нет."); return; }
+    showProblems(problems, function () { /* просто закрыть */ });
+  });
+
+  // ---------- Перетаскивание ----------
+  // Порядок элементов собирается из DOM, поэтому переставить узлы достаточно: модель менять не
+  // нужно. Перетаскивание включается только по ручке, иначе браузер начинал бы тащить блок при
+  // попытке выделить текст в редакторе внутри него.
+  function makeSortable(list, itemSelector) {
+    if (!list || list.dataset.sortable) return;
+    list.dataset.sortable = "1";
+
+    var item = null, moved = false;
+
+    function itemsOf() {
+      return Array.prototype.slice.call(list.children).filter(function (n) {
+        return n.matches && n.matches(itemSelector);
+      });
+    }
+
+    function onMove(e) {
+      if (!item) return;
+      moved = true;
+      var y = e.clientY;
+      var others = itemsOf().filter(function (n) { return n !== item; });
+      var before = null;
+      // Первый сосед, чья середина ниже курсора: перед ним и встаём.
+      for (var i = 0; i < others.length; i++) {
+        var r = others[i].getBoundingClientRect();
+        if (y < r.top + r.height / 2) { before = others[i]; break; }
+      }
+      if (before) { if (item.nextSibling !== before) list.insertBefore(item, before); }
+      else if (list.lastElementChild !== item) list.appendChild(item);
+      e.preventDefault();
+    }
+
+    function onUp() {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mouseup", onUp, true);
+      document.body.classList.remove("dragging-now");
+      if (!item) return;
+      item.classList.remove("dragging");
+      var wasMoved = moved;
+      item = null; moved = false;
+      if (!wasMoved) return;
+      // Порядок изменился: перечитываем документ из DOM. Для страниц ещё и перерисовываем,
+      // иначе номера страниц и оглавление разойдутся с тем, что на экране.
+      if (list === $("pagesEditor")) { collectDoc(); collapsedPages = {}; renderPages(); }
+      updatePlaceholders();
+    }
+
+    list.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) return;
+      var handle = e.target.closest && e.target.closest(".drag-handle");
+      if (!handle || !list.contains(handle)) return;
+      var target = handle.closest(itemSelector);
+      // Ручка вложенного списка не должна тащить внешний элемент.
+      if (!target || target.parentNode !== list) return;
+      item = target; moved = false;
+      item.classList.add("dragging");
+      document.body.classList.add("dragging-now");
+      document.addEventListener("mousemove", onMove, true);
+      document.addEventListener("mouseup", onUp, true);
+      // Иначе браузер начнёт выделять текст соседних блоков вместо перетаскивания.
+      e.preventDefault();
+    });
+  }
+
+  // ---------- Оглавление ----------
+  function pageSummary(page) {
+    var parts = [];
+    var heading = runsText(headingRunsOf(page)).trim();
+    if (heading) parts.push("«" + (heading.length > 40 ? heading.slice(0, 40) + "..." : heading) + "»");
+    var nb = (blocksOf(page) || []).length;
+    var nc = (page.checkboxes || []).length;
+    var ng = (page.groups || []).length;
+    if (nb) parts.push("блоков: " + nb);
+    if (nc) parts.push("чекбоксов: " + nc);
+    if (ng) parts.push("зависимых: " + ng);
+    if (page.visibleWhen && page.visibleWhen.field) parts.push("по условию");
+    return parts.join("   ·   ") || "пустая страница";
+  }
+
+  function runsText(runs) {
+    return (runs || []).map(function (r) { return r && r.text ? r.text : ""; }).join("");
+  }
+
+  function renderToc() {
+    var toc = $("docToc");
+    if (!toc) return;
+    toc.innerHTML = "";
+    var pages = state.doc.pages || [];
+    toc.appendChild(el("div", "toc-title", "Страницы"));
+    pages.forEach(function (page, pi) {
+      var heading = runsText(headingRunsOf(page)).trim();
+      var item = el("button", "toc-item" + (collapsedPages[pi] ? " folded" : ""),
+        (pi + 1) + ". " + (heading || "без заголовка"));
+      item.title = pageSummary(page);
+      item.addEventListener("click", function () {
+        var cards = document.querySelectorAll('#pagesEditor [data-role="pagecard"]');
+        if (cards[pi]) cards[pi].scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      toc.appendChild(item);
+    });
+    // Экран подписи и «Спасибо» клиент тоже видит, поэтому в оглавлении они есть.
+    toc.appendChild(el("div", "toc-fixed", "Подпись"));
+    toc.appendChild(el("div", "toc-fixed", "Спасибо"));
+    var all = el("div", "toc-actions");
+    var foldAll = el("button", "btn btn-ghost btn-sm", "Свернуть все");
+    foldAll.addEventListener("click", function () {
+      collectDoc();
+      (state.doc.pages || []).forEach(function (_, i) { collapsedPages[i] = true; });
+      renderPages();
+    });
+    var openAll = el("button", "btn btn-ghost btn-sm", "Развернуть все");
+    openAll.addEventListener("click", function () { collectDoc(); collapsedPages = {}; renderPages(); });
+    all.appendChild(foldAll); all.appendChild(openAll);
+    toc.appendChild(all);
+  }
+
+  // Какие страницы свёрнуты. Хранится по номеру и переживает перерисовку: иначе любое
+  // изменение внутри страницы разворачивало бы обратно всё, что оператор свернул.
+  var collapsedPages = {};
+
   function renderPages() {
     var wrap = $("pagesEditor"); wrap.innerHTML = "";
     (state.doc.pages || []).forEach(function (page, pi) {
       var card = el("div", "page-card"); card.setAttribute("data-role", "pagecard");
       var title = el("div", "page-title");
-      title.appendChild(el("strong", null, "Страница " + (pi + 1)));
+
+      // За эту ручку страницу перетаскивают. Само перетаскивание включается только по ней,
+      // иначе оно перехватывало бы выделение текста в редакторах внутри страницы.
+      var handle = el("span", "drag-handle", "⠿");
+      handle.title = "Перетащите, чтобы изменить порядок страниц";
+      title.appendChild(handle);
+
+      var toggle = el("button", "btn btn-ghost btn-sm page-toggle");
+      var name = el("strong", null, "Страница " + (pi + 1));
+      title.appendChild(toggle);
+      title.appendChild(name);
+      var summary = el("span", "page-summary", "");
+      title.appendChild(summary);
+
       var delPage = el("button", "btn btn-danger", "Удалить страницу");
       delPage.addEventListener("click", function () { collectDoc(); state.doc.pages.splice(pi, 1); renderPages(); updatePlaceholders(); });
       title.appendChild(delPage); card.appendChild(title);
 
-      card.appendChild(el("div", "field-sm", "Условие показа страницы"));
-      card.appendChild(conditionEditor(page.visibleWhen, "pagecond"));
+      var body = el("div", "page-body");
+      card.appendChild(body);
 
-      card.appendChild(richEditor("Заголовок", headingRunsOf(page), "heading"));
+      function applyCollapsed() {
+        var off = !!collapsedPages[pi];
+        card.classList.toggle("collapsed", off);
+        body.classList.toggle("hidden", off);
+        toggle.textContent = off ? "▶ Развернуть" : "▼ Свернуть";
+        summary.textContent = off ? pageSummary(page) : "";
+      }
+      toggle.addEventListener("click", function () {
+        // Собираем перед сворачиванием: иначе правки в скрытой странице потерялись бы
+        // при следующей перерисовке.
+        collectDoc();
+        collapsedPages[pi] = !collapsedPages[pi];
+        applyCollapsed();
+      });
 
-      card.appendChild(el("div", "field", "Блоки текста"));
+      body.appendChild(el("div", "field-sm", "Условие показа страницы"));
+      body.appendChild(conditionEditor(page.visibleWhen, "pagecond"));
+
+      body.appendChild(richEditor("Заголовок", headingRunsOf(page), "heading"));
+
+      body.appendChild(el("div", "field", "Блоки текста"));
       var blist = el("div", "block-list"); blist.setAttribute("data-role", "blocklist");
       var blocks = blocksOf(page); if (!blocks.length) blocks = [{ runs: [] }];
       blocks.forEach(function (b) { blist.appendChild(blockCard(b)); });
-      card.appendChild(blist);
+      makeSortable(blist, ".block-card");
+      body.appendChild(blist);
       var addB = el("button", "btn btn-ghost", "+ Блок текста");
       addB.addEventListener("click", function () { blist.appendChild(blockCard({ runs: [] })); });
-      card.appendChild(addB);
+      body.appendChild(addB);
 
-      card.appendChild(el("div", "field", "Чекбоксы"));
+      body.appendChild(el("div", "field", "Чекбоксы"));
       var cbList = el("div", "cb-list"); cbList.setAttribute("data-role", "cblist");
-      (page.checkboxes || []).forEach(function (cb) { cbList.appendChild(checkboxRow(cb)); }); card.appendChild(cbList);
+      (page.checkboxes || []).forEach(function (cb) { cbList.appendChild(checkboxRow(cb)); });
+      makeSortable(cbList, ".cb-item");
+      body.appendChild(cbList);
       var addCb = el("button", "btn btn-ghost", "+ Чекбокс");
       addCb.addEventListener("click", function () { cbList.appendChild(checkboxRow({ label: "", required: true })); });
-      card.appendChild(addCb);
+      body.appendChild(addCb);
 
-      card.appendChild(el("div", "field", "Группы вариантов (выбрать можно один)"));
+      body.appendChild(el("div", "field", "Двойные зависимые чекбоксы (выбрать можно только один)"));
       var grpList = el("div", "cb-list"); grpList.setAttribute("data-role", "grouplist");
-      (page.groups || []).forEach(function (g) { grpList.appendChild(groupCard(g)); }); card.appendChild(grpList);
-      var addGrp = el("button", "btn btn-ghost", "+ Группа вариантов");
+      (page.groups || []).forEach(function (g) { grpList.appendChild(groupCard(g)); });
+      makeSortable(grpList, ".group-card");
+      body.appendChild(grpList);
+      var addGrp = el("button", "btn btn-ghost", "+ Двойные зависимые чекбоксы");
       addGrp.addEventListener("click", function () { grpList.appendChild(groupCard({ options: [{ key: "", label: "" }, { key: "", label: "" }] })); });
-      card.appendChild(addGrp);
+      body.appendChild(addGrp);
 
       var dyn = el("label", "check-inline dyn-anchor");
       var dynCb = el("input"); dynCb.type = "checkbox"; dynCb.checked = !!page.includeDynamic; dynCb.setAttribute("data-role", "includedynamic");
       dyn.appendChild(dynCb); dyn.appendChild(document.createTextNode(" Показывать здесь чекбоксы, присланные по API"));
-      card.appendChild(dyn);
+      body.appendChild(dyn);
 
+      applyCollapsed();
       wrap.appendChild(card);
     });
+    makeSortable(wrap, ".page-card");
+    renderToc();
 
     // Signature page: custom content (text / image) on either side of the signature field.
     var signCard = el("div", "page-card sign-page-card");
@@ -762,6 +1084,9 @@
   function checkboxRow(cb) {
     var box = el("div", "cb-item"); box.setAttribute("data-role", "cbrow");
     var row = el("div", "cb-row");
+    var handle = el("span", "drag-handle", "⠿");
+    handle.title = "Перетащите, чтобы изменить порядок";
+    row.appendChild(handle);
     var label = el("input"); label.type = "text"; label.placeholder = "Текст пункта"; label.value = cb.label || ""; label.setAttribute("data-role", "cblabel"); row.appendChild(label);
     // Имя, по которому внешняя система адресует именно этот пункт. Без имени пункт остаётся
     // обычным чекбоксом из шаблона, как раньше.
@@ -780,7 +1105,10 @@
   function groupCard(g) {
     var card = el("div", "group-card"); card.setAttribute("data-role", "grouprow");
     var head = el("div", "cb-row");
-    var title = el("input"); title.type = "text"; title.placeholder = "Заголовок группы"; title.value = g.title || ""; title.setAttribute("data-role", "gtitle"); head.appendChild(title);
+    var handle = el("span", "drag-handle", "⠿");
+    handle.title = "Перетащите, чтобы изменить порядок";
+    head.appendChild(handle);
+    var title = el("input"); title.type = "text"; title.placeholder = "Общий заголовок"; title.value = g.title || ""; title.setAttribute("data-role", "gtitle"); head.appendChild(title);
     var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = g.key || ""; key.setAttribute("data-role", "gkey"); head.appendChild(key);
     var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = !!g.required; req.setAttribute("data-role", "greq");
     reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательно выбрать")); head.appendChild(reqLabel);
@@ -835,11 +1163,13 @@
           if (okey) options.push({ key: okey, label: olabel });
         });
         var gkey = (r.querySelector('[data-role="gkey"]').value || "").trim();
-        // Группа без имени или без вариантов не может быть ни показана, ни адресована по API.
-        if (!gkey || !options.length) return;
+        var gtitle = r.querySelector('[data-role="gtitle"]').value || "";
+        // Совсем пустую заготовку выбрасываем, а недоделанную оставляем: молча стирать работу
+        // оператора нельзя, о недостающем имени и вариантах ему скажет проверка документа.
+        if (!gkey && !options.length && !gtitle.trim()) return;
         var grp = {
           key: gkey,
-          title: r.querySelector('[data-role="gtitle"]').value || "",
+          title: gtitle,
           required: r.querySelector('[data-role="greq"]').checked,
           options: options
         };
@@ -1106,7 +1436,18 @@
     c.appendChild(el("h3", null, "Данные для документа"));
     c.appendChild(el("p", "sig-meta", "Значения подставятся в плейсхолдеры и отправятся на: " + targetLabel(state.docTarget)));
     var inputs = {};
-    placeholders.forEach(function (k) { var f = labeledInput(k, ""); c.appendChild(f.wrap); inputs[k] = f.input; });
+    placeholders.forEach(function (k) {
+      var known = FIELD_VALUES[k];
+      if (known) {
+        var wrap = el("label", "field", k);
+        var sel = el("select");
+        sel.appendChild(new Option("не передавать", ""));
+        known.forEach(function (v) { sel.appendChild(new Option(v, v)); });
+        wrap.appendChild(sel); c.appendChild(wrap); inputs[k] = sel;
+      } else {
+        var f = labeledInput(k, ""); c.appendChild(f.wrap); inputs[k] = f.input;
+      }
+    });
     var btn = el("button", "btn btn-primary", "Отправить на планшет");
     btn.addEventListener("click", function () {
       var fields = {}; placeholders.forEach(function (k) { fields[k] = inputs[k].value; });
@@ -1119,11 +1460,18 @@
   $("showDocument").addEventListener("click", function () {
     if (!/^device:/.test(state.docTarget)) { toast("Выберите планшет. Документ показывается только на один планшет."); return; }
     collectDoc();
-    var placeholders = scanPlaceholders();
-    apiSend("/document", "PUT", state.doc).then(function () {
-      if (placeholders.length) openFieldsModal(placeholders);
-      else doShowDocument(null);
-    });
+    var proceed = function () {
+      apiSend("/document", "PUT", state.doc).then(function () {
+        // Именно previewFields, а не только теги из текста: тег, использованный лишь в условии,
+        // иначе не спрашивался, значение уходило пустым, и блок молча не показывался.
+        var fields = previewFields();
+        if (fields.length) openFieldsModal(fields);
+        else doShowDocument(null);
+      });
+    };
+    // Перед клиентом уже поздно: показываем замечания здесь, но не запрещаем отправку.
+    var problems = validateDoc();
+    if (problems.length) showProblems(problems, proceed); else proceed();
   });
   (function () {
     var docPanel = document.querySelector('[data-panel="document"]');

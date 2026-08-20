@@ -63,6 +63,8 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* Content */
 .content { padding: 22px; max-width: 1100px; margin: 0 auto; }
+/* Редактору документа нужна ширина: рядом с ним стоит оглавление. */
+.content-wide { max-width: 1400px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 22px 24px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
 .panel-head h2 { margin: 0; font-size: 1.2rem; }
@@ -101,15 +103,19 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 /* Document editor */
 .doc-editor { display: flex; flex-direction: column; gap: 16px; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; color: var(--muted); font-weight: 600; }
-.field input, .field textarea { padding: 10px; border: 1px solid var(--border); border-radius: 9px; font-size: .98rem; color: var(--text); font-weight: 400; }
+.field input, .field textarea { padding: 10px; border: 1.5px solid #b9c2d0; border-radius: 9px; font-size: .98rem; color: var(--text); font-weight: 400; background: #fff; }
+.field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .pages-editor { display: flex; flex-direction: column; gap: 16px; }
 #pagesEditor { display: flex; flex-direction: column; gap: 24px; }
 .page-card { border: 1.5px solid #d6deea; border-left: 5px solid var(--accent); border-radius: 14px; padding: 0 18px 18px; background: #fff; box-shadow: 0 2px 12px rgba(16,24,40,.06); display: flex; flex-direction: column; gap: 12px; }
 .page-card .page-title { display: flex; align-items: center; justify-content: space-between; margin: 0 -18px 6px; padding: 12px 18px; background: linear-gradient(90deg, #eaf7f0, #f6fbf8); border-bottom: 1px solid #e3ebf2; border-radius: 12px 12px 0 0; }
 .page-card .page-title strong { color: var(--accent-dark); font-size: 1.05rem; letter-spacing: .01em; }
 .cb-list { display: flex; flex-direction: column; gap: 8px; }
-.cb-row { display: flex; align-items: center; gap: 10px; }
-.cb-row input[type=text] { flex: 1; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+/* На узком экране строка не помещается целиком: пусть переносится по элементам,
+   а не вылезает за край карточки. */
+.cb-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cb-row input[type=text] { flex: 1 1 220px; min-width: 160px; padding: 9px 10px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; }
+.cb-row input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .cb-row label { display: flex; align-items: center; gap: 5px; font-size: .85rem; color: var(--muted); }
 
 /* ---------- Rich-text editor (document) ---------- */
@@ -134,11 +140,15 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* ---------- Content blocks + conditions ---------- */
 .block-list { display: flex; flex-direction: column; gap: 12px; }
-.block-card { border: 1px dashed var(--border); border-radius: 10px; padding: 12px; background: #fff; display: flex; flex-direction: column; gap: 8px; }
+/* Уровни вложенности различаются цветом левой полосы: страница зелёная, блок синий,
+   чекбокс янтарный, зависимые чекбоксы фиолетовые. Иначе на длинной странице всё
+   сливается и непонятно, что к чему относится. */
+.block-card { border: 1.5px solid #c7d7ee; border-left: 5px solid #2563eb; border-radius: 10px; padding: 14px; background: #fbfdff; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
 .cond-box { display: flex; flex-direction: column; gap: 6px; }
 .cond-mode { padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); max-width: 260px; }
 .cond-fields { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.cond-fields input, .cond-fields select { padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); }
+.cond-fields input, .cond-fields select { padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; color: var(--text); }
+.cond-fields input:focus, .cond-fields select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .cond-field { min-width: 170px; }
 .cond-field-other { min-width: 150px; }
 .cond-val, .cond-val-sel { min-width: 150px; }
@@ -367,11 +377,58 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 }
 
 /* ---- Именованные чекбоксы и группы вариантов ---- */
-.cb-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: #fbfcfe; }
+.cb-item { border: 1.5px solid #f0d9a8; border-left: 5px solid #d97706; border-radius: 10px; padding: 12px; background: #fffdf7; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
 .cb-list { display: flex; flex-direction: column; gap: 10px; }
 .cb-key { max-width: 170px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem; }
-.group-card { border: 1px solid #cbd5e1; border-left: 4px solid #6366f1; border-radius: 10px; padding: 12px; background: #fbfcfe; display: flex; flex-direction: column; gap: 10px; }
+.group-card { border: 1.5px solid #cdd0f5; border-left: 5px solid #6366f1; border-radius: 10px; padding: 12px; background: #fcfcff; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
 .opt-list { display: flex; flex-direction: column; gap: 8px; padding-left: 14px; border-left: 2px dashed var(--border); }
 /* Карточка группы это flex-колонка, поэтому кнопка иначе растягивается во всю ширину. */
 .group-card > .btn { align-self: flex-start; }
+/* Подписи разделов внутри страницы: сразу видно, где кончаются блоки и начинаются чекбоксы. */
+.page-card > .field { font-size: .82rem; text-transform: uppercase; letter-spacing: .04em; color: #64748b; margin-top: 6px; }
 .pv-group-title { font-weight: 700; margin: 14px 0 6px; }
+
+/* ---- Оглавление документа ---- */
+.doc-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 22px; align-items: start; }
+.doc-toc { position: sticky; top: 78px; display: flex; flex-direction: column; gap: 3px; max-height: calc(100vh - 100px); overflow-y: auto; padding-right: 4px; }
+.toc-title { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 700; margin-bottom: 4px; }
+.toc-item { text-align: left; border: none; background: transparent; border-left: 3px solid transparent; padding: 7px 9px; border-radius: 0 8px 8px 0; cursor: pointer; font-size: .88rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toc-item:hover { background: #eef4fb; border-left-color: var(--accent); }
+.toc-item.folded { color: var(--muted); font-style: italic; }
+.toc-fixed { padding: 7px 9px; font-size: .88rem; color: var(--muted); border-left: 3px solid transparent; }
+.toc-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+/* Узкому экрану колонка не по карману: оглавление уходит, редактор занимает всю ширину. */
+@media (max-width: 1000px) {
+  .doc-layout { grid-template-columns: minmax(0, 1fr); }
+  .doc-toc { display: none; }
+}
+
+/* ---- Сворачивание страницы ---- */
+.page-toggle { padding: 4px 10px; font-size: .8rem; }
+.page-summary { color: var(--muted); font-size: .85rem; margin-left: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-card.collapsed { border-left-color: #94a3b8; background: #f8fafc; }
+.page-card.collapsed .page-title { background: linear-gradient(90deg, #eef2f7, #f8fafc); border-bottom: none; border-radius: 12px; }
+.page-card.collapsed { padding-bottom: 0; gap: 0; }
+.page-body { display: flex; flex-direction: column; gap: 12px; }
+
+/* ---- Перетаскивание ---- */
+.drag-handle { cursor: grab; color: #94a3b8; font-size: 1.15rem; line-height: 1; padding: 2px 4px; user-select: none; border-radius: 6px; flex: 0 0 auto; }
+.drag-handle:hover { color: var(--text); background: #eef2f7; }
+.drag-handle:active { cursor: grabbing; }
+.dragging { opacity: .45; }
+
+/* ---- Условие в свёрнутом виде ---- */
+.cond-badge { align-self: flex-start; border: 1px dashed #b9c2d0; background: #fff; color: var(--muted); border-radius: 999px; padding: 5px 12px; font-size: .84rem; cursor: pointer; font-weight: 600; }
+.cond-badge:hover { border-color: var(--accent); color: var(--accent); }
+.cond-badge.set { border-style: solid; border-color: #6366f1; background: #eef2ff; color: #4338ca; }
+
+/* ---- Замечания к документу ---- */
+.problems { display: flex; flex-direction: column; gap: 12px; text-align: left; }
+.problems h3 { margin: 0; font-size: 1.05rem; }
+.problem-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.problem { padding: 9px 12px; border-radius: 9px; font-size: .9rem; line-height: 1.45; border-left: 4px solid; }
+.problem-error { background: #fef2f2; border-left-color: var(--danger); color: #7f1d1d; }
+.problem-warn { background: #f8fafc; border-left-color: #94a3b8; color: #334155; }
+.problems .toolbar-actions { margin-left: 0; justify-content: flex-end; }
+/* Пока элемент тащат, выделение текста только мешает. */
+body.dragging-now { user-select: none; cursor: grabbing; }
