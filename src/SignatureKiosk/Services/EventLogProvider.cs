@@ -19,15 +19,26 @@ public sealed class EventLogProvider : ILoggerProvider
     {
         private readonly EventLogService _log;
         private readonly string _category;
+        private readonly bool _ours;
 
         public CategoryLogger(EventLogService log, string category)
         {
             _log = log;
             _category = ShortName(category);
+            // Свои сообщения приходят из пространства имён приложения. Всё остальное это
+            // внутренности платформы, и там предупреждения обычно не про работу зала.
+            _ours = (category ?? "").StartsWith("SignatureKiosk", StringComparison.Ordinal);
         }
 
-        // Only warnings and worse are operational events; Information would flood the tab.
-        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+        /// <summary>
+        /// Во вкладке «Логи» оператор ищет причину сбоя в зале, а не устройство платформы.
+        /// Поэтому оттуда идут только ошибки, а предупреждения только свои. Иначе журнал
+        /// заполняется сообщениями вроде «No XML encryptor configured», которые выглядят как
+        /// поломка, ничего от оператора не требуют и прячут под собой настоящие сбои.
+        /// В системный журнал (journalctl) при этом по-прежнему пишется всё.
+        /// </summary>
+        public bool IsEnabled(LogLevel logLevel) =>
+            logLevel >= LogLevel.Error || (logLevel == LogLevel.Warning && _ours);
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 

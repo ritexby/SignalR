@@ -166,6 +166,13 @@ public class VisibleWhen
     public string Field { get; set; } = "";
     public string Op { get; set; } = "eq";
     public string Value { get; set; } = "";
+
+    /// <summary>
+    /// Дополнительные условия: содержимое показывается, только если выполнены и они тоже
+    /// (Пол равно F И UG равно true). Список плоский, без вложенности: «и» ассоциативно, а
+    /// скобки оператору не нужны и понятной формой на экране не показываются.
+    /// </summary>
+    public List<VisibleWhen>? And { get; set; }
 }
 
 /// <summary>A block inside a page: either rich text (Runs) or an image (ImageUrl). Shown only when

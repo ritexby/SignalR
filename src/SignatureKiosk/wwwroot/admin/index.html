@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v4.9</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v5.0</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -86,8 +86,11 @@
             <button id="showDocument" class="btn btn-primary" data-icon="send">Отправить на планшет</button>
           </div>
         </div>
+        <div id="docNoDevices" class="note-box note-warn hidden">
+          Планшетов пока нет, поэтому отправить документ некуда. Заведите планшет на вкладке «Планшеты»: там создаётся код активации, который вводится на планшете один раз. Документ можно готовить и без планшета, а также посмотреть в предпросмотре.
+        </div>
         <div class="note-box">
-          <div>Подстановка данных: пишите в тексте <code>{{ФИО}}</code>, <code>{{ДР}}</code>, <code>{{Адрес регистрации}}</code> - при показе через API на их место подставляются значения. Можно использовать в заголовках, тексте и пунктах чекбоксов.</div>
+          <div>Подстановка данных: пишите в тексте <code>{{ФИО}}</code>, <code>{{ДР}}</code>, <code>{{Адрес регистрации}}</code> - при показе через API на их место подставляются значения. Можно использовать в заголовках, тексте, пунктах чекбоксов и в условиях показа. Регистр не важен: <code>{{ПОЛ}}</code> и <code>{{Пол}}</code> это один тег.</div>
           <div id="docPlaceholders" class="placeholders"></div>
         </div>
         <div class="doc-layout">
@@ -105,8 +108,9 @@
             <label class="field">Текст экрана «Спасибо»
               <input id="thankYou" type="text" />
             </label>
-            <label class="field">Автовозврат к рекламе при простое, сек (0 = выкл)
+            <label class="field">Автовозврат к рекламе, сек
               <input id="idleReturn" type="number" min="0" max="3600" />
+              <span class="field-hint">Планшет сам вернётся к рекламе, если клиент отошёл. 0 = не возвращать.</span>
             </label>
           </div>
         </div>
@@ -129,13 +133,16 @@
           <button id="reloadScans" class="btn btn-ghost">Обновить</button>
         </div>
         <div class="toolbar">
-          <label class="field">Планшет:
+          <label class="target-inline">Планшет:
             <select id="scanTarget"></select>
           </label>
           <div class="toolbar-actions">
             <button id="stopScan" class="btn btn-ghost">Остановить</button>
             <button id="startScan" class="btn btn-primary">Начать сканирование</button>
           </div>
+        </div>
+        <div id="scanNoDevices" class="note-box note-warn hidden">
+          Планшетов пока нет, а сканирует именно планшет своей камерой. Заведите планшет на вкладке «Планшеты».
         </div>
         <div class="note-box">
           На выбранном планшете откроется камера. Поднесите QR или штрихкод (EAN-13, EAN-8, Code-128)

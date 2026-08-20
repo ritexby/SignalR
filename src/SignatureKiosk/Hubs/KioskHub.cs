@@ -92,12 +92,15 @@ public class KioskHub : Hub
     /// fail to register at all. A tablet that never calls this is simply on an older page, which
     /// is exactly what the operator needs to be told.
     /// </summary>
-    public Task ReportVersion(string? appVersion)
+    public async Task ReportVersion(string? appVersion)
     {
         var deviceId = DeviceId;
-        if (!string.IsNullOrEmpty(deviceId) && !string.IsNullOrWhiteSpace(appVersion))
-            _tracker.SetAppVersion(deviceId, appVersion);
-        return Task.CompletedTask;
+        if (string.IsNullOrEmpty(deviceId) || string.IsNullOrWhiteSpace(appVersion)) return;
+        _tracker.SetAppVersion(deviceId, appVersion);
+        // Версия приходит уже после RegisterKiosk, а список планшетов в админке обновляется
+        // только по событию. Без этого уведомления карточка показывала пустую версию до
+        // следующего постороннего события, и понять, на какой странице планшет, было нельзя.
+        await _coord.NotifyAdminsDevicesAsync();
     }
 
     /// <summary>Called by a tablet once a code has been scanned, so it returns to whatever it

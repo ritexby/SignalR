@@ -54,7 +54,9 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .brand { font-weight: 800; letter-spacing: .3px; }
 .brand-accent { color: var(--accent); }
 .version { font-size: .62rem; font-weight: 700; color: var(--muted); background: #eef1f6; padding: 2px 6px; border-radius: 6px; vertical-align: middle; letter-spacing: .04em; }
-.tabs { display: flex; gap: 6px; }
+/* Вкладок много, и в одну строку рядом с названием они помещаются не на всяком экране.
+   Перенос на вторую строку честнее прокрутки: видны сразу все, ничего не надо искать. */
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .tab { border: none; background: transparent; padding: 8px 14px; border-radius: 9px; cursor: pointer; font-weight: 600; color: var(--muted); white-space: nowrap; transition: background .15s, color .15s; }
 .tab:hover { background: #f1f5f9; color: var(--text); }
 .tab.active { background: #e7f7ee; color: var(--accent); }
@@ -65,8 +67,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
    first, the tabs on the second as a single horizontally scrollable strip
    (never a ragged wrap). */
 @media (max-width: 880px) {
-  .tabs { order: 2; flex-basis: 100%; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
-  .tabs::-webkit-scrollbar { height: 0; }
+  .tabs { order: 2; flex-basis: 100%; }
 }
 
 /* Per-panel recipient selector */
@@ -115,7 +116,13 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* Document editor */
 .doc-editor { display: flex; flex-direction: column; gap: 16px; }
-.field { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; color: var(--muted); font-weight: 600; }
+/* min-width: 0 обязателен: без него элемент сетки не может стать уже своего содержимого,
+   и длинная подпись поля вылезает за колонку, обрезаясь по краю. */
+.field { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; color: var(--muted); font-weight: 600; min-width: 0; }
+.field input, .field textarea, .field select { max-width: 100%; }
+/* Пояснение под полем: короткая подпись сверху, подробность снизу. Вместе в одну строку они
+   не помещаются и обрезаются. */
+.field-hint { font-size: .8rem; font-weight: 500; color: var(--muted); }
 .field input, .field textarea { padding: 10px; border: 1.5px solid #b9c2d0; border-radius: 9px; font-size: .98rem; color: var(--text); font-weight: 400; background: #fff; }
 .field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .pages-editor { display: flex; flex-direction: column; gap: 16px; }
@@ -164,9 +171,17 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .block-card { border: 1.5px solid #c7d7ee; border-left: 5px solid #2563eb; border-radius: 10px; padding: 14px; background: #fbfdff; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
 .cond-box { display: flex; flex-direction: column; gap: 6px; }
 .cond-mode { padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); max-width: 260px; }
-.cond-fields { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.cond-fields input, .cond-fields select { padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; color: var(--text); }
-.cond-fields input:focus, .cond-fields select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
+.cond-fields { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+/* Строка условия. Их может быть несколько: показывать, только если выполнены все сразу.
+   Слово «и» стоит слева, поэтому список читается сверху вниз одной фразой. */
+.cond-rows { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.cond-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cond-and { display: none; font-weight: 700; color: #6366f1; min-width: 16px; }
+.cond-row.cond-extra .cond-and { display: inline; }
+.cond-drop { padding: 4px 9px; }
+.cond-add { align-self: flex-start; }
+.cond-row input, .cond-row select { padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; color: var(--text); }
+.cond-row input:focus, .cond-row select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .cond-field { min-width: 170px; }
 .cond-field-other { min-width: 150px; }
 .cond-val, .cond-val-sel { min-width: 150px; }
@@ -256,10 +271,29 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 /* Placeholder help + detected tags */
 .note-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px; padding: 12px 14px; margin: 0 0 16px; font-size: .9rem; color: #14532d; display: flex; flex-direction: column; gap: 8px; }
 .note-box code { background: #dcfce7; color: #14532d; }
-.placeholders { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.placeholders { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.ph-label { flex-basis: 100%; }
 .ph-label { color: var(--muted); font-weight: 600; margin-right: 2px; }
 .ph-empty { color: var(--muted); }
-.ph-tag { background: #e7f7ee; color: var(--accent); }
+.ph-tag { background: #eef2f7; border: 1px solid #dbe3ec; color: #475569; border-radius: 6px; padding: 2px 7px; font-size: .82rem; cursor: pointer; transition: background .12s, border-color .12s, color .12s; }
+.ph-tag:hover { border-color: var(--accent); color: var(--accent); }
+/* Тег, который уже стоит в документе: видно с одного взгляда, что из списка задействовано. */
+.ph-used { background: #dcfce7; border-color: #86efac; color: #15803d; font-weight: 600; }
+.ph-unknown { background: #fef2f2; border-color: #fecaca; color: #b91c1c; font-weight: 600; cursor: default; }
+.ph-label-warn { color: #b91c1c; }
+
+/* Идентификаторы на карточке планшета: моноширинные, чтобы их можно было сверить символ в
+   символ с логом или с запросом интеграции, и копируются нажатием. */
+.dev-id-code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .84rem;
+  background: #eef2f7; border: 1px solid #dbe3ec; border-radius: 6px; padding: 1px 6px;
+  cursor: pointer; transition: border-color .12s, color .12s; }
+.dev-id-code:hover { border-color: var(--accent); color: var(--accent); }
+.dev-sep { color: #cbd5e1; }
+
+/* Пояснение, почему действие сейчас невозможно. Не ошибка, а подсказка, что сделать раньше. */
+.note-warn { border-color: #fcd9a4; background: #fffaf0; color: #8a5a13; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn:disabled:hover { background: inherit; }
 .dyn-anchor { margin-top: 4px; padding: 8px 10px; background: #f0fdf4; border: 1px dashed #bbf7d0; border-radius: 8px; }
 
 /* Signatures */
@@ -397,7 +431,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* Signature page editor: the signature field itself is not editable, so it is drawn as a marker
    between the two block lists. Without it the operator cannot tell which list is which. */
-.sign-divider, .pv-signline {
+.sign-divider {
   margin: 14px 0; padding: 14px; text-align: center; border: 2px dashed var(--border);
   border-radius: 10px; color: var(--muted); font-size: .88rem; font-weight: 600;
   background: repeating-linear-gradient(45deg, #f8fafc, #f8fafc 10px, #f1f5f9 10px, #f1f5f9 20px);
@@ -481,18 +515,18 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 
 /* Полоса вставки. Видна всегда, а не только при наведении: иначе о ней не догадаться.
    В спокойном виде это тонкая линия с подписью, по нажатию раскрывается в три кнопки. */
-.insert-bar { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 26px; position: relative; }
-.insert-bar::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed var(--line); }
+.insert-bar { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; position: relative; }
+.insert-bar::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; border-top: 1.5px dashed var(--line); }
 .insert-bar.open::before { display: none; }
 .insert-chip {
-  position: relative; display: inline-flex; align-items: center; gap: 5px;
-  border: 1px dashed var(--line); background: var(--panel, #fff); color: #94a3b8;
-  border-radius: 999px; padding: 2px 10px; font-size: .74rem; font-weight: 600; cursor: pointer;
-  transition: color .12s, border-color .12s, background .12s;
+  position: relative; display: inline-flex; align-items: center; gap: 7px;
+  border: 1.5px dashed #94a3b8; background: var(--panel, #fff); color: #475569;
+  border-radius: 999px; padding: 7px 16px; font-size: .92rem; font-weight: 600; cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s, box-shadow .12s;
 }
-.insert-chip .ic { width: 13px; height: 13px; }
-.insert-chip:hover { color: var(--accent); border-color: var(--accent); background: #f0fdf4; }
-.insert-bar.open { padding: 6px 0; flex-wrap: wrap; }
+.insert-chip .ic { width: 17px; height: 17px; }
+.insert-chip:hover { color: #fff; border-color: var(--accent); background: var(--accent); box-shadow: var(--sh1); }
+.insert-bar.open { padding: 8px 0; flex-wrap: wrap; }
 
 /* Один шрифт во всех блоках. Документ хранит только жирный, курсив, цвет и три размера, поэтому
    чужой шрифт, кегль в пунктах или заливка, попавшие в разметку при вставке, не должны влиять на

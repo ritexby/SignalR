@@ -53,6 +53,11 @@ public class AlertMonitor : BackgroundService
                 if (swept > 0)
                     _log.Add("info", "privacy", "Очищены брошенные сессии подписания: " + swept);
 
+                // Повреждённый файл данных был отложен в сторону вместо того, чтобы его затёрло
+                // пустым значением. Оператор должен узнать об этом сразу: часть настроек в этот
+                // момент выглядит так, будто её никогда не было.
+                ReportCorruptFiles();
+
                 var changed = await Check();
                 if (changed) await _coord.NotifyAdminsAlertsAsync();
 
@@ -277,6 +282,19 @@ public class AlertMonitor : BackgroundService
         }
 
         return changed;
+    }
+
+    /// <summary>Рассказать оператору о повреждённых файлах данных, отложенных хранилищем.</summary>
+    private void ReportCorruptFiles()
+    {
+        while (_storage.CorruptFiles.TryDequeue(out var item))
+        {
+            var text = "Файл данных «" + item.File + "» повреждён и отложен как «" + item.Backup +
+                       "» (" + item.Reason + "). Его содержимое сейчас пустое. " +
+                       "Файл сохранён в каталоге данных, из него можно восстановить записи.";
+            _alerts.Raise("corrupt:" + item.File, "storage", "error",
+                "Повреждён файл данных: " + item.File, text, DateTime.UtcNow);
+        }
     }
 
     private bool ClearTabletAlerts()

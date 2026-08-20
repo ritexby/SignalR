@@ -99,49 +99,94 @@ public class PdfService
             }
         }
 
+        // Отметки печатаются там же, где их видел клиент: пункт относится к абзацу над ним, и
+        // собранные в конец галочки уже читались бы про другое. Состояние берётся из записи
+        // подписи (что человек действительно отметил), а место - из документа, который ему
+        // показали. Сопоставление по имени, а при его отсутствии по тексту, по порядку.
+        var itemsByKey = new Dictionary<string, SubmittedItem>(StringComparer.OrdinalIgnoreCase);
+        foreach (var it in rec.Items ?? new List<SubmittedItem>())
+            if (it is not null && !string.IsNullOrEmpty(it.Key)) itemsByKey[it.Key] = it;
+        var unkeyed = new List<SubmittedItem>((rec.Items ?? new List<SubmittedItem>())
+            .Where(i => i is not null && string.IsNullOrEmpty(i.Key)));
+        var groupsByKey = new Dictionary<string, SubmittedGroup>(StringComparer.OrdinalIgnoreCase);
+        foreach (var g in rec.Groups ?? new List<SubmittedGroup>())
+            if (g is not null && !string.IsNullOrEmpty(g.Key)) groupsByKey[g.Key] = g;
+        var printedItems = new HashSet<SubmittedItem>();
+        var printedGroups = new HashSet<SubmittedGroup>();
+
+        bool StateOf(DocCheckbox cb)
+        {
+            if (!string.IsNullOrEmpty(cb.Key) && itemsByKey.TryGetValue(cb.Key, out var byKey))
+            {
+                printedItems.Add(byKey);
+                return byKey.Checked;
+            }
+            // Безымянный пункт узнаём по тексту, беря первый ещё не напечатанный: на планшете
+            // отметки собираются в том же порядке, в каком они здесь встречаются.
+            var match = unkeyed.FirstOrDefault(i => !printedItems.Contains(i) &&
+                                                    string.Equals(i.Label ?? "", cb.Label ?? "", StringComparison.Ordinal));
+            if (match is not null) { printedItems.Add(match); return match.Checked; }
+            return cb.Checked;   // запись не совпала с документом: печатаем то, что знаем
+        }
+
+        void RenderGroup(string? title, bool required, string? selected, List<DocGroupOption> options, string? selectedLabel)
+        {
+            w.Gap(6);
+            if (!string.IsNullOrWhiteSpace(title)) w.Line(title! + (required ? " *" : ""), w.H2);
+            w.Gap(3);
+            if (options.Count == 0 && !string.IsNullOrWhiteSpace(selectedLabel))
+                w.Paragraph("[X]  " + selectedLabel, w.Body);
+            foreach (var o in options)
+            {
+                if (o is null) continue;
+                var chosen = !string.IsNullOrEmpty(selected) &&
+                             string.Equals(o.Key, selected, StringComparison.OrdinalIgnoreCase);
+                w.Paragraph((chosen ? "[X]  " : "[  ]  ") + (o.Label ?? o.Key ?? ""), w.Body);
+            }
+            if (string.IsNullOrEmpty(selected)) w.Paragraph("Вариант не выбран.", w.Body);
+            w.Gap(4);
+        }
+
         foreach (var page in doc.Pages ?? new List<DocPage>())
         {
             var heading = DocumentTemplating.HeadingRuns(page);
             if (heading.Count > 0) { w.Rich(heading, isHeading: true); w.Gap(2); }
-            RenderBlocks(DocumentTemplating.Blocks(page));
+
+            foreach (var (kind, index) in DocumentTemplating.PageOrder(page, DocumentTemplating.Blocks(page)))
+            {
+                if (kind == 0) { RenderBlocks(new[] { DocumentTemplating.Blocks(page)[index] }); continue; }
+                if (kind == 1)
+                {
+                    var cb = page.Checkboxes[index];
+                    w.Paragraph((StateOf(cb) ? "[X]  " : "[  ]  ") + (cb.Label ?? "") + (cb.Required ? " *" : ""), w.Body);
+                    continue;
+                }
+                var g = page.Groups[index];
+                SubmittedGroup? sg = null;
+                if (!string.IsNullOrEmpty(g.Key) && groupsByKey.TryGetValue(g.Key, out var foundGroup))
+                {
+                    sg = foundGroup;
+                    printedGroups.Add(sg);
+                }
+                RenderGroup(g.Title, g.Required, sg?.Selected ?? g.Selected,
+                    sg?.Options is { Count: > 0 } ? sg.Options : g.Options, sg?.SelectedLabel);
+            }
         }
 
-        if (rec.Items is { Count: > 0 })
+        // Всё, что есть в записи, но чему не нашлось места в документе, всё равно должно попасть
+        // в PDF: запись подписи это то, с чем человек согласился, и терять из неё нельзя ничего.
+        var leftoverItems = (rec.Items ?? new List<SubmittedItem>())
+            .Where(i => i is not null && !printedItems.Contains(i)).ToList();
+        if (leftoverItems.Count > 0)
         {
             w.Gap(4);
             w.Line("Отмеченные пункты:", w.H2);
             w.Gap(3);
-            foreach (var it in rec.Items)
-            {
-                if (it is null) continue;   // tolerate a record stored before items were validated
+            foreach (var it in leftoverItems)
                 w.Paragraph((it.Checked ? "[X]  " : "[  ]  ") + (it.Label ?? ""), w.Body);
-            }
         }
-
-        // Группы: печатается весь набор вариантов, а не только выбранный. Документ должен
-        // показывать, из чего человек выбирал, иначе по нему нельзя судить о выборе.
-        if (rec.Groups is { Count: > 0 })
-        {
-            foreach (var g in rec.Groups)
-            {
-                if (g is null) continue;
-                w.Gap(6);
-                if (!string.IsNullOrWhiteSpace(g.Title)) w.Line(g.Title, w.H2);
-                w.Gap(3);
-                var options = g.Options ?? new List<DocGroupOption>();
-                if (options.Count == 0 && !string.IsNullOrWhiteSpace(g.SelectedLabel))
-                    w.Paragraph("[X]  " + g.SelectedLabel, w.Body);
-                foreach (var o in options)
-                {
-                    if (o is null) continue;
-                    var chosen = !string.IsNullOrEmpty(g.Selected) &&
-                                 string.Equals(o.Key, g.Selected, StringComparison.OrdinalIgnoreCase);
-                    w.Paragraph((chosen ? "[X]  " : "[  ]  ") + (o.Label ?? o.Key ?? ""), w.Body);
-                }
-                if (string.IsNullOrEmpty(g.Selected))
-                    w.Paragraph("Вариант не выбран.", w.Body);
-            }
-        }
+        foreach (var g in (rec.Groups ?? new List<SubmittedGroup>()).Where(g => g is not null && !printedGroups.Contains(g)))
+            RenderGroup(g.Title, false, g.Selected, g.Options ?? new List<DocGroupOption>(), g.SelectedLabel);
 
         // Custom signature-page content authored in the admin, above the signature.
         if (doc.SignBlocks is { Count: > 0 }) { w.Gap(6); RenderBlocks(doc.SignBlocks); }

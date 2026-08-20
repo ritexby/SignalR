@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "4.9";
+  var APP_VERSION = "5.0";
 
   var state = {
     slidesTarget: "all",   // recipient for advertising slides (all / group / device)
@@ -197,6 +197,23 @@
     // Keep the scan target fresh too: it used to be refilled only when the scan tab was loaded, so
     // a deleted tablet stayed selectable and "start scanning" silently did nothing.
     if ($("scanTarget")) state.scanTarget = fillDeviceSelect($("scanTarget"), state.scanTarget);
+    syncTabletActions();
+  }
+
+  // Действие, для которого нужен планшет, а планшетов нет вообще. Раньше кнопка оставалась
+  // рабочей и на нажатие отвечала «Выберите планшет», хотя выбирать было не из чего. Теперь
+  // она выключена и прямо говорит, что делать: завести планшет на вкладке «Планшеты».
+  function syncTabletActions() {
+    var none = !state.devices.length;
+    var why = "Сначала добавьте планшет на вкладке «Планшеты»: там создаётся код активации.";
+    ["showDocument", "showSlides", "startScan", "stopScan"].forEach(function (id) {
+      var b = $(id); if (!b) return;
+      b.disabled = none;
+      if (none) b.title = why; else b.removeAttribute("title");
+    });
+    ["docNoDevices", "scanNoDevices"].forEach(function (id) {
+      var note = $(id); if (note) note.classList.toggle("hidden", !none);
+    });
   }
 
   // ---------------- Images / slides ----------------
@@ -689,113 +706,173 @@
     var mode = el("select", "cond-mode");
     mode.appendChild(new Option("Показывать всегда", "")); mode.appendChild(new Option("Показывать по условию", "cond"));
     var fields = el("div", "cond-fields");
+    var rows = el("div", "cond-rows");
+    fields.appendChild(rows);
 
-    // The tag is a real dropdown, not a text box with suggestions: a datalist only offers what
-    // still matches what is typed, so once a tag was chosen the list looked empty and the operator
-    // had to clear the box by hand before choosing another one.
-    var fld = el("select", "cond-field"); fld.setAttribute("data-role", "cfieldsel");
-    fld.appendChild(new Option("выберите тег", ""));
-    var keys = docKeys();
-    var tagGroup = document.createElement("optgroup"); tagGroup.label = "Теги из API";
-    KNOWN_FIELDS.forEach(function (f) { tagGroup.appendChild(new Option(f, f)); });
-    fld.appendChild(tagGroup);
-    // Отдельной группой, потому что это другая природа: считается на планшете, пока клиент
-    // заполняет документ, а не один раз на сервере до отправки.
-    if (keys.checks.length) {
-      var cg = document.createElement("optgroup"); cg.label = "Чекбоксы в документе";
-      keys.checks.forEach(function (k) { cg.appendChild(new Option(k, k)); });
-      fld.appendChild(cg);
-    }
-    var groupNames = Object.keys(keys.groups);
-    if (groupNames.length) {
-      var gg = document.createElement("optgroup"); gg.label = "Двойные зависимые чекбоксы";
-      groupNames.forEach(function (k) { gg.appendChild(new Option(k, k)); });
-      fld.appendChild(gg);
-    }
-    fld.appendChild(new Option("другой тег...", OTHER_OPTION));
-    // Kept for a tag outside the known list, so nothing that used to work stops working.
-    var fldOther = el("input", "cond-field-other"); fldOther.type = "text";
-    fldOther.placeholder = "свой тег"; fldOther.setAttribute("data-role", "cfield");
+    // Условие можно составить из нескольких: показывать, только если выполнены все сразу
+    // («Пол равно F и UG равно true»). Список плоский, без скобок: так его можно прочитать
+    // одной строкой, и оператору не приходится держать в голове приоритеты.
+    var addAnd = iconBtn("plus", "и ещё условие", "btn-ghost btn-sm cond-add");
+    addAnd.addEventListener("click", function () {
+      addRow(null);
+      badge.textContent = describe();
+      var last = rows.lastElementChild;
+      var sel = last && last.querySelector("select");
+      if (sel) sel.focus();
+    });
+    fields.appendChild(addAnd);
 
-    var op = el("select", "cond-op"); op.setAttribute("data-role", "cop");
-    COND_OPS.forEach(function (o) { op.appendChild(new Option(o[1], o[0])); });
+    // Одна строка условия: тег, сравнение, значение. Строки после первой соединяются словом «и».
+    function condRow(part) {
+      var row = el("div", "cond-row"); row.setAttribute("data-role", "crow");
+      var joiner = el("span", "cond-and", "и");
+      row.appendChild(joiner);
 
-    // The value is a dropdown when the tag has a fixed set, and a text box otherwise.
-    var valSel = el("select", "cond-val-sel"); valSel.setAttribute("data-role", "cvalsel");
-    var val = el("input", "cond-val"); val.type = "text"; val.placeholder = "значение"; val.setAttribute("data-role", "cval");
-
-    fields.appendChild(fld); fields.appendChild(fldOther); fields.appendChild(op);
-    fields.appendChild(valSel); fields.appendChild(val);
-
-    function currentField() { return fld.value === OTHER_OPTION ? fldOther.value.trim() : fld.value; }
-
-    /// Rebuild the value control for the tag in hand, keeping whatever value is already set.
-    function syncValues(keep) {
-      var f = currentField();
-      var dk = docKeys();
-      var known = FIELD_VALUES[f];
-      if (dk.checks.indexOf(f) >= 0) known = ["true", "false"];
-      else if (Object.prototype.hasOwnProperty.call(dk.groups, f)) known = dk.groups[f].slice();
-      // "одно из" takes a comma separated list, so a single-choice dropdown would not express it.
-      var listable = known && op.value !== "in";
-      valSel.innerHTML = "";
-      if (listable) {
-        known.forEach(function (v) { valSel.appendChild(new Option(v, v)); });
-        valSel.appendChild(new Option("другое...", OTHER_OPTION));
-        if (keep && known.indexOf(keep) < 0) { valSel.value = OTHER_OPTION; val.value = keep; }
-        else { valSel.value = keep || known[0]; val.value = ""; }
-      } else if (keep != null) {
-        val.value = keep;
+      // Тег выбирается списком, а не текстом с подсказками: у подсказок список пустеет, как
+      // только что-то выбрано, и сменить тег можно только стерев поле руками.
+      var fld = el("select", "cond-field"); fld.setAttribute("data-role", "cfieldsel");
+      fld.appendChild(new Option("выберите тег", ""));
+      var keys = docKeys();
+      var tagGroup = document.createElement("optgroup"); tagGroup.label = "Теги из API";
+      KNOWN_FIELDS.forEach(function (f) { tagGroup.appendChild(new Option(f, f)); });
+      fld.appendChild(tagGroup);
+      // Отдельной группой, потому что это другая природа: считается на планшете, пока клиент
+      // заполняет документ, а не один раз на сервере до отправки.
+      if (keys.checks.length) {
+        var cg = document.createElement("optgroup"); cg.label = "Чекбоксы в документе";
+        keys.checks.forEach(function (k) { cg.appendChild(new Option(k, k)); });
+        fld.appendChild(cg);
       }
-      valSel.style.display = listable ? "" : "none";
-      val.style.display = (!listable || valSel.value === OTHER_OPTION) ? "" : "none";
+      var groupNames = Object.keys(keys.groups);
+      if (groupNames.length) {
+        var gg = document.createElement("optgroup"); gg.label = "Двойные зависимые чекбоксы";
+        groupNames.forEach(function (k) { gg.appendChild(new Option(k, k)); });
+        fld.appendChild(gg);
+      }
+      fld.appendChild(new Option("другой тег...", OTHER_OPTION));
+      // Оставлено для тега вне известного списка, чтобы уже работающее не перестало работать.
+      var fldOther = el("input", "cond-field-other"); fldOther.type = "text";
+      fldOther.placeholder = "свой тег"; fldOther.setAttribute("data-role", "cfield");
+
+      var op = el("select", "cond-op"); op.setAttribute("data-role", "cop");
+      COND_OPS.forEach(function (o) { op.appendChild(new Option(o[1], o[0])); });
+
+      // Значение выбирается списком, если у тега фиксированный набор, иначе вводится текстом.
+      var valSel = el("select", "cond-val-sel"); valSel.setAttribute("data-role", "cvalsel");
+      var val = el("input", "cond-val"); val.type = "text"; val.placeholder = "значение"; val.setAttribute("data-role", "cval");
+
+      row.appendChild(fld); row.appendChild(fldOther); row.appendChild(op);
+      row.appendChild(valSel); row.appendChild(val);
+
+      var drop = el("button", "btn btn-danger btn-sm cond-drop", "×");
+      drop.type = "button"; drop.title = "Убрать это условие";
+      drop.addEventListener("click", function () {
+        row.remove();
+        renumber();
+        badge.textContent = describe();
+      });
+      row.appendChild(drop);
+
+      function currentField() { return fld.value === OTHER_OPTION ? fldOther.value.trim() : fld.value; }
+
+      // Пересобрать поле значения под выбранный тег, сохранив то, что уже задано.
+      function syncValues(keep) {
+        var f = currentField();
+        var dk = docKeys();
+        var known = fieldValues(f);
+        if (dk.checks.indexOf(f) >= 0) known = ["true", "false"];
+        else if (Object.prototype.hasOwnProperty.call(dk.groups, f)) known = dk.groups[f].slice();
+        // «одно из» принимает список через запятую, одним выбором его не выразить.
+        var listable = known && op.value !== "in";
+        valSel.innerHTML = "";
+        if (listable) {
+          known.forEach(function (v) { valSel.appendChild(new Option(v, v)); });
+          valSel.appendChild(new Option("другое...", OTHER_OPTION));
+          if (keep && known.indexOf(keep) < 0) { valSel.value = OTHER_OPTION; val.value = keep; }
+          else { valSel.value = keep || known[0]; val.value = ""; }
+        } else if (keep != null) {
+          val.value = keep;
+        }
+        valSel.style.display = listable ? "" : "none";
+        val.style.display = (!listable || valSel.value === OTHER_OPTION) ? "" : "none";
+      }
+
+      function syncRow() {
+        fldOther.style.display = fld.value === OTHER_OPTION ? "" : "none";
+        var needsValue = op.value !== "empty" && op.value !== "notempty";
+        valSel.style.display = needsValue && valSel.options.length ? "" : "none";
+        val.style.display = needsValue && (!valSel.options.length || valSel.value === OTHER_OPTION) ? "" : "none";
+      }
+
+      fld.addEventListener("change", function () { syncValues(null); syncRow(); });
+      fldOther.addEventListener("input", function () { syncValues(val.value); syncRow(); });
+      op.addEventListener("change", function () { syncValues(readRowValue(row)); syncRow(); });
+      valSel.addEventListener("change", syncRow);
+
+      if (part && part.field) {
+        // Регистр не важен: тег ПОЛ, сохранённый до переименования, должен выбраться как Пол,
+        // а не выпасть в «другой тег».
+        var match = null;
+        for (var mi = 0; mi < fld.options.length; mi++)
+          if (fld.options[mi].value && fld.options[mi].value !== OTHER_OPTION &&
+              fld.options[mi].value.toLowerCase() === String(part.field).toLowerCase()) { match = fld.options[mi].value; break; }
+        if (match) fld.value = match;
+        else { fld.value = OTHER_OPTION; fldOther.value = part.field; }
+        op.value = part.op || "eq";
+        syncValues(part.value || "");
+      } else {
+        syncValues(null);
+      }
+      syncRow();
+
+      [fld, fldOther, op, val, valSel].forEach(function (e) {
+        e.addEventListener("change", function () { badge.textContent = describe(); });
+        e.addEventListener("input", function () { badge.textContent = describe(); });
+      });
+      return row;
     }
+
+    function addRow(part) { rows.appendChild(condRow(part)); renumber(); }
+
+    // Слово «и» и кнопка удаления нужны только у строк после первой: первая строка это само
+    // условие, без неё остальные не имеют смысла.
+    function renumber() {
+      var list = rows.querySelectorAll('[data-role="crow"]');
+      if (!list.length) { addRow(null); return; }
+      for (var i = 0; i < list.length; i++) {
+        list[i].classList.toggle("cond-extra", i > 0);
+        var drop = list[i].querySelector(".cond-drop");
+        if (drop) drop.style.display = i > 0 ? "" : "none";
+      }
+    }
+
+    addRow(cond || null);
+    ((cond && cond.and) || []).forEach(function (extra) { addRow(extra); });
 
     function sync() {
       fields.style.display = mode.value === "cond" ? "" : "none";
-      fldOther.style.display = fld.value === OTHER_OPTION ? "" : "none";
-      var needsValue = op.value !== "empty" && op.value !== "notempty";
-      valSel.style.display = needsValue && valSel.options.length ? "" : "none";
-      val.style.display = needsValue && (!valSel.options.length || valSel.value === OTHER_OPTION) ? "" : "none";
     }
-
     mode.addEventListener("change", sync);
-    fld.addEventListener("change", function () { syncValues(null); sync(); });
-    fldOther.addEventListener("input", function () { syncValues(val.value); sync(); });
-    op.addEventListener("change", function () { syncValues(readValue()); sync(); });
-    valSel.addEventListener("change", sync);
-
-    function readValue() { return valSel.options.length && valSel.value !== OTHER_OPTION ? valSel.value : val.value; }
-
-    if (cond && cond.field) {
-      mode.value = "cond";
-      // Регистр не важен: тег ПОЛ, сохранённый до переименования, должен выбраться как Пол,
-      // а не выпасть в «другой тег».
-      var match = null;
-      for (var mi = 0; mi < fld.options.length; mi++)
-        if (fld.options[mi].value && fld.options[mi].value !== OTHER_OPTION &&
-            fld.options[mi].value.toLowerCase() === String(cond.field).toLowerCase()) { match = fld.options[mi].value; break; }
-      if (match) fld.value = match;
-      else { fld.value = OTHER_OPTION; fldOther.value = cond.field; }
-      op.value = cond.op || "eq";
-      syncValues(cond.value || "");
-    } else {
-      syncValues(null);
-    }
+    if (cond && cond.field) mode.value = "cond";
     sync();
 
     // Свёрнутый вид: пока условия нет, это одна ссылка, а когда есть, короткая строка вида
-    // «только если Пол = F». Три выпадающих списка у каждого элемента занимали треть высоты
-    // страницы, даже когда условие не задано ни у одного.
+    // «только если «Пол» равно F и «UG» равно true». Выпадающие списки у каждого элемента
+    // занимали треть высоты страницы, даже когда условие не задано ни у одного.
     var badge = el("button", "cond-badge");
     var open = false;
+    function describePart(c) {
+      var opName = "";
+      COND_OPS.forEach(function (o) { if (o[0] === c.op) opName = o[1]; });
+      if (c.op === "empty" || c.op === "notempty") return "«" + c.field + "» " + opName;
+      return "«" + c.field + "» " + opName + " " + (c.value || "(пусто)");
+    }
     function describe() {
       var c = readCondition(box);
       if (!c) return "+ условие показа";
-      var opName = "";
-      COND_OPS.forEach(function (o) { if (o[0] === c.op) opName = o[1]; });
-      if (c.op === "empty" || c.op === "notempty") return "только если «" + c.field + "» " + opName;
-      return "только если «" + c.field + "» " + opName + " " + (c.value || "(пусто)");
+      var parts = [describePart(c)];
+      (c.and || []).forEach(function (extra) { parts.push(describePart(extra)); });
+      return "только если " + parts.join(" и ");
     }
     function applyOpen() {
       box.classList.toggle("cond-open", open);
@@ -811,16 +888,12 @@
       // и видит список «Показывать всегда», то есть ничего не произошло.
       if (mode.value !== "cond") { mode.value = "cond"; sync(); }
       applyOpen();
-      var first = fields.querySelector("select");
+      var first = rows.querySelector("select");
       if (first) first.focus();
     });
     mode.addEventListener("change", function () {
       // Вернули «Показывать всегда»: сворачиваем обратно, показывать нечего.
       if (mode.value !== "cond") { open = false; applyOpen(); }
-    });
-    [fld, fldOther, op, val, valSel].forEach(function (e) {
-      e.addEventListener("change", function () { badge.textContent = describe(); });
-      e.addEventListener("input", function () { badge.textContent = describe(); });
     });
 
     box.appendChild(badge);
@@ -828,20 +901,44 @@
     applyOpen();   // всегда начинаем со свёрнутого вида, и с условием, и без него
     return box;
   }
+
+  // Части составного условия: само условие и всё, что присоединено через «и».
+  function condParts(cond) {
+    var out = [];
+    if (cond && cond.field) out.push(cond);
+    ((cond && cond.and) || []).forEach(function (extra) { if (extra && extra.field) out.push(extra); });
+    return out;
+  }
+
+  function readRowValue(row) {
+    var valSel = row.querySelector('[data-role="cvalsel"]');
+    var valInput = row.querySelector('[data-role="cval"]');
+    return (valSel && valSel.options.length && valSel.value !== OTHER_OPTION)
+      ? valSel.value
+      : (valInput ? valInput.value : "");
+  }
+
+  function readRow(row) {
+    var sel = row.querySelector('[data-role="cfieldsel"]');
+    var other = row.querySelector('[data-role="cfield"]');
+    var field = (sel && sel.value && sel.value !== OTHER_OPTION ? sel.value : (other ? other.value : "")).trim();
+    if (!field) return null;
+    var op = row.querySelector('[data-role="cop"]');
+    return { field: field, op: (op && op.value) || "eq", value: (readRowValue(row) || "").trim() };
+  }
+
   function readCondition(box) {
     if (!box) return null;
     var mode = box.querySelector(".cond-mode"); if (!mode || mode.value !== "cond") return null;
-    var sel = box.querySelector('[data-role="cfieldsel"]');
-    var other = box.querySelector('[data-role="cfield"]');
-    var field = (sel && sel.value && sel.value !== OTHER_OPTION ? sel.value : (other ? other.value : "")).trim();
-    if (!field) return null;
-    var op = box.querySelector('[data-role="cop"]').value || "eq";
-    var valSel = box.querySelector('[data-role="cvalsel"]');
-    var valInput = box.querySelector('[data-role="cval"]');
-    var value = (valSel && valSel.options.length && valSel.value !== OTHER_OPTION)
-      ? valSel.value
-      : (valInput ? valInput.value : "");
-    return { field: field, op: op, value: (value || "").trim() };
+    var parts = [];
+    box.querySelectorAll('[data-role="crow"]').forEach(function (row) {
+      var part = readRow(row);
+      if (part) parts.push(part);
+    });
+    if (!parts.length) return null;
+    var head = parts[0];
+    if (parts.length > 1) head.and = parts.slice(1);
+    return head;
   }
 
   // Блоки текста, чекбоксы и группы живут на странице в одном общем порядке: оператор
@@ -878,12 +975,55 @@
     });
     return seen;
   }
+  // Список тегов, которые принимает API, целиком. Использованные в документе выделены.
+  // Раньше здесь показывались только использованные, под заголовком «Поля для передачи по
+  // API», и это читалось как ограничение: будто прислать можно только их.
   function updatePlaceholders() {
     var wrap = $("docPlaceholders"); if (!wrap) return; wrap.innerHTML = "";
-    var ph = scanPlaceholders();
-    if (!ph.length) { wrap.appendChild(el("span", "ph-empty", "Плейсхолдеры не используются.")); return; }
-    wrap.appendChild(el("span", "ph-label", "Поля для передачи по API:"));
-    ph.forEach(function (k) { wrap.appendChild(el("code", "ph-tag", "{{" + k + "}}")); });
+    var used = scanPlaceholders();
+    var usedLower = {};
+    used.forEach(function (k) { usedLower[k.toLowerCase()] = 1; });
+
+    wrap.appendChild(el("span", "ph-label", "Теги, которые принимает API (" + KNOWN_FIELDS.length + "):"));
+    KNOWN_FIELDS.forEach(function (k) {
+      var isUsed = !!usedLower[k.toLowerCase()];
+      var tag = el("code", "ph-tag" + (isUsed ? " ph-used" : ""), "{{" + k + "}}");
+      var values = fieldValues(k);
+      tag.title = (isUsed ? "Используется в документе. " : "В документе не используется. ")
+        + (values ? "Принимает только: " + values.join(", ") + ". " : "")
+        + "Нажмите, чтобы скопировать.";
+      tag.addEventListener("click", function () { copyTag(k); });
+      wrap.appendChild(tag);
+    });
+
+    // Тег, которого нет в списке известных: почти всегда опечатка, и увидеть её надо здесь,
+    // а не когда клиент прочитает {{ФИ0}} на планшете.
+    var unknown = used.filter(function (k) { return !isKnownField(k); });
+    if (unknown.length) {
+      wrap.appendChild(el("span", "ph-label ph-label-warn", "Нет в списке, проверьте написание:"));
+      unknown.forEach(function (k) {
+        var tag = el("code", "ph-tag ph-unknown", "{{" + k + "}}");
+        tag.title = "Такого тега в API нет. На планшете он останется в тексте как есть.";
+        wrap.appendChild(tag);
+      });
+    }
+  }
+
+  function isKnownField(name) {
+    var lk = String(name || "").toLowerCase();
+    return KNOWN_FIELDS.some(function (k) { return k.toLowerCase() === lk; });
+  }
+
+  function copyTag(name) { copyText("{{" + name + "}}", "Скопировано: {{" + name + "}}"); }
+
+  function copyText(text, done) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast(done); },
+        function () { toast("Не удалось скопировать: " + text); });
+    } else {
+      // Старый WebView без Clipboard API: показываем значение, чтобы его можно было выделить.
+      toast(text);
+    }
   }
 
   function blockCard(b) {
@@ -1056,6 +1196,14 @@
     var seenKeys = {};
 
     function checkCondition(cond, where) {
+      // Условие может состоять из нескольких, соединённых через «и»: проверять надо каждое,
+      // иначе ошибка во второй части осталась бы незамеченной до показа клиенту.
+      condParts(cond).forEach(function (part, i) {
+        checkOnePart(part, i === 0 ? where : where + ", условие " + (i + 1));
+      });
+    }
+
+    function checkOnePart(cond, where) {
       if (!cond || !cond.field) return;
       var f = cond.field;
       var isTag = KNOWN_FIELDS.some(function (k) { return k.toLowerCase() === f.toLowerCase(); });
@@ -1228,6 +1376,18 @@
     nodes.forEach(function (n) { list.insertBefore(insertBar(list, n), n.nextSibling); });
   }
 
+  // Прокрутка к странице с поправкой на закреплённую шапку. Обычный scrollIntoView ставит
+  // карточку вплотную к верху окна, а шапка её закрывает, и первой видимой оказывается уже
+  // следующая страница: нажимаешь «2», а на экране «3». Высота шапки считается на месте,
+  // потому что при узком окне вкладки переносятся на вторую строку.
+  function scrollToCard(card) {
+    if (!card) return;
+    var bar = document.querySelector(".topbar");
+    var offset = (bar ? bar.offsetHeight : 0) + 12;
+    var top = card.getBoundingClientRect().top + window.pageYOffset - offset;
+    window.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  }
+
   // Полоса вставки между элементами страницы. Нужна потому, что дотащить новый пункт из конца
   // длинной страницы на нужное место мышью тяжело: проще поставить его сразу туда, где он нужен.
   // Полоса видна всегда, а не только при наведении: иначе о ней просто не догадаться.
@@ -1314,7 +1474,7 @@
       item.title = pageSummary(page);
       item.addEventListener("click", function () {
         var cards = document.querySelectorAll('#pagesEditor [data-role="pagecard"]');
-        if (cards[pi]) cards[pi].scrollIntoView({ behavior: "smooth", block: "start" });
+        scrollToCard(cards[pi]);
       });
       list.appendChild(item);
     });
@@ -1598,8 +1758,7 @@
     state.doc.pages.push({ headingRuns: [{ text: "Новая страница" }], blocks: [], checkboxes: [], groups: [], includeDynamic: false });
     renderPages();
     var cards = document.querySelectorAll('#pagesEditor [data-role="pagecard"]');
-    var last = cards[cards.length - 1];
-    if (last) last.scrollIntoView({ behavior: "smooth", block: "start" });
+    scrollToCard(cards[cards.length - 1]);
   }
   $("addPage").addEventListener("click", addPage);
   $("saveDocument").addEventListener("click", function () { collectDoc(); apiSend("/document", "PUT", state.doc).then(function () { toast("Документ сохранён"); }); });
@@ -1623,12 +1782,15 @@
       seen[lk] = 1; out.push(key);
     }
     scanPlaceholders().forEach(add);
+    function addCond(c) { condParts(c).forEach(function (part) { add(part.field); }); }
     (state.doc.pages || []).forEach(function (p) {
-      if (p.visibleWhen && p.visibleWhen.field) add(p.visibleWhen.field);
-      (p.blocks || []).forEach(function (b) { if (b.visibleWhen && b.visibleWhen.field) add(b.visibleWhen.field); });
+      addCond(p.visibleWhen);
+      (p.blocks || []).forEach(function (b) { addCond(b.visibleWhen); });
+      (p.checkboxes || []).forEach(function (c) { addCond(c.visibleWhen); });
+      (p.groups || []).forEach(function (g) { addCond(g.visibleWhen); });
     });
-    (state.doc.signBlocks || []).forEach(function (b) { if (b.visibleWhen && b.visibleWhen.field) add(b.visibleWhen.field); });
-    (state.doc.signBlocksBelow || []).forEach(function (b) { if (b.visibleWhen && b.visibleWhen.field) add(b.visibleWhen.field); });
+    (state.doc.signBlocks || []).forEach(function (b) { addCond(b.visibleWhen); });
+    (state.doc.signBlocksBelow || []).forEach(function (b) { addCond(b.visibleWhen); });
     // Условие на чекбокс задаёт клиент на планшете, а не внешняя система: спрашивать для него
     // тестовое значение бессмысленно и только путало бы оператора.
     return out.filter(function (name) { return !isDocKey(name); });
@@ -1644,7 +1806,7 @@
     placeholders.forEach(function (k) {
       // A tag with a fixed set of values gets a dropdown here too, so a preview cannot be run
       // against a value the real system would never send.
-      var known = FIELD_VALUES[k];
+      var known = fieldValues(k);
       if (known) {
         var wrap = el("label", "field", k);
         var sel = el("select");
@@ -1677,6 +1839,17 @@
     if (placeholders.length && inputs[placeholders[0]]) inputs[placeholders[0]].focus();
   }
 
+  // Тег в документе может быть записан в другом регистре, чем в списке известных: сервер
+  // сравнивает имена без учёта регистра, и редактор обязан вести себя так же. Иначе «ПОЛ»
+  // остаётся полем для ручного ввода без списка значений и без образца, хотя «Пол» их имеет.
+  function fieldValues(name) {
+    var k = (name || "").trim();
+    if (FIELD_VALUES[k]) return FIELD_VALUES[k];
+    var lk = k.toLowerCase();
+    for (var key in FIELD_VALUES) if (key.toLowerCase() === lk) return FIELD_VALUES[key];
+    return null;
+  }
+
   // Sensible sample values so the operator can preview without typing everything.
   function previewDefault(tag) {
     var map = {
@@ -1685,7 +1858,10 @@
       "document": "MP1234567", "date": new Date().toLocaleDateString("ru-RU"),
       "cross-border": "true", "urine": "true", "UG": "true"
     };
-    return map[tag] || (/^text\d+$/.test(tag) ? "Текст из внешней системы" : "");
+    if (map[tag]) return map[tag];
+    var lt = String(tag || "").toLowerCase();
+    for (var k in map) if (k.toLowerCase() === lt) return map[k];
+    return /^text\d+$/.test(lt) ? "Текст из внешней системы" : "";
   }
 
   function runPreview(fields, checkboxes) {
@@ -1789,11 +1965,13 @@
           if (!g.selected) body.appendChild(el("div", "sig-meta", "Вариант не выбран."));
         });
       } else {
+        // Порядок ровно как на планшете: блоки над подписью, надпись, само поле, блоки под
+        // подписью. Раньше здесь рисовались два поля подписи, а нижние блоки оказывались выше
+        // надписи, и предпросмотр обещал не тот экран, который увидит клиент.
         (doc.signBlocks || []).forEach(function (b) { previewBlock(body, b); });
-        body.appendChild(el("div", "pv-signline", "Поле подписи"));
-        (doc.signBlocksBelow || []).forEach(function (b) { previewBlock(body, b); });
         body.appendChild(el("div", "pv-prompt", doc.signPrompt || ""));
-        body.appendChild(el("div", "pv-pad", "поле подписи"));
+        body.appendChild(el("div", "pv-pad", "Распишитесь здесь"));
+        (doc.signBlocksBelow || []).forEach(function (b) { previewBlock(body, b); });
       }
       back.disabled = idx === 0;
       next.disabled = idx === screens.length - 1;
@@ -1862,7 +2040,7 @@
     c.appendChild(el("p", "sig-meta", "Значения подставятся в плейсхолдеры и отправятся на: " + targetLabel(state.docTarget)));
     var inputs = {};
     placeholders.forEach(function (k) {
-      var known = FIELD_VALUES[k];
+      var known = fieldValues(k);
       if (known) {
         var wrap = el("label", "field", k);
         var sel = el("select");
@@ -1883,6 +2061,7 @@
     if (inputs[placeholders[0]]) inputs[placeholders[0]].focus();
   }
   $("showDocument").addEventListener("click", function () {
+    if (!state.devices.length) { toast("Планшетов пока нет. Заведите планшет на вкладке «Планшеты»."); return; }
     if (!/^device:/.test(state.docTarget)) { toast("Выберите планшет. Документ показывается только на один планшет."); return; }
     collectDoc();
     var proceed = function () {
@@ -2019,11 +2198,23 @@
       // Workstation: name, external ID and description (location).
       var ws = d.workstation;
       if (ws) {
-        var wsParts = [];
-        if (ws.name) wsParts.push(ws.name);
-        if (ws.externalId) wsParts.push("ID: " + ws.externalId);
-        if (ws.location) wsParts.push("Описание: " + ws.location);
-        info.appendChild(el("div", "dev-meta", "Рабочее место: " + (wsParts.length ? wsParts.join("   ·   ") : "-")));
+        var wsRow = el("div", "dev-meta");
+        wsRow.appendChild(el("span", null, "Рабочее место: " + (ws.name || "-")));
+        if (ws.externalId) {
+          // Внешний код рабочего места это обычный способ адресации из внешней системы:
+          // она уже знает свой код стойки и не должна знать внутренние идентификаторы.
+          wsRow.appendChild(el("span", "dev-sep", "   ·   "));
+          wsRow.appendChild(el("span", null, "код для API: "));
+          var wsCode = el("code", "dev-id-code", ws.externalId);
+          wsCode.title = "Этот код передаётся в API как workstationExternalId. Нажмите, чтобы скопировать.";
+          wsCode.addEventListener("click", function () { copyText(ws.externalId, "Код рабочего места скопирован"); });
+          wsRow.appendChild(wsCode);
+        }
+        if (ws.location) {
+          wsRow.appendChild(el("span", "dev-sep", "   ·   "));
+          wsRow.appendChild(el("span", null, "описание: " + ws.location));
+        }
+        info.appendChild(wsRow);
       } else {
         info.appendChild(el("div", "dev-meta", "Рабочее место: не привязано"));
       }
@@ -2031,6 +2222,20 @@
       // Group(s) the tablet belongs to.
       var groupsText = (d.groups && d.groups.length) ? d.groups.join(", ") : "без группы";
       info.appendChild(el("div", "dev-meta", "Группа: " + groupsText));
+
+      // Внутренний идентификатор планшета. Внешняя система обычно им не пользуется: она
+      // адресует по коду рабочего места. Но этот же идентификатор стоит в логах, в
+      // уведомлениях и в записях подписей, и он нужен, когда к одному рабочему месту
+      // привязано несколько планшетов: тогда API просит указать планшет прямо.
+      var idRow = el("div", "dev-meta dev-id");
+      idRow.appendChild(el("span", null, "ID планшета: "));
+      var idCode = el("code", "dev-id-code", d.id);
+      idCode.title = "Внутренний идентификатор. Он стоит в логах и в записях подписей. " +
+        "В API нужен, только если адресовать планшет напрямую, а не по коду рабочего места. " +
+        "Нажмите, чтобы скопировать.";
+      idCode.addEventListener("click", function () { copyText(d.id, "ID планшета скопирован"); });
+      idRow.appendChild(idCode);
+      info.appendChild(idRow);
 
       info.appendChild(el("div", "dev-meta", d.online
         ? "Связь: на связи сейчас"
@@ -2798,12 +3003,12 @@
     },
     {
       method: "POST", path: "/api/ext/show-document",
-      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, Пол (M/F), email, telephone, document, date, cross-border, urine, UG (true/false), text1..text10. Булевы теги принимают только true или false, в любом виде: настоящий JSON-булев true, либо строку true в кавычках, регистр не важен. Другое значение возвращает ошибку с именем тега, а не молчаливо скрытый блок. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Массив checkboxes добавляет пункты согласия: checked - начальное состояние (можно прислать отмеченным или пустым), required - обязателен. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId). В ответе missingPlaceholders - какие теги не переданы.",
+      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, Пол (M/F), email, telephone, document, date, cross-border, urine, UG (true/false), text1..text10. Булевы теги принимают только true или false, в любом виде: настоящий JSON-булев true, либо строку true в кавычках, регистр не важен. Другое значение возвращает ошибку с именем тега, а не молчаливо скрытый блок. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Имена тегов сравниваются без учёта регистра: пол, Пол и ПОЛ это один и тот же тег. Массив checkboxes задаёт пункты согласия: если key совпадает с именем чекбокса в документе, задаётся его начальное состояние прямо на своём месте; если такого имени в документе нет, пункт добавляется в конец страницы, помеченной как приёмник, и тогда нужен label. Массив groups задаёт выбор в двойных зависимых чекбоксах: key - имя группы в документе, selected - имя выбранного варианта, пустая строка означает, что не выбрано ничего. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId: показать документ не на том экране хуже, чем вернуть ошибку). В ответе missingPlaceholders - какие теги не переданы.",
       sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","Пол":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026",\n                 "cross-border":true,"urine":true,"UG":false,\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"key":"consent","checked":true},\n                     {"label":"Согласен на рассылку","checked":false,"required":false}],\n       "groups":[{"key":"transfer","selected":"deny"}]}\' \\\n  {BASE}/api/ext/show-document'
     },
     {
       method: "POST", path: "/api/ext/scan-request",
-      desc: "Запросить сканирование ШК/QR и ДОЖДАТЬСЯ результата: на планшете открывается камера, клиент показывает код, код возвращается в ответе и сохраняется. Поддерживаются QR, EAN-13, EAN-8, Code-128. Цель: deviceId или workstationExternalId. timeoutSec - сколько ждать (по умолчанию 60, максимум 300). Ответ: { ok, code, format, scanId, createdUtc }. Если код не показали за отведённое время - 408 и камера на планшете закрывается.",
+      desc: "Запросить сканирование ШК/QR и ДОЖДАТЬСЯ результата: на планшете открывается камера, клиент показывает код, код возвращается в ответе и сохраняется. Поддерживаются QR, EAN-13, EAN-8, Code-128. Цель: deviceId или workstationExternalId. timeoutSec - сколько ждать (по умолчанию 60, максимум 300). Ответ: { ok, code, format, scanId, createdUtc }. Если код не показали за отведённое время - 408 и камера на планшете закрывается. Если планшет не на связи - сразу 409 с объяснением, а не ожидание до таймаута: команда сканирования живёт только в момент отправки и до выключенного планшета не дойдёт.",
       sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204","timeoutSec":60}\' \\\n  {BASE}/api/ext/scan-request'
     },
     {
@@ -2837,6 +3042,7 @@
     intro.appendChild(tags);
     intro.appendChild(el("h3", null, "Условия показа блоков и страниц"));
     intro.appendChild(el("p", "api-desc", "В редакторе документа блок текста или целую страницу можно показывать по условию на тег: равно, не равно, пусто, не пусто, одно из. Пример: блок показывать, если Пол равно F; страницу «Трансграничная передача» - если cross-border равно true."));
+    intro.appendChild(el("p", "api-desc", "Условий может быть несколько, соединённых через «и»: содержимое показывается, только если выполнены все сразу. Например: Пол равно F и UG равно true. Имена тегов сравниваются без учёта регистра, поэтому пол, Пол и ПОЛ это один и тот же тег и в условии, и в запросе, и в подстановке."));
     intro.appendChild(el("h3", null, "Оформление и чекбоксы"));
     intro.appendChild(el("p", "api-desc", "Текст заголовков и блоков оформляется в редакторе (жирный, курсив, размер, цвет) и так же выводится на планшете и в PDF. В блок можно вставить картинку и задать её ширину. Чекбоксы из API (массив checkboxes) приходят с полем checked - отмеченным или пустым. На странице подписи блоки размещаются и над полем подписи, и под ним: реквизиты, печать, пояснение. Условия показа работают и там."));
     intro.appendChild(el("h3", null, "Именованные чекбоксы и группы вариантов"));

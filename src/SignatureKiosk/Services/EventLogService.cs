@@ -70,7 +70,11 @@ public class EventLogService
                 (e.Message?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) ||
                 (e.Source?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) ||
                 (e.Detail?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                (e.DeviceName?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+                (e.DeviceName?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                // Идентификатор планшета виден на его карточке, и оператор ищет по нему, когда
+                // нужно разобрать историю конкретного планшета. Без этого поиск по скопированному
+                // идентификатору не находил ничего.
+                (e.DeviceId?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
         }
         return items.Take(Math.Clamp(limit, 1, MaxEntries)).ToList();
     }

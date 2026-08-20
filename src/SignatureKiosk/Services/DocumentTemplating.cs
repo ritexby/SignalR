@@ -119,7 +119,27 @@ public static partial class DocumentTemplating
     // ---------- Conditions ----------
 
     /// <summary>Evaluate a block/page condition against the signer fields. A null condition is always true.</summary>
+    /// <summary>
+    /// Части составного условия: само условие и всё, что присоединено через «и». Части без имени
+    /// поля пропускаются: недозаполненная часть не должна молча скрывать содержимое.
+    /// </summary>
+    public static IEnumerable<VisibleWhen> Parts(VisibleWhen? cond)
+    {
+        if (cond is null) yield break;
+        if (!string.IsNullOrWhiteSpace(cond.Field)) yield return cond;
+        foreach (var extra in cond.And ?? new List<VisibleWhen>())
+            if (extra is not null && !string.IsNullOrWhiteSpace(extra.Field)) yield return extra;
+    }
+
+    /// <summary>Выполняется ли условие целиком: все его части одновременно.</summary>
     public static bool Matches(VisibleWhen? cond, IReadOnlyDictionary<string, string>? fields)
+    {
+        foreach (var part in Parts(cond))
+            if (!MatchesOne(part, fields)) return false;
+        return true;
+    }
+
+    private static bool MatchesOne(VisibleWhen? cond, IReadOnlyDictionary<string, string>? fields)
     {
         if (cond is null || string.IsNullOrWhiteSpace(cond.Field)) return true;
         fields ??= EmptyMap;
@@ -283,18 +303,37 @@ public static partial class DocumentTemplating
         return keys;
     }
 
-    /// <summary>True when this condition is about something the signer controls on the tablet.</summary>
+    /// <summary>True when this part of a condition is about something the signer controls on the tablet.</summary>
     private static bool IsLive(VisibleWhen? cond, HashSet<string> live) =>
         cond is not null && !string.IsNullOrWhiteSpace(cond.Field) && live.Contains(cond.Field.Trim());
 
-    /// <summary>Keep the element: either its condition holds now, or it will be decided on the tablet.</summary>
-    private static bool Keep(VisibleWhen? cond, IReadOnlyDictionary<string, string>? map, HashSet<string> live) =>
-        IsLive(cond, live) || Matches(cond, map);
+    /// <summary>
+    /// Оставить элемент: части про теги решаются здесь и должны выполниться все, а части про
+    /// чекбоксы клиент ещё не нажимал, поэтому они откладываются на планшет. В составном условии
+    /// части обоих видов могут стоять рядом: «Пол равно F и согласие отмечено».
+    /// </summary>
+    private static bool Keep(VisibleWhen? cond, IReadOnlyDictionary<string, string>? map, HashSet<string> live)
+    {
+        foreach (var part in Parts(cond))
+            if (!IsLive(part, live) && !MatchesOne(part, map)) return false;
+        return true;
+    }
 
-    /// <summary>Only a condition the tablet still has to evaluate is passed on; a condition on a tag
-    /// has already been settled here and must not travel with the content.</summary>
-    private static VisibleWhen? LiveCondition(VisibleWhen? cond, HashSet<string> live) =>
-        IsLive(cond, live) ? new VisibleWhen { Field = cond!.Field.Trim(), Op = cond.Op, Value = cond.Value } : null;
+    /// <summary>
+    /// На планшет уезжают только те части, которые он ещё должен вычислить сам. Части про теги
+    /// здесь уже решены, и отправлять их значит рассказывать планшету о данных, которых он не
+    /// должен знать.
+    /// </summary>
+    private static VisibleWhen? LiveCondition(VisibleWhen? cond, HashSet<string> live)
+    {
+        var liveParts = Parts(cond).Where(p => IsLive(p, live))
+            .Select(p => new VisibleWhen { Field = p.Field.Trim(), Op = p.Op, Value = p.Value })
+            .ToList();
+        if (liveParts.Count == 0) return null;
+        var head = liveParts[0];
+        if (liveParts.Count > 1) head.And = liveParts.Skip(1).ToList();
+        return head;
+    }
 
     /// <summary>Resolve a list of blocks: drop those whose condition fails, substitute text runs,
     /// pass images through unchanged.</summary>
@@ -340,10 +379,16 @@ public static partial class DocumentTemplating
     /// content, and there would be nothing on screen to explain why.</summary>
     private static VisibleWhen? Normalized(VisibleWhen? cond)
     {
-        if (cond is null || string.IsNullOrWhiteSpace(cond.Field)) return null;
+        if (cond is null) return null;
         CleanCondition(cond);
+        if (string.IsNullOrWhiteSpace(cond.Field)) return null;
         cond.Field = Clamp(cond.Field).Trim();
         cond.Value = Clamp(cond.Value);
+        foreach (var part in cond.And ?? new List<VisibleWhen>())
+        {
+            part.Field = Clamp(part.Field).Trim();
+            part.Value = Clamp(part.Value);
+        }
         return cond;
     }
 
@@ -408,6 +453,30 @@ public static partial class DocumentTemplating
         foreach (var b in doc.SignBlocks) CleanBlock(b);
         doc.SignBlocksBelow = Compact(doc.SignBlocksBelow);
         foreach (var b in doc.SignBlocksBelow) CleanBlock(b);
+    }
+
+    /// <summary>
+    /// Элементы страницы в том порядке, в каком их видит клиент: блоки текста, чекбоксы и группы
+    /// стоят вперемешку. Возвращает пары (вид, номер в своём списке): 0 - блок, 1 - чекбокс,
+    /// 2 - группа. Страница без номеров (сохранённая до появления свободного порядка) отдаётся
+    /// по прежнему правилу: сначала текст, потом чекбоксы, потом группы.
+    /// </summary>
+    public static List<(int Kind, int Index)> PageOrder(DocPage page, List<DocBlock>? blocks = null)
+    {
+        const int tail = 1_000_000;
+        var list = blocks ?? page.Blocks ?? new List<DocBlock>();
+        var items = new List<(int Key, int Kind, int Index)>();
+        for (var i = 0; i < list.Count; i++)
+            items.Add((list[i].Ord >= 0 ? list[i].Ord : tail + i, 0, i));
+        var checks = page.Checkboxes ?? new List<DocCheckbox>();
+        for (var i = 0; i < checks.Count; i++)
+            items.Add((checks[i].Ord >= 0 ? checks[i].Ord : 2 * tail + i, 1, i));
+        var groups = page.Groups ?? new List<DocGroup>();
+        for (var i = 0; i < groups.Count; i++)
+            items.Add((groups[i].Ord >= 0 ? groups[i].Ord : 3 * tail + i, 2, i));
+
+        return items.OrderBy(x => x.Key).ThenBy(x => x.Kind).ThenBy(x => x.Index)
+            .Select(x => (x.Kind, x.Index)).ToList();
     }
 
     /// <summary>Номер, следующий за последним занятым на странице.</summary>
@@ -524,9 +593,39 @@ public static partial class DocumentTemplating
         return prefix + name;
     }
 
+    /// <summary>Сколько условий можно соединить через «и». Больше оператору не нужно, а без
+    /// границы импортированный файл мог бы принести список любой длины.</summary>
+    private const int MaxAndParts = 5;
+
     private static void CleanCondition(VisibleWhen? c)
     {
         if (c is null) return;
+        CleanOnePart(c);
+        if (c.And is null) return;
+        var extras = new List<VisibleWhen>();
+        foreach (var part in c.And)
+        {
+            if (part is null) continue;
+            CleanOnePart(part);
+            // Вложенности нет: «и» плоское, и разрешать её значило бы хранить дерево, которое
+            // редактор всё равно не умеет показать.
+            part.And = null;
+            if (part.Field.Length > 0) extras.Add(part);
+            if (extras.Count >= MaxAndParts) break;
+        }
+        c.And = extras.Count > 0 ? extras : null;
+        // Условие без первой части, но с присоединёнными: первая из них становится основной,
+        // иначе всё условие считалось бы пустым и содержимое показывалось бы всегда.
+        if (c.Field.Length == 0 && c.And is { Count: > 0 })
+        {
+            var head = c.And[0];
+            c.Field = head.Field; c.Op = head.Op; c.Value = head.Value;
+            c.And = c.And.Count > 1 ? c.And.Skip(1).ToList() : null;
+        }
+    }
+
+    private static void CleanOnePart(VisibleWhen c)
+    {
         c.Field = (c.Field ?? "").Trim();
         c.Value = (c.Value ?? "").Trim();
         if (string.IsNullOrEmpty(c.Op) || !AllowedOps.Contains(c.Op)) c.Op = "eq";

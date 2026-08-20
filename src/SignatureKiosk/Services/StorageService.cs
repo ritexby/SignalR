@@ -390,7 +390,14 @@ public class StorageService
         var hash = Sha256Hex(key);
         lock (_lock)
         {
-            return ReadOr(ApiKeysPath, () => new List<ApiKey>()).Any(k => k.KeyHash == hash);
+            // Сравнение за постоянное время, как и для токена планшета: по времени ответа не
+            // должно быть видно, насколько присланный ключ близок к настоящему.
+            var bytes = Encoding.UTF8.GetBytes(hash);
+            var found = false;
+            foreach (var k in ReadOr(ApiKeysPath, () => new List<ApiKey>()))
+                if (CryptographicOperations.FixedTimeEquals(bytes, Encoding.UTF8.GetBytes(k.KeyHash ?? "")))
+                    found = true;
+            return found;
         }
     }
 
@@ -764,16 +771,59 @@ public class StorageService
         return new string(chars, 0, 4) + "-" + new string(chars, 4, 4);
     }
 
+    /// <summary>
+    /// Прочитать файл или вернуть пустое значение. Если файл повреждён, он сначала откладывается
+    /// в сторону под именем с меткой времени: иначе следующая запись затёрла бы его пустым
+    /// значением и все планшеты, ключи или подписи исчезли бы без следа. Отложенный файл виден
+    /// в каталоге данных и упоминается в логе, так что его можно разобрать руками.
+    /// </summary>
     private T ReadOr<T>(string path, Func<T> fallback)
     {
         if (!File.Exists(path)) return fallback();
         try
         {
             var v = JsonSerializer.Deserialize<T>(File.ReadAllText(path), Json);
-            return v ?? fallback();
+            if (v is not null) return v;
         }
-        catch { return fallback(); }
+        catch (Exception ex)
+        {
+            QuarantineCorrupt(path, ex.Message);
+            return fallback();
+        }
+        // Файл разобрался, но оказался пустым (null в JSON): это тоже не то, что мы записывали.
+        QuarantineCorrupt(path, "файл содержит пустое значение");
+        return fallback();
     }
+
+    /// <summary>Отложить повреждённый файл в сторону, чтобы его не затёрло следующей записью.</summary>
+    private void QuarantineCorrupt(string path, string reason)
+    {
+        try
+        {
+            var backup = path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+            File.Move(path, backup, overwrite: true);
+            var file = Path.GetFileName(path);
+            var backupName = Path.GetFileName(backup);
+            // В очередь кладём всегда: из неё фоновая проверка поднимает уведомление оператору.
+            // Плюс, если журнал уже создан, пишем в него сразу, не дожидаясь следующего круга.
+            CorruptFiles.Enqueue((file, backupName, reason));
+            OnCorrupt?.Invoke(file, backupName, reason);
+        }
+        catch { /* не смогли отложить: терять из-за этого работу сервиса нельзя */ }
+    }
+
+    /// <summary>
+    /// Повреждённые файлы, отложенные с момента запуска. Читается наружу, чтобы попасть в лог
+    /// оператора: молча подменить данные пустыми и не сказать об этом было бы худшим вариантом.
+    /// </summary>
+    public readonly System.Collections.Concurrent.ConcurrentQueue<(string File, string Backup, string Reason)> CorruptFiles = new();
+
+    /// <summary>
+    /// Куда сообщать о повреждённом файле сразу, как только он обнаружен. Ставится один раз при
+    /// запуске, когда журнал уже создан. Через свойство, а не через конструктор: журнал сам
+    /// зависит от хранилища, и обратная зависимость замкнула бы круг.
+    /// </summary>
+    public Action<string, string, string>? OnCorrupt { get; set; }
 
     private void Write<T>(string path, T value)
     {

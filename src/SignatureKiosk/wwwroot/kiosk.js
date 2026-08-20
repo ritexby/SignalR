@@ -6,9 +6,44 @@
   var TOKEN_KEY = "sk_device_token";
   var qs = new URLSearchParams(location.search);
 
-  function getToken() { return localStorage.getItem(TOKEN_KEY); }
-  function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
-  function clearToken() { localStorage.removeItem(TOKEN_KEY); }
+  // Токен планшета хранится в двух местах сразу: в localStorage и в cookie. Это одна и та же
+  // «жизнь» с точки зрения браузера, но чистятся они разными вызовами Android WebView
+  // (clearCache трогает кэш, WebStorage.deleteAllData - хранилище, CookieManager - cookie),
+  // поэтому частичная чистка не лишает планшет привязки: недостающее восстанавливается из
+  // уцелевшего. Полная чистка данных стирает всё, и планшет придётся активировать заново.
+  var TOKEN_DAYS = 3650;
+
+  function readCookie(name) {
+    var parts = ("; " + document.cookie).split("; " + name + "=");
+    return parts.length === 2 ? decodeURIComponent(parts.pop().split(";").shift()) : null;
+  }
+  function writeCookie(name, value, days) {
+    var attrs = "; path=/; max-age=" + (days * 86400) + "; SameSite=Lax"
+      + (location.protocol === "https:" ? "; Secure" : "");
+    document.cookie = name + "=" + encodeURIComponent(value) + attrs;
+  }
+
+  function getToken() {
+    var fromStorage = null;
+    try { fromStorage = localStorage.getItem(TOKEN_KEY); } catch (e) { fromStorage = null; }
+    var fromCookie = readCookie(TOKEN_KEY);
+    var token = fromStorage || fromCookie;
+    // Восстанавливаем то, чего не хватает, чтобы следующая чистка снова не осталась
+    // единственной копией.
+    if (token) {
+      if (!fromStorage) { try { localStorage.setItem(TOKEN_KEY, token); } catch (e) { /* приватный режим */ } }
+      if (!fromCookie) writeCookie(TOKEN_KEY, token, TOKEN_DAYS);
+    }
+    return token;
+  }
+  function setToken(t) {
+    try { localStorage.setItem(TOKEN_KEY, t); } catch (e) { /* приватный режим */ }
+    writeCookie(TOKEN_KEY, t, TOKEN_DAYS);
+  }
+  function clearToken() {
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* приватный режим */ }
+    writeCookie(TOKEN_KEY, "", -1);
+  }
 
   // ---------- Fault reporting ----------
   // Tablet-side failures are sent to the server so they appear on the admin "Логи" tab: a kiosk
@@ -212,8 +247,16 @@
     return found;
   }
 
-  function condHolds(cond) {
-    if (!cond || !cond.field) return true;
+  // Части составного условия: само условие и всё, что присоединено через «и». Выполниться
+  // должны все части сразу.
+  function condParts(cond) {
+    var out = [];
+    if (cond && cond.field) out.push(cond);
+    ((cond && cond.and) || []).forEach(function (extra) { if (extra && extra.field) out.push(extra); });
+    return out;
+  }
+
+  function partHolds(cond) {
     var val = String(liveValue(cond.field) || "").trim().toLowerCase();
     var target = String(cond.value || "").trim().toLowerCase();
     switch (cond.op) {
@@ -226,9 +269,17 @@
     }
   }
 
+  function condHolds(cond) {
+    var parts = condParts(cond);
+    for (var i = 0; i < parts.length; i++) if (!partHolds(parts[i])) return false;
+    return true;
+  }
+
   function dependsOn(key) {
     var uses = false;
-    function check(c) { if (c && c.field === key) uses = true; }
+    function check(c) {
+      condParts(c).forEach(function (part) { if (part.field === key) uses = true; });
+    }
     (doc.config.pages || []).forEach(function (p) {
       check(p.visibleWhen);
       (p.blocks || []).forEach(function (b) { check(b.visibleWhen); });
@@ -668,17 +719,35 @@
         signature: doc.pad.toDataURL("image/png"), submissionId: doc.submissionId })
     }).then(function (r) {
       if (doc.session !== session) return;          // document was replaced/cleared while sending
-      if (!r.ok) throw new Error("bad status " + r.status);
-      doc.index = doc.screens.length - 1;
-      renderScreen();
+      if (r.ok) {
+        doc.index = doc.screens.length - 1;
+        renderScreen();
+        return;
+      }
+      // Сообщение должно соответствовать тому, что произошло. Повтор помогает только при
+      // временном сбое связи. Если сессия уже закрыта или планшет отвязан, предлагать
+      // «попробуйте ещё раз» значит заставлять человека жать кнопку, которая не сработает
+      // никогда.
+      var err = new Error("bad status " + r.status);
+      err.status = r.status;
+      err.permanent = r.status === 401 || r.status === 403 || r.status === 409;
+      throw err;
     }).catch(function (err) {
       // A failed signature is the worst failure for the client, so it is always reported.
       reportError("Не удалось отправить подпись", err && (err.stack || err.message || String(err)));
       if (doc.session !== session) return;
+      var note = document.getElementById("footerNote");
+      if (err && err.permanent) {
+        // Кнопку не возвращаем: нажимать её бессмысленно, а нарисованная подпись остаётся
+        // на экране, чтобы сотрудник видел, что человек расписался.
+        if (note) note.textContent = err.status === 409
+          ? "Сессия подписания уже завершена. Обратитесь к сотруднику: документ нужно отправить заново."
+          : "Планшет потерял доступ. Обратитесь к сотруднику.";
+        return;
+      }
       doc.submitting = false;
       updateFooter();                               // re-enable the button first...
-      var note = document.getElementById("footerNote");
-      if (note) note.textContent = "Ошибка отправки. Попробуйте ещё раз."; // ...then show the error so it is not wiped
+      if (note) note.textContent = "Не удалось отправить: нет связи с сервером. Нажмите ПОДПИСАТЬ ещё раз."; // ...then show the error so it is not wiped
     });
   }
 
@@ -958,7 +1027,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "4.9";
+  var APP_VERSION = "5.0";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {

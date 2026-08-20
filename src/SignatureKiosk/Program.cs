@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
@@ -19,6 +20,15 @@ builder.Services.AddSignalR().AddJsonProtocol(options =>
 // nothing to go on. Values arrive as strings either way: that is what a template substitutes.
 builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.Converters.Add(new LenientStringDictionaryConverter()));
+// Ключи защиты данных ASP.NET. Без явной настройки платформа держит их только в памяти и
+// пишет об этом три предупреждения при каждом запуске. Складываем их в каталог данных рядом с
+// остальным состоянием: он и так принадлежит служебному пользователю и закрыт от посторонних.
+// Так ключи переживают перезапуск, а журнал не начинается с пугающих сообщений ни о чём.
+builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(
+        builder.Configuration["DataDir"] is { Length: > 0 } dd ? dd : Path.Combine(builder.Environment.ContentRootPath, "data"),
+        "keys")))
+    .SetApplicationName("HELIX SignTablet");
 builder.Services.AddSingleton<StorageService>();
 builder.Services.AddSingleton<DeviceTracker>();
 builder.Services.AddSingleton<KioskCoordinator>();
@@ -99,6 +109,16 @@ var tracker = app.Services.GetRequiredService<DeviceTracker>();
 // record the restart: for a 24/7 fleet an unexpected restart is itself an operational event.
 var eventLog = app.Services.GetRequiredService<EventLogService>();
 eventLog.Add("info", "service", "Сервис запущен");
+// Повреждённый файл данных откладывается в сторону вместо того, чтобы его затёрло пустым
+// значением, и об этом надо сказать сразу: часть настроек в этот момент выглядит так, будто её
+// никогда не было. Сначала разбираем то, что накопилось при чтении настроек на старте, потом
+// подключаем журнал напрямую, чтобы дальше сообщения шли без задержки.
+static string CorruptText(string file, string backup, string reason) =>
+    "Файл данных «" + file + "» повреждён и отложен как «" + backup + "» (" + reason + "). " +
+    "Его содержимое сейчас пустое. Файл сохранён в каталоге данных, из него можно восстановить записи.";
+while (storage.CorruptFiles.TryDequeue(out var corrupt))
+    eventLog.Add("error", "storage", CorruptText(corrupt.File, corrupt.Backup, corrupt.Reason));
+storage.OnCorrupt = (file, backup, reason) => eventLog.Add("error", "storage", CorruptText(file, backup, reason));
 app.Lifetime.ApplicationStopping.Register(() => eventLog.Add("info", "service", "Сервис остановлен"));
 
 // Any unhandled failure returns a JSON body instead of an empty 500, so the admin panel and the
@@ -564,7 +584,16 @@ admin.MapGet("/playlist", (string? target) =>
     KioskState state;
     if (t == KioskCoordinator.AllTarget) state = storage.GetStates().Default;
     else if (t.StartsWith("device:", StringComparison.Ordinal)) state = storage.ResolveState(t["device:".Length..]);
-    else state = storage.GetStates().Default; // groups share the default view for editing
+    else if (t.StartsWith("group:", StringComparison.Ordinal))
+    {
+        // Сохранение для группы пишет плейлист каждому её планшету, поэтому и читать надо оттуда
+        // же. Раньше здесь отдавался общий список: оператор сохранял рекламу для группы, заходил
+        // снова и видел чужой набор, а следующее сохранение затирало то, что он только что задал.
+        var groupId = t["group:".Length..];
+        var member = storage.GetDevices().FirstOrDefault(d => d.GroupIds.Contains(groupId));
+        state = member is null ? storage.GetStates().Default : storage.ResolveState(member.Id);
+    }
+    else state = storage.GetStates().Default;
     return Results.Ok(new { target = t, imageIds = state.PlaylistImageIds, intervalSec = state.IntervalSec, mode = state.Mode });
 });
 
@@ -1045,6 +1074,19 @@ ext.MapPost("/scan-request", async (ExtScanRequestDto dto, KioskCoordinator coor
 {
     var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
     if (deviceId is null) return Results.Json(new { error }, statusCode: status);
+
+    // Команда сканирования живёт только в момент отправки: планшет не на связи её просто не
+    // услышит. Без этой проверки вызывающая система молча ждала до таймаута (до пяти минут) и
+    // получала «код не отсканирован» вместо понятной причины.
+    if (!tracker.IsOnline(deviceId))
+    {
+        var offline = storage.GetDevice(deviceId);
+        return Results.Json(new
+        {
+            error = "Планшет «" + (offline?.Name ?? deviceId) + "» сейчас не на связи, команда сканирования до него не дойдёт.",
+            deviceId
+        }, statusCode: StatusCodes.Status409Conflict);
+    }
 
     var timeout = TimeSpan.FromSeconds(Math.Clamp(dto?.TimeoutSec ?? 60, 5, 300));
     using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
