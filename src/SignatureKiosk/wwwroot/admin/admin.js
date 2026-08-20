@@ -6,9 +6,10 @@
   var state = {
     slidesTarget: "all",   // recipient for advertising slides (all / group / device)
     docTarget: "",         // recipient for the document: exactly ONE device, or "" if none yet
+    scanTarget: "",        // tablet used for barcode / QR scanning
     images: [], playlist: [], interval: 6,
     doc: null,
-    devices: [], groups: [], workstations: [], apikeys: []
+    devices: [], groups: [], workstations: [], apikeys: [], scans: [], logs: [], alerts: []
   };
 
   // Client-side filter for the devices list.
@@ -22,6 +23,19 @@
     opts = opts || {}; opts.credentials = "same-origin";
     return fetch("/api/admin" + path, opts).then(function (r) {
       if (r.status === 401) { showLogin(); throw new Error("unauthorized"); }
+      // A failed call must never look like success: surface the server's message and reject, so
+      // callers cannot report "Сохранено" for a save the server refused.
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          var msg = "";
+          try { msg = (JSON.parse(t) || {}).error || ""; } catch (e) { msg = ""; }
+          toast(msg || ("Ошибка сервера (" + r.status + ")"));
+          var err = new Error(msg || ("HTTP " + r.status));
+          err.status = r.status;
+          err.reported = true;      // already shown to the operator (see the handler below)
+          throw err;
+        });
+      }
       return r;
     });
   }
@@ -30,8 +44,20 @@
     return api(path, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
   }
 
+  // A failed request has already been shown to the operator by api(); swallow the rejection so an
+  // admin panel that stays open all day does not fill the console with "Uncaught (in promise)".
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e && e.reason;
+    if (r && (r.reported || r.message === "unauthorized")) e.preventDefault();
+  });
+
   // ---------------- Auth ----------------
-  function showLogin() { $("login").classList.remove("hidden"); $("app").classList.add("hidden"); }
+  function showLogin() {
+    stopLogPolling();   // a logged-out page must not keep polling (401 loop every 10 s)
+    stopHub();          // ...nor keep a live hub: scanned codes were toasted over the login box
+    $("login").classList.remove("hidden");
+    $("app").classList.add("hidden");
+  }
   function showApp() { $("login").classList.add("hidden"); $("app").classList.remove("hidden"); }
 
   function checkAuth() {
@@ -49,7 +75,10 @@
       else $("loginError").textContent = "Неверный пароль";
     }).catch(function () { $("loginError").textContent = "Ошибка соединения"; });
   });
-  $("logout").addEventListener("click", function () { api("/logout", { method: "POST" }).finally(showLogin); });
+  // .finally would re-throw a rejected logout (a already-expired session returns 401), so catch first.
+  $("logout").addEventListener("click", function () {
+    api("/logout", { method: "POST" }).catch(function () {}).then(showLogin);
+  });
 
   // ---------------- Tabs ----------------
   document.querySelectorAll(".tab").forEach(function (tab) {
@@ -59,17 +88,30 @@
       var name = tab.getAttribute("data-tab");
       document.querySelectorAll(".panel").forEach(function (p) { p.classList.toggle("hidden", p.getAttribute("data-panel") !== name); });
       if (name === "signatures") loadSignatures();
-      if (name === "devices") loadDevices();
+      if (name === "devices") { loadDevices(); loadKioskControl(); }
       if (name === "groups") loadGroups();
       if (name === "workstations") loadWorkstations();
       if (name === "apikeys") loadKeys();
       if (name === "apidocs") renderApiDocs();
+      if (name === "scan") loadScans();
+      if (name === "logs") loadLogs();
+      if (name === "alerts") { loadAlerts().then(renderAlerts); loadAlertSettings(); }
+      // The log tab polls while it is open; stop polling when the operator leaves it.
+      if (name !== "logs") stopLogPolling();
     });
   });
 
   // ---------------- Modal ----------------
-  function openModal(node) { var c = $("modalContent"); c.innerHTML = ""; c.appendChild(node); $("modal").classList.remove("hidden"); }
-  function closeModal() { $("modal").classList.add("hidden"); }
+  // A modal may hold images built from blobs (a tablet screenshot). Dropping the markup does not
+  // free the blob, so release every URL we handed out before the content goes away.
+  function releaseModalUrls() {
+    $("modalContent").querySelectorAll("img[data-url]").forEach(function (img) {
+      URL.revokeObjectURL(img.dataset.url);
+      delete img.dataset.url;
+    });
+  }
+  function openModal(node) { var c = $("modalContent"); releaseModalUrls(); c.innerHTML = ""; c.appendChild(node); $("modal").classList.remove("hidden"); }
+  function closeModal() { releaseModalUrls(); $("modalContent").innerHTML = ""; $("modal").classList.add("hidden"); }
   $("modalClose").addEventListener("click", closeModal);
   $("modal").addEventListener("click", function (e) { if (e.target === $("modal")) closeModal(); });
 
@@ -113,6 +155,9 @@
   function renderTargetOptions() {
     state.slidesTarget = fillTargetSelect($("slidesTarget"), state.slidesTarget);
     state.docTarget = fillDeviceSelect($("docTarget"), state.docTarget);
+    // Keep the scan target fresh too: it used to be refilled only when the scan tab was loaded, so
+    // a deleted tablet stayed selectable and "start scanning" silently did nothing.
+    if ($("scanTarget")) state.scanTarget = fillDeviceSelect($("scanTarget"), state.scanTarget);
   }
 
   // ---------------- Images / slides ----------------
@@ -154,8 +199,12 @@
     var input = $("imageUpload"); if (!input.files.length) return;
     var fd = new FormData();
     Array.prototype.forEach.call(input.files, function (f) { fd.append("files", f); });
+    // Reset the file input on BOTH paths: after a failed upload the input still held the same
+    // files, so re-picking them fired no change event and the button looked dead.
     api("/images", { method: "POST", body: fd }).then(loadImages).then(renderImages)
-      .then(function () { input.value = ""; toast("Картинки загружены"); });
+      .then(function () { toast("Картинки загружены"); })
+      .catch(function () { /* reported by api() */ })
+      .then(function () { input.value = ""; });
   });
   $("saveSlides").addEventListener("click", function () {
     var interval = parseInt($("intervalInput").value, 10) || 6;
@@ -170,18 +219,198 @@
   }
 
   // ---------------- Document editor ----------------
+  // The documented set of API fields (tags) offered in the editor. Keep in sync with the
+  // server (DocumentTemplating.KnownFields).
+  var KNOWN_FIELDS = ["ФИО", "ДР", "Адрес регистрации", "ПОЛ", "email", "telephone", "document",
+    "date", "cross-border", "text1", "text2", "text3", "text4", "text5", "text6", "text7", "text8", "text9", "text10"];
+  // Curated colour palette (matches the tablet and the PDF renderer).
+  var RT_COLORS = ["#1a1c22", "#16a34a", "#dc2626", "#2563eb", "#ea580c", "#7c3aed", "#0d9488", "#6b7280"];
+  var COND_OPS = [["eq", "равно"], ["ne", "не равно"], ["empty", "пусто"], ["notempty", "не пусто"], ["in", "одно из (через запятую)"]];
+
   function loadDoc() { return apiJson("/document").then(function (d) { state.doc = d; renderDoc(); }); }
   function renderDoc() {
     $("docTitle").value = state.doc.title || ""; $("signPrompt").value = state.doc.signPrompt || ""; $("thankYou").value = state.doc.thankYouText || "";
     $("idleReturn").value = state.doc.idleReturnSec != null ? state.doc.idleReturnSec : 180;
+    ensureFieldsDatalist();
     renderPages();
     updatePlaceholders();
   }
 
+  function ensureFieldsDatalist() {
+    if (document.getElementById("knownFieldsList")) return;
+    var dl = document.createElement("datalist"); dl.id = "knownFieldsList";
+    KNOWN_FIELDS.forEach(function (f) { dl.appendChild(new Option(f, f)); });
+    document.body.appendChild(dl);
+  }
+
+  // ---------- rich-text editor (contentEditable <-> structured runs) ----------
+  function rgbToHex(c) {
+    if (!c) return null; c = String(c).trim();
+    if (c.charAt(0) === "#") { if (c.length === 7) return c.toLowerCase(); if (c.length === 4) return ("#" + c[1] + c[1] + c[2] + c[2] + c[3] + c[3]).toLowerCase(); return null; }
+    var m = c.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i); if (!m) return null;
+    function h(n) { n = parseInt(n, 10); return (n < 16 ? "0" : "") + n.toString(16); }
+    return ("#" + h(m[1]) + h(m[2]) + h(m[3])).toLowerCase();
+  }
+  function escapeHtml(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[c]; }); }
+
+  function runsToHtml(runs) {
+    if (!runs || !runs.length) return "";
+    return runs.map(function (r) {
+      return String(r.text == null ? "" : r.text).split("\n").map(function (seg, i) {
+        var br = i > 0 ? "<br>" : "";
+        if (!seg.length) return br;
+        var sty = [];
+        if (r.bold) sty.push("font-weight:700");
+        if (r.italic) sty.push("font-style:italic");
+        if (r.color && /^#[0-9a-fA-F]{6}$/.test(r.color)) sty.push("color:" + r.color);
+        var cls = r.size === "l" ? "rt-l" : r.size === "h" ? "rt-h" : "";
+        return br + "<span" + (cls ? ' class="' + cls + '"' : "") + (sty.length ? ' style="' + sty.join(";") + '"' : "") + ">" + escapeHtml(seg) + "</span>";
+      }).join("");
+    }).join("");
+  }
+
+  function editorToRuns(root) {
+    var runs = [], atStart = true;
+    function push(text, f) {
+      if (!text) return;
+      var last = runs[runs.length - 1];
+      var color = f.color || null, size = f.size || null;
+      if (last && !!last.bold === !!f.bold && !!last.italic === !!f.italic && (last.color || null) === color && (last.size || null) === size) last.text += text;
+      else runs.push({ text: text, bold: !!f.bold, italic: !!f.italic, color: color, size: size });
+      atStart = false;
+    }
+    function nl(f) { push("\n", f); atStart = true; }
+    function derive(elm, f) {
+      var g = { bold: f.bold, italic: f.italic, color: f.color, size: f.size }, t = elm.tagName;
+      if (t === "B" || t === "STRONG") g.bold = true;
+      if (t === "I" || t === "EM") g.italic = true;
+      var st = elm.style;
+      if (st) {
+        if (st.fontWeight === "bold" || parseInt(st.fontWeight, 10) >= 600) g.bold = true;
+        if (st.fontStyle === "italic") g.italic = true;
+        if (st.color) { if (st.color === "inherit") g.color = null; else { var hx = rgbToHex(st.color); if (hx) g.color = hx; } }
+      }
+      if (elm.classList) {
+        if (elm.classList.contains("rt-h")) g.size = "h";
+        else if (elm.classList.contains("rt-l")) g.size = "l";
+        else if (elm.classList.contains("rt-n")) g.size = null;
+      }
+      return g;
+    }
+    (function walk(node, f) {
+      for (var i = 0; i < node.childNodes.length; i++) {
+        var ch = node.childNodes[i];
+        if (ch.nodeType === 3) push(ch.nodeValue.replace(/\r/g, ""), f);
+        else if (ch.nodeType === 1) {
+          if (ch.tagName === "BR") {
+            // A browser represents an empty line as <div><br></div>; that trailing <br> is a
+            // placeholder, not a real break. Counting it would add a blank line to the document
+            // (and to the PDF) on every Enter.
+            var isFiller = node !== root && i === node.childNodes.length - 1 &&
+              (node.tagName === "DIV" || node.tagName === "P");
+            if (!isFiller) nl(f);
+            continue;
+          }
+          var block = ch.tagName === "DIV" || ch.tagName === "P";
+          if (block && !atStart) nl(f);
+          walk(ch, derive(ch, f));
+        }
+      }
+    })(root, { bold: false, italic: false, color: null, size: null });
+    return runs.map(function (r) { return { text: r.text, bold: r.bold || undefined, italic: r.italic || undefined, color: r.color || undefined, size: r.size || undefined }; });
+  }
+
+  // BOTH ends of the selection must be inside this editor: a selection dragged from one block into
+  // the next would otherwise have its whole span (including the other block's toolbar and text)
+  // extracted into this one.
+  function insideEditor(ed) {
+    var s = window.getSelection();
+    return !!(s && s.rangeCount && ed.contains(s.anchorNode) && ed.contains(s.focusNode));
+  }
+  function wrapSelection(ed, applyFn) {
+    var s = window.getSelection();
+    if (!insideEditor(ed)) { ed.focus(); return; }
+    var range = s.getRangeAt(0); if (range.collapsed) return;
+    var span = document.createElement("span"); applyFn(span);
+    try { span.appendChild(range.extractContents()); range.insertNode(span); } catch (e) { return; }
+    s.removeAllRanges(); var nr = document.createRange(); nr.selectNodeContents(span); s.addRange(nr);
+    ed.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  function insertTag(ed, tag) {
+    ed.focus(); var s = window.getSelection(), text = "{{" + tag + "}}";
+    if (s.rangeCount && ed.contains(s.anchorNode)) {
+      var range = s.getRangeAt(0); range.deleteContents();
+      var node = document.createTextNode(text); range.insertNode(node);
+      range.setStartAfter(node); range.collapse(true); s.removeAllRanges(); s.addRange(range);
+    } else ed.appendChild(document.createTextNode(text));
+    ed.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  function tbBtn(label, title, fn, italicLabel) {
+    var b = el("button", "rt-btn", label); b.type = "button"; b.title = title || "";
+    if (italicLabel) b.style.fontStyle = "italic";
+    b.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    b.addEventListener("click", function (e) { e.preventDefault(); fn(); });
+    return b;
+  }
+  function richEditor(labelText, runs, role) {
+    var wrap = el("div", "rt-field");
+    if (labelText) wrap.appendChild(el("div", "rt-label", labelText));
+    var ed = el("div", "rt-editor"); ed.contentEditable = "true"; ed.setAttribute("data-role", role); ed.innerHTML = runsToHtml(runs);
+    var bar = el("div", "rt-toolbar");
+    bar.appendChild(tbBtn("Ж", "Жирный", function () { if (insideEditor(ed)) { document.execCommand("bold", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); } }));
+    bar.appendChild(tbBtn("К", "Курсив", function () { if (insideEditor(ed)) { document.execCommand("italic", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); } }, true));
+    bar.appendChild(tbBtn("A", "Обычный размер", function () { wrapSelection(ed, function (s) { s.className = "rt-n"; }); }));
+    bar.appendChild(tbBtn("A+", "Крупный", function () { wrapSelection(ed, function (s) { s.className = "rt-l"; }); }));
+    bar.appendChild(tbBtn("A++", "Огромный", function () { wrapSelection(ed, function (s) { s.className = "rt-h"; }); }));
+    RT_COLORS.forEach(function (c) {
+      var sw = el("button", "rt-swatch"); sw.type = "button"; sw.style.background = c; sw.title = "Цвет " + c;
+      sw.addEventListener("mousedown", function (e) { e.preventDefault(); });
+      sw.addEventListener("click", function (e) { e.preventDefault(); wrapSelection(ed, function (s) { s.style.color = c; }); });
+      bar.appendChild(sw);
+    });
+    bar.appendChild(tbBtn("○", "Цвет по умолчанию", function () { wrapSelection(ed, function (s) { s.style.color = "inherit"; }); }));
+    var tsel = el("select", "rt-tag"); tsel.appendChild(new Option("+ тег", ""));
+    KNOWN_FIELDS.forEach(function (f) { tsel.appendChild(new Option(f, f)); });
+    tsel.addEventListener("change", function () { if (tsel.value) { insertTag(ed, tsel.value); tsel.value = ""; } });
+    bar.appendChild(tsel);
+    wrap.appendChild(bar); wrap.appendChild(ed);
+    return wrap;
+  }
+
+  // ---------- condition editor (show block / page only when a field matches) ----------
+  function conditionEditor(cond, role) {
+    var box = el("div", "cond-box"); box.setAttribute("data-role", role);
+    var mode = el("select", "cond-mode");
+    mode.appendChild(new Option("Показывать всегда", "")); mode.appendChild(new Option("Показывать по условию", "cond"));
+    var fields = el("div", "cond-fields");
+    var fld = el("input", "cond-field"); fld.type = "text"; fld.placeholder = "тег (например ПОЛ)"; fld.setAttribute("list", "knownFieldsList"); fld.setAttribute("data-role", "cfield");
+    var op = el("select", "cond-op"); op.setAttribute("data-role", "cop");
+    COND_OPS.forEach(function (o) { op.appendChild(new Option(o[1], o[0])); });
+    var val = el("input", "cond-val"); val.type = "text"; val.placeholder = "значение"; val.setAttribute("data-role", "cval");
+    fields.appendChild(fld); fields.appendChild(op); fields.appendChild(val);
+    function sync() { fields.style.display = mode.value === "cond" ? "" : "none"; val.style.display = (op.value === "empty" || op.value === "notempty") ? "none" : ""; }
+    mode.addEventListener("change", sync); op.addEventListener("change", sync);
+    if (cond && cond.field) { mode.value = "cond"; fld.value = cond.field; op.value = cond.op || "eq"; val.value = cond.value || ""; }
+    sync();
+    box.appendChild(mode); box.appendChild(fields);
+    return box;
+  }
+  function readCondition(box) {
+    if (!box) return null;
+    var mode = box.querySelector(".cond-mode"); if (!mode || mode.value !== "cond") return null;
+    var field = (box.querySelector('[data-role="cfield"]').value || "").trim(); if (!field) return null;
+    var op = box.querySelector('[data-role="cop"]').value || "eq";
+    var value = (box.querySelector('[data-role="cval"]').value || "").trim();
+    return { field: field, op: op, value: value };
+  }
+
+  function headingRunsOf(page) { return (page.headingRuns && page.headingRuns.length) ? page.headingRuns : (page.heading ? [{ text: page.heading }] : []); }
+  function blocksOf(page) { return (page.blocks && page.blocks.length) ? page.blocks : (page.body ? [{ runs: [{ text: page.body }] }] : []); }
+
   function scanPlaceholders() {
     var texts = [$("docTitle").value, $("signPrompt").value, $("thankYou").value];
-    document.querySelectorAll('#pagesEditor [data-role="heading"], #pagesEditor [data-role="body"], #pagesEditor [data-role="cblabel"]')
-      .forEach(function (i) { texts.push(i.value); });
+    document.querySelectorAll('#pagesEditor [data-role="heading"], #pagesEditor [data-role="blockbody"]').forEach(function (e) { texts.push(e.textContent || ""); });
+    document.querySelectorAll('#pagesEditor [data-role="cblabel"]').forEach(function (i) { texts.push(i.value); });
     var re = /\{\{\s*(.+?)\s*\}\}/g, seen = [], known = {};
     texts.forEach(function (t) {
       if (!t) return; var m;
@@ -196,18 +425,138 @@
     wrap.appendChild(el("span", "ph-label", "Поля для передачи по API:"));
     ph.forEach(function (k) { wrap.appendChild(el("code", "ph-tag", "{{" + k + "}}")); });
   }
+
+  function blockCard(b) {
+    b = b || {};
+    var bc = el("div", "block-card"); bc.setAttribute("data-role", "blockcard");
+    var isImage = !!b.imageUrl;
+
+    var modeBar = el("div", "block-mode");
+    var btnText = el("button", "btn btn-ghost btn-sm", "Текст"); btnText.type = "button";
+    var btnImg = el("button", "btn btn-ghost btn-sm", "Картинка"); btnImg.type = "button";
+    modeBar.appendChild(btnText); modeBar.appendChild(btnImg);
+    bc.appendChild(modeBar);
+
+    var textWrap = richEditor("", b.runs || [], "blockbody");
+    bc.appendChild(textWrap);
+
+    var imgWrap = el("div", "block-image");
+    var img = el("img", "block-image-preview");
+    if (b.imageUrl) { img.src = b.imageUrl; } else { img.style.display = "none"; }
+    img.style.width = (b.imageWidth || 100) + "%";
+    if (b.imageUrl) bc.setAttribute("data-imgurl", b.imageUrl);
+    var pick = el("button", "btn btn-ghost btn-sm", "Выбрать картинку"); pick.type = "button";
+    pick.addEventListener("click", function () {
+      openImagePicker(function (url) { img.src = url; img.style.display = ""; bc.setAttribute("data-imgurl", url); });
+    });
+    var wLabel = el("label", "field-sm", "Ширина, %");
+    var wRange = el("input"); wRange.type = "range"; wRange.min = "10"; wRange.max = "100"; wRange.step = "5";
+    wRange.value = b.imageWidth || 100; wRange.setAttribute("data-role", "blockimgw");
+    var wVal = el("span", "img-wval", wRange.value + "%");
+    wRange.addEventListener("input", function () { wVal.textContent = wRange.value + "%"; img.style.width = wRange.value + "%"; });
+    wLabel.appendChild(wRange); wLabel.appendChild(wVal);
+    imgWrap.appendChild(img); imgWrap.appendChild(pick); imgWrap.appendChild(wLabel);
+    bc.appendChild(imgWrap);
+
+    function setMode(m) {
+      bc.setAttribute("data-mode", m);
+      textWrap.style.display = m === "text" ? "" : "none";
+      imgWrap.style.display = m === "image" ? "" : "none";
+      btnText.classList.toggle("mode-on", m === "text");
+      btnImg.classList.toggle("mode-on", m === "image");
+    }
+    btnText.addEventListener("click", function () { setMode("text"); });
+    btnImg.addEventListener("click", function () { setMode("image"); });
+    setMode(isImage ? "image" : "text");
+
+    bc.appendChild(el("div", "field-sm", "Условие показа блока"));
+    bc.appendChild(conditionEditor(b.visibleWhen, "blockcond"));
+    var del = el("button", "btn btn-danger btn-sm", "Удалить блок");
+    del.addEventListener("click", function () { bc.remove(); updatePlaceholders(); });
+    bc.appendChild(del);
+    return bc;
+  }
+
+  // Read all block cards inside a container into an array of blocks (text or image).
+  function collectBlocks(container) {
+    var out = [];
+    if (!container) return out;
+    container.querySelectorAll('[data-role="blockcard"]').forEach(function (bc) {
+      var cond = readCondition(bc.querySelector('[data-role="blockcond"]'));
+      if (bc.getAttribute("data-mode") === "image") {
+        var url = bc.getAttribute("data-imgurl");
+        if (!url) return;
+        var w = parseInt((bc.querySelector('[data-role="blockimgw"]') || {}).value, 10) || 100;
+        var blk = { imageUrl: url, imageWidth: w }; if (cond) blk.visibleWhen = cond; out.push(blk);
+      } else {
+        var ed = bc.querySelector('[data-role="blockbody"]');
+        var runs = ed ? editorToRuns(ed) : [];
+        var hasText = runs.some(function (r) { return (r.text || "").trim().length; });
+        if (hasText || cond) { var blk2 = { runs: runs }; if (cond) blk2.visibleWhen = cond; out.push(blk2); }
+      }
+    });
+    return out;
+  }
+
+  // Image picker: choose an uploaded image or upload a new one.
+  function openImagePicker(onPick) {
+    var c = el("div");
+    c.appendChild(el("h3", null, "Выберите картинку"));
+    var grid = el("div", "img-picker-grid");
+    function refresh() {
+      grid.innerHTML = "";
+      // Only formats that can also be embedded in the signed PDF: a GIF or WEBP would be visible
+      // to the signer and missing from the archived document.
+      (state.images || []).forEach(function (im) {
+        if (!im.url || !/\.(png|jpe?g|bmp)$/i.test(im.url)) return;
+        var cell = el("button", "img-picker-cell"); cell.type = "button";
+        var t = el("img"); t.src = im.url; cell.appendChild(t);
+        cell.addEventListener("click", function () { onPick(im.url); closeModal(); });
+        grid.appendChild(cell);
+      });
+      if (!grid.children.length)
+        grid.appendChild(el("p", "sig-meta", "Подходящих картинок нет. Для документа годятся PNG, JPG и BMP - их можно вложить в PDF. Загрузите файл ниже."));
+    }
+    refresh();
+    c.appendChild(grid);
+    var upLabel = el("label", "field", "Загрузить новую картинку");
+    var up = el("input"); up.type = "file"; up.accept = "image/*";
+    up.addEventListener("change", function () {
+      if (!up.files || !up.files[0]) return;
+      var fd = new FormData(); fd.append("file", up.files[0]);
+      fetch("/api/admin/images", { method: "POST", credentials: "same-origin", body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function () { return loadImages(); })
+        .then(function () { refresh(); toast("Картинка загружена"); })
+        .catch(function () { toast("Не удалось загрузить"); });
+    });
+    upLabel.appendChild(up); c.appendChild(upLabel);
+    openModal(c);
+  }
   function renderPages() {
     var wrap = $("pagesEditor"); wrap.innerHTML = "";
     (state.doc.pages || []).forEach(function (page, pi) {
-      var card = el("div", "page-card");
+      var card = el("div", "page-card"); card.setAttribute("data-role", "pagecard");
       var title = el("div", "page-title");
       title.appendChild(el("strong", null, "Страница " + (pi + 1)));
       var delPage = el("button", "btn btn-danger", "Удалить страницу");
       delPage.addEventListener("click", function () { collectDoc(); state.doc.pages.splice(pi, 1); renderPages(); updatePlaceholders(); });
       title.appendChild(delPage); card.appendChild(title);
-      card.appendChild(fieldInput("Заголовок", page.heading || "", "heading"));
-      var body = el("label", "field"); body.textContent = "Текст";
-      var ta = el("textarea"); ta.rows = 4; ta.value = page.body || ""; ta.setAttribute("data-role", "body"); body.appendChild(ta); card.appendChild(body);
+
+      card.appendChild(el("div", "field-sm", "Условие показа страницы"));
+      card.appendChild(conditionEditor(page.visibleWhen, "pagecond"));
+
+      card.appendChild(richEditor("Заголовок", headingRunsOf(page), "heading"));
+
+      card.appendChild(el("div", "field", "Блоки текста"));
+      var blist = el("div", "block-list"); blist.setAttribute("data-role", "blocklist");
+      var blocks = blocksOf(page); if (!blocks.length) blocks = [{ runs: [] }];
+      blocks.forEach(function (b) { blist.appendChild(blockCard(b)); });
+      card.appendChild(blist);
+      var addB = el("button", "btn btn-ghost", "+ Блок текста");
+      addB.addEventListener("click", function () { blist.appendChild(blockCard({ runs: [] })); });
+      card.appendChild(addB);
+
       card.appendChild(el("div", "field", "Чекбоксы"));
       var cbList = el("div", "cb-list"); cbList.setAttribute("data-role", "cblist");
       (page.checkboxes || []).forEach(function (cb) { cbList.appendChild(checkboxRow(cb)); }); card.appendChild(cbList);
@@ -222,9 +571,19 @@
 
       wrap.appendChild(card);
     });
-  }
-  function fieldInput(labelText, value, role) {
-    var label = el("label", "field", labelText); var input = el("input"); input.type = "text"; input.value = value; input.setAttribute("data-role", role); label.appendChild(input); return label;
+
+    // Signature page: custom content (text / image) shown above the signature pad.
+    var signCard = el("div", "page-card sign-page-card");
+    var st = el("div", "page-title"); st.appendChild(el("strong", null, "Страница подписи")); signCard.appendChild(st);
+    signCard.appendChild(el("p", "sig-meta", "Показывается над полем подписи на планшете. Можно добавить текст или картинку (например реквизиты, печать, пояснение)."));
+    signCard.appendChild(el("div", "field", "Блоки (текст / картинка)"));
+    var sblist = el("div", "block-list"); sblist.setAttribute("data-role", "signblocklist");
+    (state.doc.signBlocks || []).forEach(function (b) { sblist.appendChild(blockCard(b)); });
+    signCard.appendChild(sblist);
+    var addSb = el("button", "btn btn-ghost", "+ Блок на странице подписи");
+    addSb.addEventListener("click", function () { sblist.appendChild(blockCard({ runs: [] })); });
+    signCard.appendChild(addSb);
+    wrap.appendChild(signCard);
   }
   function checkboxRow(cb) {
     var row = el("div", "cb-row"); row.setAttribute("data-role", "cbrow");
@@ -240,10 +599,12 @@
     state.doc.title = $("docTitle").value; state.doc.signPrompt = $("signPrompt").value; state.doc.thankYouText = $("thankYou").value;
     state.doc.idleReturnSec = parseInt($("idleReturn").value, 10) || 0;
     var pages = [];
-    document.querySelectorAll("#pagesEditor .page-card").forEach(function (card) {
-      var heading = card.querySelector('[data-role="heading"]').value;
-      var body = card.querySelector('[data-role="body"]').value;
+    document.querySelectorAll('#pagesEditor [data-role="pagecard"]').forEach(function (card) {
+      var hEd = card.querySelector('[data-role="heading"]');
+      var headingRuns = hEd ? editorToRuns(hEd) : [];
+      var pageCond = readCondition(card.querySelector('[data-role="pagecond"]'));
       var includeDynamic = !!(card.querySelector('[data-role="includedynamic"]') || {}).checked;
+      var blocks = collectBlocks(card);
       var checkboxes = [];
       card.querySelectorAll('[data-role="cbrow"]').forEach(function (r) {
         var lab = r.querySelector('[data-role="cblabel"]').value;
@@ -251,12 +612,219 @@
         var chk = !!(r.querySelector('[data-role="cbchecked"]') || {}).checked;
         if (lab.trim()) checkboxes.push({ label: lab, required: req, checked: chk });
       });
-      pages.push({ heading: heading, body: body, checkboxes: checkboxes, includeDynamic: includeDynamic });
+      var page = { heading: "", body: "", headingRuns: headingRuns, blocks: blocks, checkboxes: checkboxes, includeDynamic: includeDynamic };
+      if (pageCond) page.visibleWhen = pageCond;
+      pages.push(page);
     });
     state.doc.pages = pages;
+    state.doc.signBlocks = collectBlocks(document.querySelector('[data-role="signblocklist"]'));
   }
-  $("addPage").addEventListener("click", function () { collectDoc(); state.doc.pages.push({ heading: "Новая страница", body: "", checkboxes: [], includeDynamic: false }); renderPages(); });
+  $("addPage").addEventListener("click", function () { collectDoc(); state.doc.pages.push({ headingRuns: [{ text: "Новая страница" }], blocks: [], checkboxes: [], includeDynamic: false }); renderPages(); });
   $("saveDocument").addEventListener("click", function () { collectDoc(); apiSend("/document", "PUT", state.doc).then(function () { toast("Документ сохранён"); }); });
+
+  // ---- Preview: see the document exactly as the tablet will render it ----
+  // Values are entered by the operator, resolved on the server (same code path as a real show),
+  // and rendered here with the tablet's own markup, so conditions and formatting are truthful.
+  $("previewDoc").addEventListener("click", function () {
+    collectDoc();
+    // Offer BOTH the {{tags}} used in text and the fields used only in conditions: without the
+    // latter the operator could not test which blocks and pages actually appear.
+    openPreviewSetup(previewFields());
+  });
+
+  // Distinct fields the preview should ask for: text placeholders plus condition fields.
+  function previewFields() {
+    var out = [], seen = {};
+    function add(k) {
+      var key = (k || "").trim(); if (!key) return;
+      var lk = key.toLowerCase(); if (seen[lk]) return;
+      seen[lk] = 1; out.push(key);
+    }
+    scanPlaceholders().forEach(add);
+    (state.doc.pages || []).forEach(function (p) {
+      if (p.visibleWhen && p.visibleWhen.field) add(p.visibleWhen.field);
+      (p.blocks || []).forEach(function (b) { if (b.visibleWhen && b.visibleWhen.field) add(b.visibleWhen.field); });
+    });
+    (state.doc.signBlocks || []).forEach(function (b) { if (b.visibleWhen && b.visibleWhen.field) add(b.visibleWhen.field); });
+    return out;
+  }
+
+  function openPreviewSetup(placeholders) {
+    var c = el("div", "preview-setup");
+    c.appendChild(el("h3", null, "Предпросмотр документа"));
+    c.appendChild(el("p", "sig-meta", "Укажите тестовые значения тегов. Документ будет показан так, как его увидит клиент на планшете, включая условия показа блоков и страниц. На планшеты ничего не отправляется."));
+
+    var inputs = {};
+    if (!placeholders.length) c.appendChild(el("p", "sig-meta", "В шаблоне нет тегов - будет показан документ как есть."));
+    placeholders.forEach(function (k) {
+      var f = labeledInput(k, previewDefault(k));
+      f.input.setAttribute("list", "knownFieldsList");
+      c.appendChild(f.wrap); inputs[k] = f.input;
+    });
+
+    var cbLabel = el("label", "field", "Чекбоксы из API (по одному в строке, «+» в начале - отмечен)");
+    var cbArea = el("textarea"); cbArea.rows = 3; cbArea.placeholder = "+Согласен на рассылку\nДополнительное согласие";
+    cbLabel.appendChild(cbArea); c.appendChild(cbLabel);
+
+    var go = el("button", "btn btn-primary", "Показать предпросмотр");
+    go.addEventListener("click", function () {
+      var fields = {}; placeholders.forEach(function (k) { fields[k] = inputs[k].value; });
+      var checkboxes = (cbArea.value || "").split("\n").map(function (line) {
+        var t = line.trim(); if (!t) return null;
+        var checked = t.charAt(0) === "+";
+        return { label: checked ? t.slice(1).trim() : t, checked: checked, required: false };
+      }).filter(Boolean);
+      runPreview(fields, checkboxes);
+    });
+    c.appendChild(go);
+    openModal(c);
+    if (placeholders.length && inputs[placeholders[0]]) inputs[placeholders[0]].focus();
+  }
+
+  // Sensible sample values so the operator can preview without typing everything.
+  function previewDefault(tag) {
+    var map = {
+      "ФИО": "Иванова Анна Петровна", "ДР": "01.01.1990", "Адрес регистрации": "г. Минск, ул. Ленина 1",
+      "ПОЛ": "F", "email": "anna@example.by", "telephone": "+375291234567",
+      "document": "MP1234567", "date": new Date().toLocaleDateString("ru-RU"), "cross-border": "да"
+    };
+    return map[tag] || (/^text\d+$/.test(tag) ? "Текст из внешней системы" : "");
+  }
+
+  function runPreview(fields, checkboxes) {
+    apiSend("/document/preview", "POST", { document: state.doc, fields: fields, checkboxes: checkboxes })
+      .then(function (r) { return r.json(); })
+      .then(function (data) { renderPreview(data, fields, checkboxes); })
+      .catch(function () { /* already reported by api() */ });
+  }
+
+  // Mirrors the tablet renderer (kiosk.js): styled runs, images, checkboxes, page steps.
+  function previewRuns(parent, runs) {
+    (runs || []).forEach(function (r) {
+      String(r && r.text != null ? r.text : "").split("\n").forEach(function (seg, i) {
+        if (i > 0) parent.appendChild(document.createElement("br"));
+        if (!seg.length) return;
+        var span = el("span", r.size === "l" ? "rt-l" : r.size === "h" ? "rt-h" : null, seg);
+        if (r.bold) span.style.fontWeight = "700";
+        if (r.italic) span.style.fontStyle = "italic";
+        if (r.color && /^#[0-9a-fA-F]{6}$/.test(r.color)) span.style.color = r.color;
+        parent.appendChild(span);
+      });
+    });
+  }
+  function previewBlock(parent, b) {
+    if (b && b.imageUrl && /^\/media\/[^/\\]+$/.test(b.imageUrl)) {
+      var fig = el("div", "pv-image");
+      var im = el("img"); im.src = b.imageUrl;
+      im.style.width = Math.min(Math.max(parseInt(b.imageWidth, 10) || 100, 10), 100) + "%";
+      fig.appendChild(im); parent.appendChild(fig);
+    } else {
+      var t = el("div", "pv-text");
+      previewRuns(t, (b && b.runs) || []);
+      parent.appendChild(t);
+    }
+  }
+
+  function renderPreview(data, fields, checkboxes) {
+    var doc = (data && data.document) || { pages: [] };
+    var pages = doc.pages || [];
+    var screens = pages.map(function (_, i) { return { type: "page", index: i }; });
+    screens.push({ type: "signature" });
+    var idx = 0;
+
+    var c = el("div", "preview-wrap");
+    var head = el("div", "pv-head");
+    head.appendChild(el("h3", null, "Предпросмотр: так увидит клиент"));
+    var stats = el("div", "sig-meta",
+      "Страниц показано: " + data.pagesShown + " из " + data.pagesTotal +
+      (data.missingPlaceholders && data.missingPlaceholders.length ? " · Не заполнены: " + data.missingPlaceholders.join(", ") : ""));
+    head.appendChild(stats);
+    c.appendChild(head);
+
+    var frame = el("div", "pv-frame");
+    var title = el("div", "pv-title"); frame.appendChild(title);
+    var progress = el("div", "pv-progress"); frame.appendChild(progress);
+    var body = el("div", "pv-body"); frame.appendChild(body);
+    var footer = el("div", "pv-footer"); frame.appendChild(footer);
+    c.appendChild(frame);
+
+    var back = el("button", "btn btn-ghost", "Назад");
+    var next = el("button", "btn btn-primary", "Далее");
+    footer.appendChild(back); footer.appendChild(next);
+    back.addEventListener("click", function () { if (idx > 0) { idx--; draw(); } });
+    next.addEventListener("click", function () { if (idx < screens.length - 1) { idx++; draw(); } });
+
+    function draw() {
+      var s = screens[idx];
+      title.textContent = doc.title || "";
+      progress.textContent = "Шаг " + (idx + 1) + " из " + screens.length;
+      body.innerHTML = "";
+      if (s.type === "page") {
+        var p = pages[s.index];
+        var h = el("h2", "pv-heading"); previewRuns(h, p.headingRuns || []); body.appendChild(h);
+        (p.blocks || []).forEach(function (b) { previewBlock(body, b); });
+        (p.checkboxes || []).forEach(function (cb) {
+          var row = el("div", "pv-check" + (cb.checked ? " on" : ""));
+          row.appendChild(el("span", "pv-box", cb.checked ? "✓" : ""));
+          row.appendChild(el("span", null, (cb.label || "") + (cb.required ? " *" : "")));
+          body.appendChild(row);
+        });
+      } else {
+        (doc.signBlocks || []).forEach(function (b) { previewBlock(body, b); });
+        body.appendChild(el("div", "pv-prompt", doc.signPrompt || ""));
+        body.appendChild(el("div", "pv-pad", "поле подписи"));
+      }
+      back.disabled = idx === 0;
+      next.disabled = idx === screens.length - 1;
+    }
+    draw();
+
+    var again = el("button", "btn btn-ghost", "Изменить значения");
+    again.addEventListener("click", function () { closeModal(); openPreviewSetup(previewFields()); });
+    c.appendChild(again);
+    openModal(c);
+  }
+
+  // ---- Backup: export all pages to a file, import them back ----
+  // Export saves what is currently in the editor, so unsaved edits are included in the backup.
+  $("exportDoc").addEventListener("click", function () {
+    collectDoc();
+    apiSend("/document", "PUT", state.doc).then(function () {
+      var payload = { kind: "helix-signtablet-document", version: 1, exportedUtc: new Date().toISOString(), document: state.doc };
+      var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      var d = new Date(), p = function (n) { return (n < 10 ? "0" : "") + n; };
+      a.href = url;
+      a.download = "signtablet-document-" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + ".json";
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      toast("Файл с шаблоном сохранён");
+    });
+  });
+
+  $("importDoc").addEventListener("click", function () { $("importDocFile").click(); });
+  $("importDocFile").addEventListener("change", function () {
+    var input = this, file = input.files && input.files[0];
+    if (!file) return;
+    if (!confirm("Импорт заменит все текущие страницы документа на страницы из файла. Продолжить?")) { input.value = ""; return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var parsed;
+      try { parsed = JSON.parse(reader.result); }
+      catch (e) { toast("Файл повреждён: это не JSON"); input.value = ""; return; }
+      // api() already reports a server-side rejection (wrong file, no pages), so success here
+      // means the template really was replaced.
+      apiSend("/document/import", "POST", parsed)
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          return loadDoc().then(function () { toast("Импортировано страниц: " + (j && j.pages != null ? j.pages : "")); });
+        })
+        .catch(function () { /* already reported by api() */ })
+        .then(function () { input.value = ""; });
+    };
+    reader.readAsText(file);
+  });
 
   function doShowDocument(fields) {
     apiSend("/show-document", "POST", { target: state.docTarget, fields: fields })
@@ -428,7 +996,44 @@
       info.appendChild(el("div", "dev-meta", d.online
         ? "Связь: на связи сейчас"
         : "Последняя связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "-")));
-      info.appendChild(el("div", "dev-meta", (d.online ? "Текущий IP: " : "Последний IP: ") + (d.lastIp || "-")));
+      info.appendChild(el("div", "dev-meta", (d.online ? "Текущий IP: " : "Последний IP: ") + (d.lastIp || "-") +
+        (d.controlIp ? "   ·   Адрес управления: " + d.controlIp + (d.controlPort ? ":" + d.controlPort : "") : "")));
+
+      // Health read from the tablet itself (FreeKiosk API), when tablet control is configured.
+      var kc = state.kioskControl || {};
+      var h = d.health;
+      if (h) {
+        if (h.reachable) {
+          var parts = [];
+          var lowBattery = false, lowStorage = false;
+          if (h.batteryPercent != null) {
+            lowBattery = h.batteryPercent <= (kc.batteryWarnPercent != null ? kc.batteryWarnPercent : 20) && h.charging !== true;
+            parts.push("Заряд: " + h.batteryPercent + "%" + (h.charging ? "\u00A0(заряжается)" : ""));
+          }
+          if (h.wifiSignalPercent != null) parts.push("Wi-Fi: " + h.wifiSignalPercent + "%");
+          if (h.storageFreePercent != null) {
+            lowStorage = h.storageFreePercent <= (kc.storageWarnPercent != null ? kc.storageWarnPercent : 10);
+            parts.push("Свободно: " + h.storageFreePercent + "%");
+          }
+          if (h.deviceOwner != null) parts.push("Device\u00A0Owner: " + (h.deviceOwner ? "да" : "нет"));
+          if (h.appVersion) parts.push("FreeKiosk\u00A0" + h.appVersion);
+          // The reading is up to 5 minutes old, and it sits right under the live connection state,
+          // so say when it was taken instead of letting it read as "now".
+          if (h.checkedUtc) parts.push("проверено\u00A0" + new Date(h.checkedUtc).toLocaleTimeString("ru-RU"));
+          if (parts.length) {
+            var row = el("div", "dev-meta dev-health", parts.join("   ·   "));
+            if (lowBattery || lowStorage) row.classList.add("warn");
+            info.appendChild(row);
+          }
+          // The tablet answered but we could not read its reply: that is not a healthy tablet,
+          // and without this line it would look identical to one.
+          if (h.error) info.appendChild(el("div", "dev-meta dev-health warn", h.error));
+        } else if (h.error) {
+          // A tablet that is off or out of range is an everyday state, not an alarm: the loud
+          // version of this belongs to the "tablet off air" alert, not to every card.
+          info.appendChild(el("div", "dev-meta dev-health", "Управление недоступно: " + h.error));
+        }
+      }
       item.appendChild(info);
 
       var actions = el("div", "dev-actions");
@@ -439,6 +1044,14 @@
           .then(function (j) { toast("На планшете «" + d.name + "» показан номер " + j.code); });
       });
       actions.appendChild(bId);
+      // Only offered when tablet control is switched on: otherwise every button in the modal would
+      // answer "управление выключено" and the operator would be left guessing where the switch is.
+      if (kc.enabled) {
+        var bCtl = el("button", "btn btn-ghost btn-sm", "Управление");
+        bCtl.title = "Перезагрузка, перезапуск приложения, очистка кэша, экран, снимок экрана";
+        bCtl.addEventListener("click", function () { openControl(d); });
+        actions.appendChild(bCtl);
+      }
       var bEdit = el("button", "btn btn-ghost btn-sm", "Изменить"); bEdit.addEventListener("click", function () { editDevice(d); }); actions.appendChild(bEdit);
       if (d.status === "revoked") {
         var bUn = el("button", "btn btn-ghost btn-sm", "Разблокировать");
@@ -475,7 +1088,7 @@
     form.appendChild(el("p", "sig-meta", "Заполните и получите код активации. Введите его на планшете один раз."));
     var name = labeledInput("Имя планшета (напр. Ресепшн 1)", "");
     form.appendChild(name.wrap);
-    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "- не привязывать -" }].concat(state.workstations.map(function (w) { return { v: w.id, t: w.name + (w.externalId ? " (" + w.externalId + ")" : "") }; })));
+    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "- не привязывать -" }].concat(state.workstations.map(function (w) { return { v: w.id, t: wsOptionLabel(w) }; })));
     form.appendChild(wsSel.wrap);
     var groupsBox = el("div", "field"); groupsBox.appendChild(document.createTextNode("Группы"));
     var gWrap = el("div", "check-group");
@@ -514,7 +1127,7 @@
     var form = el("div");
     form.appendChild(el("h3", null, "Планшет: " + d.name));
     var name = labeledInput("Имя", d.name); form.appendChild(name.wrap);
-    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "- не привязывать -" }].concat(state.workstations.map(function (w) { return { v: w.id, t: w.name + (w.externalId ? " (" + w.externalId + ")" : "") }; })));
+    var wsSel = labeledSelect("Рабочее место", [{ v: "", t: "- не привязывать -" }].concat(state.workstations.map(function (w) { return { v: w.id, t: wsOptionLabel(w) }; })));
     wsSel.select.value = d.workstationId || ""; form.appendChild(wsSel.wrap);
     var groupsBox = el("div", "field"); groupsBox.appendChild(document.createTextNode("Группы (применятся при след. подключении)"));
     var gWrap = el("div", "check-group");
@@ -615,6 +1228,492 @@
     });
   });
 
+  // ---------------- Tablet control (FreeKiosk API on the tablet) ----------------
+  // Everything here goes server -> tablet over the local network. A tablet that is off or on
+  // another network simply reports as unreachable; nothing about signing is affected.
+  function openControl(d) {
+    var c = el("div", "ctl-wrap");
+    c.appendChild(el("h3", null, "Управление планшетом: " + d.name));
+
+    var status = el("div", "sig-meta", "");
+    c.appendChild(status);
+    function say(msg, bad) { status.textContent = msg; status.classList.toggle("ctl-bad", !!bad); }
+
+    // Address the server uses to reach this tablet.
+    var addr = el("div", "ctl-addr");
+    // Deliberately NOT prefilled with lastIp: saving that would pin the tablet to today's DHCP
+    // lease, and control would quietly break the next time the address changes.
+    var ipField = labeledInput("IP планшета (пусто = определять автоматически)", d.controlIp || "");
+    ipField.input.placeholder = d.lastIp ? "сейчас виден как " + d.lastIp : "например 192.168.1.50";
+    var portField = labeledInput("Порт (пусто = общий из настроек)", d.controlPort || "");
+    addr.appendChild(ipField.wrap); addr.appendChild(portField.wrap);
+    var saveAddr = el("button", "btn btn-ghost btn-sm", "Сохранить адрес");
+    saveAddr.addEventListener("click", function () {
+      apiSend("/devices/" + d.id + "/control-address", "PUT",
+        { ip: ipField.input.value.trim(), port: parseInt(portField.input.value, 10) || null })
+        .then(function () { say("Адрес сохранён."); return loadDevices(); })
+        .catch(function () { /* reported by api() */ });
+    });
+    addr.appendChild(saveAddr);
+    c.appendChild(addr);
+
+    // Live check, so the operator can tell at once whether the address and key are right.
+    var health = el("div", "ctl-health sig-meta", "");
+    c.appendChild(health);
+    function refreshHealth() {
+      health.textContent = "Опрашиваю планшет...";
+      apiJson("/devices/" + d.id + "/kiosk/health")
+        .then(function (h) {
+          if (!h.reachable) {
+            health.textContent = "Планшет не отвечает. " + (h.error || "");
+            health.classList.add("ctl-bad");
+            return;
+          }
+          // The tablet answered but we could not read the reply: say so instead of reporting
+          // a healthy tablet with no readings.
+          if (h.error) { health.textContent = h.error; health.classList.add("ctl-bad"); return; }
+          health.classList.remove("ctl-bad");
+          if (h.brightnessPercent != null) { br.value = h.brightnessPercent; brVal.textContent = h.brightnessPercent + "%"; }
+          var parts = [];
+          if (h.model) parts.push(h.model);
+          if (h.androidVersion) parts.push("Android " + h.androidVersion);
+          if (h.appVersion) parts.push("FreeKiosk " + h.appVersion);
+          if (h.batteryPercent != null) parts.push("заряд " + h.batteryPercent + "%" + (h.charging ? ", заряжается" : ""));
+          if (h.wifiSignalPercent != null) parts.push("Wi-Fi " + h.wifiSignalPercent + "%");
+          if (h.storageFreePercent != null) parts.push("свободно " + h.storageFreePercent + "%");
+          if (h.deviceOwner != null) parts.push("Device Owner: " + (h.deviceOwner ? "включён" : "выключен"));
+          health.textContent = parts.join(" · ") || "Планшет ответил, но не сообщил ни одного показателя.";
+          loadDevices();
+        })
+        .catch(function () { health.textContent = "Не удалось опросить планшет."; health.classList.add("ctl-bad"); });
+    }
+
+    function cmdButton(label, command, cls, confirmText) {
+      var b = el("button", "btn " + (cls || "btn-ghost") + " btn-sm", label);
+      b.addEventListener("click", function () {
+        if (confirmText && !confirm(confirmText)) return;
+        b.disabled = true; say("Выполняю: " + label + "...");
+        apiSend("/devices/" + d.id + "/kiosk/" + command, "POST", {})
+          .then(function () { say(label + ": выполнено."); })
+          .catch(function (e) { say(label + ": не удалось. " + (e && e.message ? e.message : ""), true); })
+          .then(function () { b.disabled = false; });
+      });
+      return b;
+    }
+
+    var grid = el("div", "ctl-grid");
+    grid.appendChild(cmdButton("Обновить страницу", "reload"));
+    grid.appendChild(cmdButton("Очистить кэш", "clear-cache", null,
+      "Очистить кэш планшета? Планшет перезагрузит страницу и заберёт свежую версию."));
+    grid.appendChild(cmdButton("Перезапустить приложение", "restart-app", null,
+      "Перезапустить FreeKiosk на планшете?"));
+    grid.appendChild(cmdButton("Перезагрузить планшет", "reboot", "btn-danger",
+      "Перезагрузить планшет целиком? Это займёт около минуты. Требуется режим Device Owner."));
+    grid.appendChild(cmdButton("Включить экран", "screen-on"));
+    grid.appendChild(cmdButton("Выключить экран", "screen-off"));
+    grid.appendChild(cmdButton("Звуковой сигнал", "beep"));
+    var bHealth = el("button", "btn btn-ghost btn-sm", "Проверить связь");
+    bHealth.addEventListener("click", refreshHealth);
+    grid.appendChild(bHealth);
+    c.appendChild(grid);
+
+    // Brightness
+    var brLabel = el("label", "field-sm", "Яркость экрана");
+    var br = el("input"); br.type = "range"; br.min = "5"; br.max = "100"; br.step = "5"; br.value = "80";
+    var brVal = el("span", "img-wval", "80%");
+    br.addEventListener("input", function () { brVal.textContent = br.value + "%"; });
+    br.addEventListener("change", function () {
+      apiSend("/devices/" + d.id + "/kiosk/brightness", "POST", { value: parseInt(br.value, 10) })
+        .then(function () { say("Яркость: " + br.value + "%"); })
+        .catch(function () { say("Не удалось изменить яркость.", true); });
+    });
+    brLabel.appendChild(br); brLabel.appendChild(brVal);
+    c.appendChild(brLabel);
+
+    // Speak / toast: get the client's attention at the tablet.
+    var sayRow = el("div", "ctl-say");
+    var sayField = labeledInput("Произнести или показать на планшете", "Пожалуйста, подпишите документ");
+    // One field feeds both buttons, so keep to the stricter of the two server limits.
+    sayField.input.maxLength = 200;
+    sayRow.appendChild(sayField.wrap);
+    var bSpeak = el("button", "btn btn-ghost btn-sm", "Произнести");
+    bSpeak.addEventListener("click", function () {
+      apiSend("/devices/" + d.id + "/kiosk/say", "POST", { text: sayField.input.value })
+        .then(function () { say("Произнесено."); }).catch(function () { say("Не удалось произнести.", true); });
+    });
+    var bToast = el("button", "btn btn-ghost btn-sm", "Показать сообщение");
+    bToast.addEventListener("click", function () {
+      apiSend("/devices/" + d.id + "/kiosk/toast", "POST", { text: sayField.input.value })
+        .then(function () { say("Сообщение показано."); }).catch(function () { say("Не удалось показать.", true); });
+    });
+    sayRow.appendChild(bSpeak); sayRow.appendChild(bToast);
+    c.appendChild(sayRow);
+
+    // Screenshot: see what is actually on the tablet right now.
+    var shotWrap = el("div", "ctl-shot");
+    var bShot = el("button", "btn btn-primary btn-sm ctl-shot-btn", "Снимок экрана");
+    var shotImg = el("img", "ctl-shot-img"); shotImg.style.display = "none";
+    var shotGen = 0;
+    bShot.addEventListener("click", function () {
+      var gen = ++shotGen;
+      bShot.disabled = true;
+      say("Снимаю экран...");
+      // Cache-busting so a repeated click always shows the current screen.
+      var url = "/api/admin/devices/" + d.id + "/kiosk/screenshot?t=" + Date.now();
+      fetch(url, { credentials: "same-origin" })
+        .then(function (r) {
+          // The session can expire while the panel is open, exactly as in api().
+          if (r.status === 401) { showLogin(); throw new Error("сессия истекла"); }
+          if (!r.ok) {
+            // An error body is not always JSON (a 404 has no body at all), so read it as text.
+            return r.text().then(function (t) {
+              var msg = ""; try { msg = (JSON.parse(t) || {}).error || ""; } catch (e) { msg = ""; }
+              throw new Error(msg || ("ошибка " + r.status));
+            });
+          }
+          return r.blob();
+        })
+        .then(function (blob) {
+          // A newer click has already been made, or the modal is gone: release this image at once
+          // rather than attaching it to a node nobody will ever revoke.
+          var u = URL.createObjectURL(blob);
+          if (gen !== shotGen || !document.body.contains(shotImg)) { URL.revokeObjectURL(u); return; }
+          if (shotImg.dataset.url) URL.revokeObjectURL(shotImg.dataset.url);
+          shotImg.dataset.url = u; shotImg.src = u; shotImg.style.display = "";
+          say("Экран получен " + new Date().toLocaleTimeString("ru-RU") + ".");
+          // The image lands below the buttons; without this the operator sees no change at all
+          // on a short screen.
+          if (shotImg.scrollIntoView) shotImg.scrollIntoView({ block: "nearest" });
+        })
+        .catch(function (e) { if (gen === shotGen) say("Не удалось получить экран: " + e.message, true); })
+        .then(function () { if (gen === shotGen) bShot.disabled = false; });
+    });
+    shotWrap.appendChild(bShot); shotWrap.appendChild(shotImg);
+    c.appendChild(shotWrap);
+
+    openModal(c);
+    refreshHealth();
+  }
+
+  // Fleet-wide control settings: one address scheme and one key for the whole fleet, plus the
+  // thresholds the monitor uses. The key never comes back from the server, so the field shows
+  // whether one is stored and stays empty unless the operator types a new one.
+  var kcFields = ["kcEnabled", "kcPort", "kcApiKey", "kcTimeout", "kcAutoHeal", "kcHealAfter", "kcBattery", "kcStorage"];
+  var kcDirty = false;
+
+  function loadKioskControl(force) {
+    // Never overwrite what the operator is in the middle of typing. Without this, opening the
+    // tablets tab again would silently drop a half-entered key and they would then save the old
+    // values believing they had saved the new ones.
+    if (kcDirty && !force) return Promise.resolve();
+    return apiJson("/kiosk-control/settings").then(function (s) {
+      state.kioskControl = s;
+      $("kcEnabled").checked = !!s.enabled;
+      $("kcPort").value = s.port;
+      $("kcApiKey").value = "";
+      $("kcApiKey").placeholder = s.apiKeySet ? "ключ сохранён, введите новый для замены" : "пусто = без ключа";
+      $("kcTimeout").value = s.timeoutSec;
+      $("kcAutoHeal").checked = !!s.autoHeal;
+      $("kcHealAfter").value = s.autoHealAfterMinutes;
+      $("kcBattery").value = s.batteryWarnPercent;
+      $("kcStorage").value = s.storageWarnPercent;
+      $("kcClearApiKey").checked = false;
+      $("kcClearApiKey").parentNode.classList.toggle("hidden", !s.apiKeySet);
+      kcDirty = false;
+      renderDevices();
+    }).catch(function (e) { console.error(e); });
+  }
+
+  kcFields.concat(["kcClearApiKey"]).forEach(function (id) {
+    var e = $(id); if (e) e.addEventListener("input", function () { kcDirty = true; });
+    if (e) e.addEventListener("change", function () { kcDirty = true; });
+  });
+
+  // Blank means "use the server default", but an explicit 0 is a real choice (never warn), so a
+  // parsed number is always kept as it is.
+  function kcNumber(id, fallback) {
+    var v = parseInt($(id).value, 10);
+    return isNaN(v) ? fallback : v;
+  }
+
+  $("saveKioskControl").addEventListener("click", function () {
+    apiSend("/kiosk-control/settings", "PUT", {
+      enabled: $("kcEnabled").checked,
+      port: kcNumber("kcPort", 8080),
+      apiKey: $("kcApiKey").value.trim(),
+      clearApiKey: $("kcClearApiKey").checked,
+      timeoutSec: kcNumber("kcTimeout", 5),
+      autoHeal: $("kcAutoHeal").checked,
+      autoHealAfterMinutes: kcNumber("kcHealAfter", 5),
+      batteryWarnPercent: kcNumber("kcBattery", 20),
+      storageWarnPercent: kcNumber("kcStorage", 10)
+    }).then(function () { kcDirty = false; return loadKioskControl(true); })
+      .then(loadDevices)
+      .then(function () { toast("Настройки управления сохранены"); })
+      .catch(function () { /* reported by api() */ });
+  });
+
+  // ---------------- Operator alerts ----------------
+  // The operator is not always looking at this screen, so a new alert can also raise a desktop
+  // notification and a short beep. Both are opt-in and remembered in this browser.
+  var alertPrefs = {
+    desktop: localStorage.getItem("sk_alert_desktop") === "1",
+    sound: localStorage.getItem("sk_alert_sound") === "1"
+  };
+  var knownAlertIds = {};
+  var alertsLoadedOnce = false;
+
+  function loadAlerts() {
+    return apiJson("/alerts").then(function (data) {
+      var list = (data && data.alerts) || [];
+      state.alerts = list;
+      renderAlertBadge(data && data.unacknowledged);
+      // Announce only genuinely new alerts, and never on the first load after opening the page.
+      var fresh = list.filter(function (a) { return !knownAlertIds[a.id]; });
+      var seen = {};
+      list.forEach(function (a) { seen[a.id] = true; });
+      knownAlertIds = seen;
+      if (alertsLoadedOnce && fresh.length) announceAlerts(fresh);
+      alertsLoadedOnce = true;
+      if (!document.querySelector('[data-panel="alerts"]').classList.contains("hidden")) renderAlerts();
+      return true;
+    }).catch(function () { return false; });   // api() already reported it
+  }
+
+  function renderAlertBadge(count) {
+    var b = $("alertBadge"); if (!b) return;
+    var n = count || 0;
+    b.textContent = n;
+    b.classList.toggle("hidden", n === 0);
+  }
+
+  function announceAlerts(fresh) {
+    var first = fresh[0];
+    toast("Уведомление: " + first.title + (fresh.length > 1 ? " (и ещё " + (fresh.length - 1) + ")" : ""));
+    if (alertPrefs.sound) beep();
+    if (alertPrefs.desktop && "Notification" in window && Notification.permission === "granted") {
+      try { new Notification("HELIX SignTablet", { body: first.title + "\n" + (first.detail || "") }); }
+      catch (e) { /* some browsers block it outside a gesture */ }
+    }
+  }
+
+  // Short two-tone beep via WebAudio: no asset to load, works offline.
+  function beep() {
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext; if (!Ctx) return;
+      var ctx = new Ctx(), osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = "sine"; osc.frequency.value = 880;
+      gain.gain.value = 0.05;
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start();
+      setTimeout(function () { osc.frequency.value = 660; }, 120);
+      setTimeout(function () { osc.stop(); ctx.close(); }, 260);
+    } catch (e) { /* audio unavailable */ }
+  }
+
+  function renderAlerts() {
+    var wrap = $("alertsList"); if (!wrap) return;
+    wrap.innerHTML = "";
+    var list = state.alerts || [];
+    if (!list.length) {
+      wrap.appendChild(el("div", "empty-note", "Активных уведомлений нет. Все планшеты на связи, ошибок не накопилось."));
+      return;
+    }
+    list.forEach(function (a) {
+      var item = el("div", "log-item log-" + (a.severity === "error" ? "error" : "warn") + (a.acknowledged ? " acked" : ""));
+      var head = el("div", "log-head");
+      head.appendChild(el("span", "chip " + (a.severity === "error" ? "chip-danger" : "chip-warn"),
+        a.kind === "offline" ? "нет связи" : a.kind === "errors" ? "ошибки"
+          : a.kind === "duplicate" ? "дубль кода" : "проверка"));
+      head.appendChild(el("span", "log-time", "с " + new Date(a.sinceUtc).toLocaleString("ru-RU")));
+      if (a.deviceName) head.appendChild(el("span", "log-device", "Планшет: " + a.deviceName));
+      if (a.acknowledged) head.appendChild(el("span", "log-source", "прочитано"));
+      item.appendChild(head);
+      item.appendChild(el("div", "log-msg", a.title));
+      if (a.detail) item.appendChild(el("div", "sig-meta", a.detail));
+      if (a.kind === "test") {
+        var close = el("button", "btn btn-ghost btn-sm", "Закрыть");
+        close.addEventListener("click", function () {
+          api("/alerts/" + encodeURIComponent(a.id), { method: "DELETE" }).then(loadAlerts).catch(function () {});
+        });
+        item.appendChild(close);
+      }
+      wrap.appendChild(item);
+    });
+  }
+
+  function loadAlertSettings() {
+    return apiJson("/alerts/settings").then(function (s) {
+      $("alertEnabled").checked = s.enabled !== false;
+      $("alertOffline").value = s.offlineMinutes;
+      $("alertErrCount").value = s.errorCount;
+      $("alertErrWindow").value = s.errorWindowMinutes;
+      $("alertDesktop").checked = alertPrefs.desktop;
+      $("alertSound").checked = alertPrefs.sound;
+    }).catch(function () { /* reported by api() */ });
+  }
+
+  $("saveAlertSettings").addEventListener("click", function () {
+    apiSend("/alerts/settings", "PUT", {
+      enabled: $("alertEnabled").checked,
+      offlineMinutes: parseInt($("alertOffline").value, 10) || 10,
+      errorCount: parseInt($("alertErrCount").value, 10) || 5,
+      errorWindowMinutes: parseInt($("alertErrWindow").value, 10) || 10
+    }).then(function () { return loadAlertSettings(); })
+      .then(function () { toast("Настройки сохранены"); })
+      .catch(function () { /* reported by api() */ });
+  });
+  $("alertDesktop").addEventListener("change", function () {
+    alertPrefs.desktop = this.checked;
+    localStorage.setItem("sk_alert_desktop", this.checked ? "1" : "0");
+    if (this.checked && "Notification" in window && Notification.permission === "default")
+      Notification.requestPermission().catch(function () {});
+  });
+  $("alertSound").addEventListener("change", function () {
+    alertPrefs.sound = this.checked;
+    localStorage.setItem("sk_alert_sound", this.checked ? "1" : "0");
+    if (this.checked) beep();
+  });
+  $("testAlert").addEventListener("click", function () {
+    apiSend("/alerts/test", "POST", {}).then(loadAlerts).catch(function () {});
+  });
+  $("ackAlerts").addEventListener("click", function () {
+    apiSend("/alerts/ack", "POST", {}).then(loadAlerts).then(function () { toast("Отмечено"); }).catch(function () {});
+  });
+  $("reloadAlerts").addEventListener("click", function () {
+    loadAlerts().then(function (okResult) { if (okResult) toast("Обновлено"); });
+  });
+
+  // ---------------- Operational logs ----------------
+  var logFilter = { q: "", level: "all" };
+  var logTimer = null;
+
+  function stopLogPolling() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
+  function startLogPolling() {
+    stopLogPolling();
+    if ($("logAuto") && $("logAuto").checked && logsPanelVisible())
+      logTimer = setInterval(function () {
+        if (!logsPanelVisible()) { stopLogPolling(); return; }
+        loadLogs(true);
+      }, 10000);
+  }
+
+  function logsPanelVisible() {
+    var p = document.querySelector('[data-panel="logs"]');
+    return !!p && !p.classList.contains("hidden");
+  }
+
+  function loadLogs(quiet) {
+    var qs = "?level=" + encodeURIComponent(logFilter.level) + "&q=" + encodeURIComponent(logFilter.q) + "&limit=300";
+    return apiJson("/logs" + qs).then(function (data) {
+      state.logs = (data && data.entries) || [];
+      renderLogs(data && data.total);
+      // Only (re)start polling if the operator is still on this tab: the response may arrive after
+      // they have already moved on, and an orphaned interval would poll for the rest of the day.
+      if (!quiet && logsPanelVisible()) startLogPolling();
+      if (!logsPanelVisible()) stopLogPolling();
+      return true;
+    }).catch(function () {
+      // A transient failure must not silently kill auto-refresh: keep polling while the operator
+      // is still on this tab (a 401 already stops it via showLogin).
+      if (!logsPanelVisible()) stopLogPolling();
+      return false;
+    });
+  }
+
+  function renderLogs(total) {
+    var wrap = $("logsList"); if (!wrap) return;
+    wrap.innerHTML = "";
+    var list = state.logs || [];
+    var countEl = $("logsCount");
+    if (countEl) countEl.textContent = list.length ? ("Показано " + list.length + (total != null ? " из " + total : "")) : "";
+    if (!list.length) {
+      wrap.appendChild(el("div", "empty-note", "Записей нет. Это хорошо: сбоев не зафиксировано."));
+      return;
+    }
+    list.forEach(function (e) {
+      var item = el("div", "log-item log-" + (e.level || "error"));
+      var head = el("div", "log-head");
+      head.appendChild(el("span", "chip " + (e.level === "error" ? "chip-danger" : e.level === "warn" ? "chip-warn" : "chip-muted"),
+        e.level === "error" ? "ошибка" : e.level === "warn" ? "предупреждение" : "информация"));
+      head.appendChild(el("span", "log-time", new Date(e.utc).toLocaleString("ru-RU")));
+      var src = e.source === "tablet" ? "планшет" : e.source === "service" ? "сервис" : (e.source || "");
+      head.appendChild(el("span", "log-source", src));
+      if (e.deviceName) head.appendChild(el("span", "log-device", "Планшет: " + e.deviceName));
+      item.appendChild(head);
+      item.appendChild(el("div", "log-msg", e.message || ""));
+      if (e.detail) {
+        var det = document.createElement("details");
+        var sum = document.createElement("summary"); sum.textContent = "Подробности";
+        det.appendChild(sum);
+        det.appendChild(el("pre", "log-detail", e.detail));
+        item.appendChild(det);
+      }
+      wrap.appendChild(item);
+    });
+  }
+
+  $("logSearch").addEventListener("input", function () { logFilter.q = this.value; loadLogs(true); });
+  $("logLevel").addEventListener("change", function () { logFilter.level = this.value; loadLogs(true); });
+  $("logAuto").addEventListener("change", function () { if (this.checked) startLogPolling(); else stopLogPolling(); });
+  // loadLogs resolves with false on failure (api() already showed the error), so do not claim success.
+  $("reloadLogs").addEventListener("click", function () {
+    loadLogs().then(function (okResult) { if (okResult) toast("Обновлено"); });
+  });
+  $("clearLogs").addEventListener("click", function () {
+    if (!confirm("Очистить журнал ошибок? Записи будут удалены безвозвратно.")) return;
+    api("/logs", { method: "DELETE" }).then(function () { return loadLogs(); }).then(function () { toast("Журнал очищен"); });
+  });
+
+  // ---------------- Barcode / QR scanning ----------------
+  // Scanning targets exactly ONE tablet, like the document.
+  function loadScans() {
+    fillDeviceSelect($("scanTarget"), state.scanTarget);
+    state.scanTarget = $("scanTarget").value;
+    return apiJson("/scans").then(function (list) { state.scans = list; renderScans(); });
+  }
+  function renderScans() {
+    var wrap = $("scansList"); if (!wrap) return;
+    wrap.innerHTML = "";
+    var list = state.scans || [];
+    if (!list.length) { wrap.appendChild(el("div", "empty-note", "Считанных кодов пока нет.")); return; }
+    list.forEach(function (s) {
+      var row = el("div", "sig-item");
+      var col = el("div", "sig-col");
+      var code = el("div", "scan-code-row"); code.appendChild(el("strong", null, s.code || ""));
+      if (s.format) code.appendChild(el("span", "chip chip-muted", s.format));
+      col.appendChild(code);
+      var where = [];
+      if (s.deviceName) where.push("Планшет: " + s.deviceName);
+      if (s.workstationName) where.push("Место: " + s.workstationName);
+      col.appendChild(el("div", "sig-meta", new Date(s.createdUtc).toLocaleString("ru-RU") + (where.length ? " · " + where.join(" · ") : "")));
+      row.appendChild(col);
+      var actions = el("div", "dev-actions");
+      var copy = el("button", "btn btn-ghost btn-sm", "Копировать");
+      copy.addEventListener("click", function () { copyText(s.code || ""); });
+      actions.appendChild(copy);
+      var del = el("button", "btn btn-danger btn-sm", "Удалить");
+      del.addEventListener("click", function () { api("/scans/" + s.id, { method: "DELETE" }).then(loadScans).then(function () { toast("Удалено"); }); });
+      actions.appendChild(del);
+      row.appendChild(actions);
+      wrap.appendChild(row);
+    });
+  }
+  $("scanTarget").addEventListener("change", function () { state.scanTarget = this.value; });
+  $("reloadScans").addEventListener("click", function () { loadScans().then(function () { toast("Обновлено"); }); });
+  $("startScan").addEventListener("click", function () {
+    if (!/^device:/.test(state.scanTarget || "")) { toast("Выберите планшет."); return; }
+    apiSend("/scan/start", "POST", { target: state.scanTarget })
+      .then(function () { toast("Сканирование запущено на планшете"); })
+      .catch(function () { /* already reported by api() */ });
+  });
+  $("stopScan").addEventListener("click", function () {
+    if (!/^device:/.test(state.scanTarget || "")) { toast("Выберите планшет."); return; }
+    apiSend("/scan/stop", "POST", { target: state.scanTarget })
+      .then(function () { toast("Сканирование остановлено"); })
+      .catch(function () { /* already reported by api() */ });
+  });
+
   // ---------------- API docs ----------------
   var API_ENDPOINTS = [
     {
@@ -644,8 +1743,23 @@
     },
     {
       method: "POST", path: "/api/ext/show-document",
-      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{ФИО}} и т.п. в шаблоне (текст задаётся в админке) заполняются из fields. Массив checkboxes добавляет пункты согласия: checked - начальное состояние, required - обязателен. Цель: deviceId или workstationExternalId. В ответе missingPlaceholders - какие поля не переданы.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванов Иван","ДР":"01.01.1990","Адрес регистрации":"г. Минск, ул. Ленина 1"},\n       "checkboxes":[{"label":"Согласен на рассылку","checked":false,"required":false}]}\' \\\n  {BASE}/api/ext/show-document'
+      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, ПОЛ (M/F), email, telephone, document, date, cross-border (да/нет), text1..text10. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Массив checkboxes добавляет пункты согласия: checked - начальное состояние (можно прислать отмеченным или пустым), required - обязателен. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId). В ответе missingPlaceholders - какие теги не переданы.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","ПОЛ":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026","cross-border":"да",\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"label":"Согласен на рассылку","checked":false,"required":false}]}\' \\\n  {BASE}/api/ext/show-document'
+    },
+    {
+      method: "POST", path: "/api/ext/scan-request",
+      desc: "Запросить сканирование ШК/QR и ДОЖДАТЬСЯ результата: на планшете открывается камера, клиент показывает код, код возвращается в ответе и сохраняется. Поддерживаются QR, EAN-13, EAN-8, Code-128. Цель: deviceId или workstationExternalId. timeoutSec - сколько ждать (по умолчанию 60, максимум 300). Ответ: { ok, code, format, scanId, createdUtc }. Если код не показали за отведённое время - 408 и камера на планшете закрывается.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204","timeoutSec":60}\' \\\n  {BASE}/api/ext/scan-request'
+    },
+    {
+      method: "POST", path: "/api/ext/scan-cancel",
+      desc: "Отменить сканирование на планшете и вернуть его к обычному экрану.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/scan-cancel'
+    },
+    {
+      method: "GET", path: "/api/ext/scans",
+      desc: "Последние считанные коды (сначала новые). Параметр limit (по умолчанию 50, максимум 500). Подходит, если удобнее опрашивать список, а не ждать ответа scan-request.",
+      sample: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  "{BASE}/api/ext/scans?limit=20"'
     },
     {
       method: "POST", path: "/api/ext/return-slides",
@@ -658,6 +1772,27 @@
     var base = window.location.origin;
     var baseEl = $("apiBaseUrl"); if (baseEl) baseEl.textContent = base;
     var wrap = $("apiDocsList"); if (!wrap) return; wrap.innerHTML = "";
+
+    // Reference: the supported tags, conditions, formatting and checkboxes.
+    var intro = el("div", "api-intro");
+    intro.appendChild(el("h3", null, "Теги (поля) для подстановки"));
+    intro.appendChild(el("p", "api-desc", "Значения передаются в fields запроса show-document, в шаблоне используются как {{тег}}. Неизвестный тег остаётся как есть, поэтому пропущенное поле видно."));
+    var tags = el("div", "api-tags");
+    KNOWN_FIELDS.forEach(function (f) { tags.appendChild(el("code", "ph-tag", "{{" + f + "}}")); });
+    intro.appendChild(tags);
+    intro.appendChild(el("h3", null, "Условия показа блоков и страниц"));
+    intro.appendChild(el("p", "api-desc", "В редакторе документа блок текста или целую страницу можно показывать по условию на тег: равно, не равно, пусто, не пусто, одно из. Пример: блок показывать, если ПОЛ равно F; страницу «Трансграничная передача» - если cross-border равно да."));
+    intro.appendChild(el("h3", null, "Оформление и чекбоксы"));
+    intro.appendChild(el("p", "api-desc", "Текст заголовков и блоков оформляется в редакторе (жирный, курсив, размер, цвет) и так же выводится на планшете и в PDF. В блок можно вставить картинку и задать её ширину. Чекбоксы из API (массив checkboxes) приходят с полем checked - отмеченным или пустым."));
+    intro.appendChild(el("h3", null, "Резервная копия шаблона"));
+    intro.appendChild(el("p", "api-desc", "На вкладке «Документ» кнопки «Экспорт» и «Импорт» сохраняют все страницы в файл и восстанавливают их обратно. Импорт заменяет текущие страницы целиком, поэтому перед правками полезно сделать экспорт."));
+    intro.appendChild(el("h3", null, "Логи"));
+    intro.appendChild(el("p", "api-desc", "Вкладка «Логи» показывает сбои сервиса и планшетов: ошибки отправки подписи, отказ камеры, сбои генерации PDF, перезапуски сервиса. Записи хранятся на сервере и переживают перезапуск."));
+    intro.appendChild(el("h3", null, "Управление планшетами по локальной сети"));
+    intro.appendChild(el("p", "api-desc", "Приложение FreeKiosk на планшете принимает команды по своему адресу в локальной сети (по умолчанию порт 8080). Включите управление на вкладке «Планшеты», и на карточке планшета появится кнопка «Управление»: обновить страницу, очистить кэш, перезапустить приложение, перезагрузить планшет, включить или выключить экран, яркость, звуковой сигнал, произнести текст, показать сообщение, снимок экрана. Сервер сам опрашивает планшеты каждые 5 минут и предупреждает о низком заряде и нехватке места, а при включённом автолечении поднимает зависший планшет: сначала перезапуском приложения, затем перезагрузкой. Если планшет не вернулся и после этого, автолечение останавливается и оператор получает уведомление, что планшет требует осмотра."));
+    intro.appendChild(el("p", "api-desc", "Перезагрузка планшета и надёжное выключение экрана работают, когда FreeKiosk назначен владельцем устройства (Device Owner). Это делается один раз при настройке планшета: на чистом устройстве, без добавленных аккаунтов Google, командой adb shell dpm set-device-owner com.freekiosk/.DeviceAdminReceiver. В том же режиме FreeKiosk блокирует кнопки «Домой» и «Недавние» и шторку уведомлений, поэтому клиент не может выйти из киоска."));
+    wrap.appendChild(intro);
+
     API_ENDPOINTS.forEach(function (ep) {
       var card = el("div", "api-ep");
       var head = el("div", "api-ep-head");
@@ -689,6 +1824,14 @@
   function labeledInput(labelText, value) {
     var wrap = el("label", "field", labelText); var input = el("input"); input.type = "text"; input.value = value; wrap.appendChild(input); return { wrap: wrap, input: input };
   }
+  // Workstation option label: name, external ID and description, so the operator can tell
+  // workstations apart when several share a name.
+  function wsOptionLabel(w) {
+    var parts = [w.name || w.id];
+    if (w.externalId) parts.push("ID: " + w.externalId);
+    if (w.location) parts.push(w.location);
+    return parts.join(" · ");
+  }
   function labeledSelect(labelText, options) {
     var wrap = el("label", "field", labelText); var select = el("select");
     options.forEach(function (o) { select.appendChild(new Option(o.t, o.v)); }); wrap.appendChild(select); return { wrap: wrap, select: select };
@@ -706,25 +1849,49 @@
   // Reconnects for the whole life of the page (24/7): the automatic policy handles brief blips,
   // and onclose re-opens a fresh connection after longer outages (e.g. a server restart), then
   // re-syncs so the dashboard is never left stale.
+  // Exactly ONE live connection per page: re-logging in (session expiry, logout and back) must not
+  // stack connections, or every event would be handled N times.
+  var hub = null;
+  var hubRetry = null;
+
+  function stopHub() {
+    if (hubRetry) { clearTimeout(hubRetry); hubRetry = null; }
+    if (hub) { var old = hub; hub = null; try { old.stop(); } catch (e) { /* ignore */ } }
+  }
+
   function connectHub() {
+    stopHub();
     var conn = new signalR.HubConnectionBuilder()
       .withUrl("/hub/kiosk")
       .withAutomaticReconnect([0, 2000, 5000, 10000, 15000, 30000])
       .configureLogging(signalR.LogLevel.Warning)
       .build();
+    hub = conn;
+    function reconnectLater() { if (hub === conn) { hubRetry = setTimeout(connectHub, 4000); } }
     conn.on("SignatureReceived", function () { toast("Получена новая подпись"); loadSignatures(); });
+    conn.on("ScanReceived", function (s) {
+      toast("Считан код: " + ((s && s.code) || ""));
+      if (!document.querySelector('[data-panel="scan"]').classList.contains("hidden")) loadScans();
+    });
     conn.on("DevicesChanged", function () { loadDevices(); });
+    conn.on("AlertsChanged", function () { loadAlerts(); });
     function reg() { conn.invoke("RegisterAdmin").catch(function () {}); }
-    conn.onreconnected(function () { reg(); loadDevices(); });
-    conn.onclose(function () { setTimeout(connectHub, 4000); });
-    conn.start().then(reg).catch(function () { setTimeout(connectHub, 4000); });
+    conn.onreconnected(function () { reg(); loadDevices(); loadAlerts(); });
+    conn.onclose(reconnectLater);
+    conn.start().then(reg).then(loadAlerts).catch(reconnectLater);
   }
 
   // ---------------- Init ----------------
   function init() {
-    Promise.all([loadGroups(), loadWorkstations(), loadImages(), loadDoc(), loadDevices()])
-      .then(function () { renderTargetOptions(); return loadPlaylist(); })
-      .then(function () { loadSignatures(); connectHub(); })
+    // Realtime first and unconditionally: it drives alerts, live device state and new signatures.
+    // It used to sit behind six data loads, so one transient error left the panel with no live
+    // connection (and no alerts) until the operator reloaded the page.
+    connectHub();
+    var safe = function (fn) { return function () { return fn().catch(function (e) { console.error(e); }); }; };
+    Promise.all([safe(loadGroups)(), safe(loadWorkstations)(), safe(loadImages)(), safe(loadDoc)(),
+      safe(loadDevices)(), safe(loadKioskControl)()])
+      .then(function () { renderTargetOptions(); return safe(loadPlaylist)(); })
+      .then(safe(loadSignatures))
       .catch(function (e) { console.error(e); });
   }
 

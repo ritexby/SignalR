@@ -26,6 +26,20 @@ public class DeviceTracker
         }
     }
 
+    /// <summary>How many live connections a device token currently has. More than one means the
+    /// same token is driving several screens, which the operator is alerted about: a document
+    /// carrying personal data would render on every one of them.</summary>
+    public int ConnectionCount(string deviceId)
+    {
+        lock (_lock) return _connections.TryGetValue(deviceId, out var set) ? set.Count : 0;
+    }
+
+    /// <summary>Device ids currently connected more than once.</summary>
+    public List<string> DuplicateDeviceIds()
+    {
+        lock (_lock) return _connections.Where(kv => kv.Value.Count > 1).Select(kv => kv.Key).ToList();
+    }
+
     /// <summary>Remove a connection. Returns true if the device just went offline.</summary>
     public bool Remove(string deviceId, string connectionId)
     {

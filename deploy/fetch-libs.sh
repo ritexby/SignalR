@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Fetches the two browser libraries the frontend serves locally
-# (@microsoft/signalr, signature_pad) into wwwroot/lib.
+# Fetches the browser libraries the frontend serves locally
+# (@microsoft/signalr, signature_pad, @zxing/browser for barcode/QR scanning) into wwwroot/lib.
 # They are not stored in git; this runs at deploy time (and once for local dev).
 set -euo pipefail
 
@@ -11,6 +11,7 @@ mkdir -p "$LIBDIR"
 
 SIGNALR_VER="${SIGNALR_VER:-10.0.11}"
 SIGPAD_VER="${SIGPAD_VER:-5.1.4}"
+ZXING_VER="${ZXING_VER:-0.2.1}"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -25,6 +26,13 @@ echo "==> Fetching signature_pad@$SIGPAD_VER"
 curl -fsSL "https://registry.npmjs.org/signature_pad/-/signature_pad-${SIGPAD_VER}.tgz" -o "$TMP/sigpad.tgz"
 tar -xzf "$TMP/sigpad.tgz" -C "$TMP"
 cp "$TMP/package/dist/signature_pad.umd.min.js" "$LIBDIR/signature_pad.umd.min.js"
+rm -rf "$TMP/package"
+
+# Barcode / QR scanning on the tablet (QR, EAN-13, EAN-8, Code-128). Self-contained UMD bundle.
+echo "==> Fetching @zxing/browser@$ZXING_VER"
+curl -fsSL "https://registry.npmjs.org/@zxing/browser/-/browser-${ZXING_VER}.tgz" -o "$TMP/zxing.tgz"
+tar -xzf "$TMP/zxing.tgz" -C "$TMP"
+cp "$TMP/package/umd/zxing-browser.min.js" "$LIBDIR/zxing-browser.min.js"
 
 echo "==> Libraries ready in $LIBDIR:"
 ls -la "$LIBDIR"

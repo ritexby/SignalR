@@ -482,8 +482,16 @@ public class StorageService
                 WorkstationId = workstation?.Id,
                 WorkstationName = workstation?.Name,
                 Items = sub.Items ?? new List<SubmittedItem>(),
-                Fields = fields is { Count: > 0 } ? new Dictionary<string, string>(fields) : null
+                Fields = fields is { Count: > 0 } ? new Dictionary<string, string>(fields) : null,
+                SubmissionId = string.IsNullOrWhiteSpace(sub.SubmissionId) ? null : sub.SubmissionId!.Trim()
             };
+            if (rec.SubmissionId is not null && device is not null)
+            {
+                // Keep this cache small: a retry follows within seconds, so old entries are useless,
+                // and the on-disk fallback below still catches anything older.
+                if (_recentSubmissions.Count > 500) _recentSubmissions.Clear();
+                _recentSubmissions[device.Id + "|" + rec.SubmissionId] = rec.Id;
+            }
             Write(Path.Combine(dir, "meta.json"), rec);
             File.WriteAllBytes(Path.Combine(dir, "signature.png"), pngBytes);
             // Persist the exact resolved document so a failed PDF can be regenerated later
@@ -491,6 +499,29 @@ public class StorageService
             Write(Path.Combine(dir, "document.json"), resolvedDoc);
             return rec;
         }
+    }
+
+    // Recent "deviceId|submissionId" -> record id, so a retried submit returns the original record
+    // instead of creating a duplicate. In memory only: a retry follows within seconds, and after a
+    // restart the fallback scan below still finds the record on disk.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _recentSubmissions = new();
+    private readonly DateTime _startedUtc = DateTime.UtcNow;
+
+    /// <summary>The record already stored for this device+submission, or null if this is the first try.</summary>
+    public SignatureRecord? FindSignatureBySubmissionId(string deviceId, string submissionId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId) || string.IsNullOrWhiteSpace(submissionId)) return null;
+        if (_recentSubmissions.TryGetValue(deviceId + "|" + submissionId, out var id))
+        {
+            var known = GetSignature(id);
+            if (known is not null) return known;
+        }
+        // Fallback for a retry that spans a restart. Reading the archive is expensive, so it only
+        // applies in the first minutes of a process: after that, any retry old enough to miss the
+        // in-memory cache is no longer a retry.
+        if (DateTime.UtcNow - _startedUtc > TimeSpan.FromMinutes(5)) return null;
+        return ListSignatures(50)
+            .FirstOrDefault(r => r.DeviceId == deviceId && r.SubmissionId == submissionId);
     }
 
     /// <summary>The exact document that was signed (for faithful PDF regeneration); null if absent.</summary>
@@ -518,25 +549,38 @@ public class StorageService
         }
     }
 
-    public List<SignatureRecord> ListSignatures()
+    /// <summary>
+    /// The most recent signatures, newest first. Record ids start with a sortable timestamp, so the
+    /// newest ones can be picked by directory name and only those files are read. The reads happen
+    /// OUTSIDE the storage lock: this used to read every signature ever taken while holding the one
+    /// lock that signing, device registration and the API all need.
+    /// </summary>
+    public List<SignatureRecord> ListSignatures(int limit = 200)
     {
-        lock (_lock)
+        if (!Directory.Exists(SignaturesDir)) return new List<SignatureRecord>();
+        string[] dirs;
+        try { dirs = Directory.GetDirectories(SignaturesDir); }
+        catch { return new List<SignatureRecord>(); }
+
+        Array.Sort(dirs, (a, b) => string.CompareOrdinal(Path.GetFileName(b), Path.GetFileName(a)));
+        var result = new List<SignatureRecord>();
+        foreach (var dir in dirs)
         {
-            if (!Directory.Exists(SignaturesDir)) return new List<SignatureRecord>();
-            var result = new List<SignatureRecord>();
-            foreach (var dir in Directory.GetDirectories(SignaturesDir))
+            if (result.Count >= Math.Clamp(limit, 1, 5000)) break;
+            var meta = Path.Combine(dir, "meta.json");
+            if (!File.Exists(meta)) continue;
+            try
             {
-                var meta = Path.Combine(dir, "meta.json");
-                if (!File.Exists(meta)) continue;
-                try
+                var rec = JsonSerializer.Deserialize<SignatureRecord>(File.ReadAllText(meta), Json);
+                if (rec != null)
                 {
-                    var rec = JsonSerializer.Deserialize<SignatureRecord>(File.ReadAllText(meta), Json);
-                    if (rec != null) result.Add(rec);
+                    rec.Items = (rec.Items ?? new List<SubmittedItem>()).Where(i => i is not null).ToList();
+                    result.Add(rec);
                 }
-                catch { /* ignore corrupt records in the prototype */ }
             }
-            return result.OrderByDescending(r => r.CreatedUtc).ToList();
+            catch { /* skip a corrupt record rather than failing the whole listing */ }
         }
+        return result.OrderByDescending(r => r.CreatedUtc).ToList();
     }
 
     public SignatureRecord? GetSignature(string id)
@@ -546,7 +590,14 @@ public class StorageService
         {
             var meta = Path.Combine(SignaturesDir, id, "meta.json");
             if (!File.Exists(meta)) return null;
-            try { return JsonSerializer.Deserialize<SignatureRecord>(File.ReadAllText(meta), Json); }
+            try
+            {
+                var rec = JsonSerializer.Deserialize<SignatureRecord>(File.ReadAllText(meta), Json);
+                // A record written before items were validated can contain nulls; drop them so PDF
+                // regeneration and the admin view cannot fail on a legacy record.
+                if (rec is not null) rec.Items = (rec.Items ?? new List<SubmittedItem>()).Where(i => i is not null).ToList();
+                return rec;
+            }
             catch { return null; }
         }
     }
@@ -556,6 +607,133 @@ public class StorageService
         if (!IsSafeId(id)) return null;
         var path = Path.Combine(SignaturesDir, id, "signature.png");
         return File.Exists(path) ? path : null;
+    }
+
+    // ---------------- Alert settings ----------------
+
+    private string AlertSettingsPath => Path.Combine(_dataDir, "alerts.json");
+
+    public AlertSettings GetAlertSettings()
+    {
+        AlertSettings s;
+        lock (_lock) s = ReadOr(AlertSettingsPath, () => new AlertSettings());
+        // Clamp on read as well as on write: a hand-edited file with errorCount = 0 would otherwise
+        // make the burst condition permanently true and leave an alert nothing could clear.
+        s.OfflineMinutes = Math.Clamp(s.OfflineMinutes, 1, 1440);
+        s.ErrorCount = Math.Clamp(s.ErrorCount, 1, 1000);
+        s.ErrorWindowMinutes = Math.Clamp(s.ErrorWindowMinutes, 1, 1440);
+        return s;
+    }
+
+    public void SaveAlertSettings(AlertSettings settings)
+    {
+        // Clamp to sane bounds so a typo cannot disable alerting or make it fire constantly.
+        settings.OfflineMinutes = Math.Clamp(settings.OfflineMinutes, 1, 1440);
+        settings.ErrorCount = Math.Clamp(settings.ErrorCount, 1, 1000);
+        settings.ErrorWindowMinutes = Math.Clamp(settings.ErrorWindowMinutes, 1, 1440);
+        lock (_lock) Write(AlertSettingsPath, settings);
+    }
+
+    // ---------------- Tablet control (FreeKiosk REST API) ----------------
+
+    private string KioskControlPath => Path.Combine(_dataDir, "kioskcontrol.json");
+
+    public KioskControlSettings GetKioskControlSettings()
+    {
+        KioskControlSettings s;
+        lock (_lock) s = ReadOr(KioskControlPath, () => new KioskControlSettings());
+        ClampKioskControl(s);
+        return s;
+    }
+
+    public void SaveKioskControlSettings(KioskControlSettings settings)
+    {
+        ClampKioskControl(settings);
+        lock (_lock) Write(KioskControlPath, settings);
+    }
+
+    // A warning threshold of 100% would be true for every tablet, every time, which is an alert
+    // that can never clear. The same reasoning already applies to the error-burst thresholds.
+    private const int MaxWarnPercent = 90;
+
+    private static void ClampKioskControl(KioskControlSettings s)
+    {
+        s.Port = s.Port is > 0 and < 65536 ? s.Port : 8080;
+        s.TimeoutSec = Math.Clamp(s.TimeoutSec, 1, 30);
+        s.AutoHealAfterMinutes = Math.Clamp(s.AutoHealAfterMinutes, 1, 1440);
+        s.BatteryWarnPercent = Math.Clamp(s.BatteryWarnPercent, 0, MaxWarnPercent);
+        s.StorageWarnPercent = Math.Clamp(s.StorageWarnPercent, 0, MaxWarnPercent);
+        // The key is sent as a header. Control characters would let a value smuggle extra headers
+        // into every request, so they are dropped rather than trusted.
+        var key = (s.ApiKey ?? "").Trim();
+        s.ApiKey = key.Any(char.IsControl) ? new string(key.Where(c => !char.IsControl(c)).ToArray()) : key;
+        if (s.ApiKey.Length > 200) s.ApiKey = s.ApiKey[..200];
+    }
+
+    /// <summary>Set the control address of a tablet (its own IP and, optionally, a custom port).</summary>
+    public bool SetDeviceControlAddress(string id, string? ip, int? port)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(DevicesPath, () => new List<Device>());
+            var dev = list.FirstOrDefault(d => d.Id == id);
+            if (dev == null) return false;
+            dev.ControlIp = string.IsNullOrWhiteSpace(ip) ? null : ip.Trim();
+            dev.ControlPort = port is > 0 and < 65536 ? port : null;
+            Write(DevicesPath, list);
+            return true;
+        }
+    }
+
+    // ---------------- Scans (barcode / QR) ----------------
+
+    private string ScansPath => Path.Combine(_dataDir, "scans.json");
+    // Bounded on purpose: this file is rewritten on every scan, and the storage lock is the same one
+    // authentication and signing use. 1000 records of at most 512 chars keeps it well under a MB.
+    private const int MaxScans = 1000;
+    public const int MaxScanCodeLength = 512;
+
+    /// <summary>Recent scans, newest first (bounded).</summary>
+    public List<ScanRecord> GetScans(int limit = 200)
+    {
+        List<ScanRecord> list;
+        lock (_lock) list = ReadOr(ScansPath, () => new List<ScanRecord>());
+        return list.Take(Math.Clamp(limit, 1, MaxScans)).ToList();
+    }
+
+    public ScanRecord AddScan(string code, string format, Device? device, Workstation? workstation)
+    {
+        var rec = new ScanRecord
+        {
+            Id = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff") + "-" + Guid.NewGuid().ToString("N")[..6],
+            CreatedUtc = DateTime.UtcNow,
+            Code = code.Length <= MaxScanCodeLength ? code : code[..MaxScanCodeLength],
+            Format = format.Length <= 40 ? format : format[..40],
+            DeviceId = device?.Id,
+            DeviceName = device?.Name,
+            WorkstationId = workstation?.Id,
+            WorkstationName = workstation?.Name
+        };
+        lock (_lock)
+        {
+            var list = ReadOr(ScansPath, () => new List<ScanRecord>());
+            list.Insert(0, rec);                                   // newest first
+            if (list.Count > MaxScans) list.RemoveRange(MaxScans, list.Count - MaxScans);
+            Write(ScansPath, list);
+        }
+        return rec;
+    }
+
+    public bool DeleteScan(string id)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(ScansPath, () => new List<ScanRecord>());
+            var n = list.RemoveAll(s => s.Id == id);
+            if (n == 0) return false;
+            Write(ScansPath, list);
+            return true;
+        }
     }
 
     // ---------------- Helpers ----------------

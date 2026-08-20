@@ -10,6 +10,7 @@ public class KioskState
     public int IntervalSec { get; set; } = 6;
     public Dictionary<string, string> Fields { get; set; } = new();       // per-signer values for {{tags}}
     public List<DocCheckbox> DynamicCheckboxes { get; set; } = new();     // per-signer checkboxes from the API
+    public DateTime? DocumentSetUtc { get; set; }                          // when the document was put on this device
 
     public KioskState Clone() => new()
     {
@@ -17,7 +18,8 @@ public class KioskState
         PlaylistImageIds = new List<string>(PlaylistImageIds),
         IntervalSec = IntervalSec,
         Fields = new Dictionary<string, string>(Fields),
-        DynamicCheckboxes = DynamicCheckboxes.Select(c => new DocCheckbox { Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList()
+        DynamicCheckboxes = DynamicCheckboxes.Select(c => new DocCheckbox { Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList(),
+        DocumentSetUtc = DocumentSetUtc
     };
 }
 
@@ -41,6 +43,11 @@ public class Device
     public DateTime EnrolledUtc { get; set; }
     public DateTime LastSeenUtc { get; set; }
     public string? LastIp { get; set; }                       // client IP seen at the last connection
+    // Address of the tablet's own FreeKiosk REST API. Usually the same as LastIp, but it must be
+    // set by hand when the tablet reaches the server through a router, because then LastIp is the
+    // router's address and not the tablet's.
+    public string? ControlIp { get; set; }
+    public int? ControlPort { get; set; }                     // overrides the fleet-wide port
     public string Status { get; set; } = "active";            // "active" | "revoked"
 }
 
@@ -98,10 +105,43 @@ public class DocCheckbox
     public bool Checked { get; set; } = false; // initial state (used by API-supplied checkboxes)
 }
 
+/// <summary>A styled piece of text. Formatting is a curated set so it renders identically on the
+/// tablet and in the PDF: bold, italic, a size keyword ("n"/"l"/"h") and an optional hex colour.</summary>
+public class TextRun
+{
+    public string Text { get; set; } = "";
+    public bool Bold { get; set; }
+    public bool Italic { get; set; }
+    public string? Color { get; set; }   // "#rrggbb" (from the editor palette); null = default text colour
+    public string? Size { get; set; }    // "n" (normal) | "l" (large) | "h" (huge); null/other = normal
+}
+
+/// <summary>A condition on an API field, used to show or hide a block or a whole page.
+/// op: eq | ne | empty | notempty | in. For "in", Value is a comma-separated list.</summary>
+public class VisibleWhen
+{
+    public string Field { get; set; } = "";
+    public string Op { get; set; } = "eq";
+    public string Value { get; set; } = "";
+}
+
+/// <summary>A block inside a page: either rich text (Runs) or an image (ImageUrl). Shown only when
+/// its condition (if any) matches.</summary>
+public class DocBlock
+{
+    public List<TextRun> Runs { get; set; } = new();
+    public string? ImageUrl { get; set; }        // "/media/{file}" when this block is an image
+    public int ImageWidth { get; set; } = 100;   // image width as a percent of the content width (10..100)
+    public VisibleWhen? VisibleWhen { get; set; }
+}
+
 public class DocPage
 {
-    public string Heading { get; set; } = "";
-    public string Body { get; set; } = "";
+    public string Heading { get; set; } = "";                  // legacy plain heading (fallback)
+    public List<TextRun> HeadingRuns { get; set; } = new();    // rich heading
+    public string Body { get; set; } = "";                     // legacy plain body (fallback)
+    public List<DocBlock> Blocks { get; set; } = new();        // rich, optionally-conditional content
+    public VisibleWhen? VisibleWhen { get; set; }              // page-level condition
     public List<DocCheckbox> Checkboxes { get; set; } = new();
     public bool IncludeDynamic { get; set; } = false; // anchor: API-supplied checkboxes render here
 }
@@ -111,8 +151,115 @@ public class DocumentConfig
     public string Title { get; set; } = "Документ";
     public List<DocPage> Pages { get; set; } = new();
     public string SignPrompt { get; set; } = "Пожалуйста, поставьте вашу подпись в поле ниже";
+    public List<DocBlock> SignBlocks { get; set; } = new(); // custom content shown on the signature screen
     public string ThankYouText { get; set; } = "Спасибо! Ваша подпись принята.";
     public int IdleReturnSec { get; set; } = 180; // auto-return to ads after this idle time (0 = off)
+}
+
+/// <summary>
+/// Settings for talking to the FreeKiosk app running on the tablets (its local REST API).
+/// The server must be able to reach the tablet directly on this port, so this only works when the
+/// tablets are on the same network as the server (or reachable over a VPN).
+/// </summary>
+public class KioskControlSettings
+{
+    public bool Enabled { get; set; } = false;      // off until the operator configures the key
+    public int Port { get; set; } = 8080;           // FreeKiosk REST API default
+    public string ApiKey { get; set; } = "";        // sent as X-Api-Key
+    public int TimeoutSec { get; set; } = 5;
+    public bool AutoHeal { get; set; } = false;     // try to revive a tablet that dropped off air
+    public int AutoHealAfterMinutes { get; set; } = 5;
+    public int BatteryWarnPercent { get; set; } = 20;
+    public int StorageWarnPercent { get; set; } = 10;   // free space below this raises an alert
+}
+
+/// <summary>Last known health of a tablet, read from its FreeKiosk API.</summary>
+public class KioskHealth
+{
+    public DateTime CheckedUtc { get; set; }
+    public bool Reachable { get; set; }
+    public string? Error { get; set; }
+    public int? BatteryPercent { get; set; }
+    public bool? Charging { get; set; }
+    public int? WifiSignalPercent { get; set; }
+    public string? WifiSsid { get; set; }
+    public int? StorageFreePercent { get; set; }
+    public int? MemoryFreePercent { get; set; }
+    public int? BrightnessPercent { get; set; }
+    public bool? ScreenOn { get; set; }
+    public bool? DeviceOwner { get; set; }
+    public string? AppVersion { get; set; }
+    public string? AndroidVersion { get; set; }
+    public string? Model { get; set; }
+}
+
+/// <summary>An operational alert the operator must react to (a tablet went off air, errors piling up).</summary>
+public class Alert
+{
+    public string Id { get; set; } = "";          // stable key, e.g. "offline:dev-123" - one alert per cause
+    public string Kind { get; set; } = "";        // offline | errors | test
+    public string Severity { get; set; } = "warn";// warn | error
+    public string Title { get; set; } = "";
+    public string Detail { get; set; } = "";
+    public DateTime SinceUtc { get; set; }        // when the condition started
+    public DateTime UpdatedUtc { get; set; }
+    public string? DeviceId { get; set; }
+    public string? DeviceName { get; set; }
+    public bool Acknowledged { get; set; }        // the operator has seen it; stays until it clears
+}
+
+/// <summary>Operator-configurable alerting thresholds.</summary>
+public class AlertSettings
+{
+    public bool Enabled { get; set; } = true;
+    public int OfflineMinutes { get; set; } = 10;      // alert when a tablet has been off air this long
+    public int ErrorCount { get; set; } = 5;           // alert when this many errors happen...
+    public int ErrorWindowMinutes { get; set; } = 10;  // ...within this window
+}
+
+/// <summary>One operational log entry shown on the admin "Логи" tab.</summary>
+public class LogEntry
+{
+    public long Id { get; set; }
+    public DateTime Utc { get; set; }
+    public string Level { get; set; } = "error";   // error | warn | info
+    public string Source { get; set; } = "";       // server component or "tablet"
+    public string Message { get; set; } = "";
+    public string? Detail { get; set; }            // stack trace / extra context
+    public string? DeviceId { get; set; }
+    public string? DeviceName { get; set; }
+}
+
+public record ClientLogDto(string? Level, string? Message, string? Detail);
+
+/// <summary>A barcode / QR code scanned on a tablet.</summary>
+public class ScanRecord
+{
+    public string Id { get; set; } = "";
+    public DateTime CreatedUtc { get; set; }
+    public string Code { get; set; } = "";        // the decoded payload
+    public string Format { get; set; } = "";      // QR_CODE, EAN_13, EAN_8, CODE_128, ...
+    public string? DeviceId { get; set; }
+    public string? DeviceName { get; set; }
+    public string? WorkstationId { get; set; }
+    public string? WorkstationName { get; set; }
+}
+
+public class ScanSubmission
+{
+    public string Code { get; set; } = "";
+    public string Format { get; set; } = "";
+}
+
+/// <summary>Export/import envelope for the document template, so a backup file can be identified
+/// and validated before it replaces the live template.</summary>
+public class DocumentBackup
+{
+    public const string KindValue = "helix-signtablet-document";
+    public string Kind { get; set; } = KindValue;
+    public int Version { get; set; } = 1;
+    public DateTime ExportedUtc { get; set; }
+    public DocumentConfig? Document { get; set; }
 }
 
 // ---------- Signature submission / record ----------
@@ -127,6 +274,9 @@ public class SignatureSubmission
 {
     public List<SubmittedItem> Items { get; set; } = new();
     public string Signature { get; set; } = ""; // data URL (image/png)
+    // Identifies one signing session. If the response is lost and the tablet retries, the server
+    // returns the record it already stored instead of creating a second, data-less duplicate.
+    public string? SubmissionId { get; set; }
 }
 
 public class SignatureRecord
@@ -140,6 +290,7 @@ public class SignatureRecord
     public string? WorkstationName { get; set; }
     public List<SubmittedItem> Items { get; set; } = new();
     public Dictionary<string, string>? Fields { get; set; } // signer data used to fill {{tags}}
+    public string? SubmissionId { get; set; }               // dedupes a retried submit
 }
 
 // ---------- Realtime payloads (server -> kiosk) ----------
@@ -174,3 +325,13 @@ public record ApiKeyDto(string? Label);
 public record ExtEnrollmentDto(string? WorkstationExternalId, string? Name);
 public record ExtWorkstationAssignDto(string? ExternalId);
 public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes);
+public record ExtScanRequestDto(string? DeviceId, string? WorkstationExternalId, int? TimeoutSec);
+public record AckDto(string? Id);
+public record ControlAddressDto(string? Ip, int? Port);
+/// <summary>What the admin panel sends when saving tablet control settings. The API key is
+/// write-only: blank keeps the stored key, and removing it is an explicit request.</summary>
+public record KioskControlSettingsDto(bool Enabled, int Port, string? ApiKey, bool ClearApiKey,
+    int TimeoutSec, bool AutoHeal, int AutoHealAfterMinutes, int BatteryWarnPercent, int StorageWarnPercent);
+public record ValueDto(int? Value);
+public record TextDto(string? Text);
+public record PreviewDto(DocumentConfig? Document, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes);

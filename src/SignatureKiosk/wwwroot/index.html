@@ -39,6 +39,23 @@
       </form>
     </section>
 
+    <!-- Barcode / QR scanning layer -->
+    <section id="scan" class="layer hidden">
+      <div class="scan-frame">
+        <div class="scan-title">Поднесите код к камере</div>
+        <div class="scan-window">
+          <video id="scanVideo" playsinline muted></video>
+          <div class="scan-reticle"></div>
+        </div>
+        <div id="scanMsg" class="scan-msg"></div>
+        <div id="scanResult" class="scan-result hidden">
+          <div class="scan-check"></div>
+          <div class="scan-ok">Код считан</div>
+          <div id="scanCode" class="scan-code"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- Connection status -->
     <div id="statusOverlay" class="status hidden"><div class="status-box"><span id="statusText"></span></div></div>
 
@@ -51,6 +68,7 @@
 
   <script src="/lib/signalr.min.js"></script>
   <script src="/lib/signature_pad.umd.min.js"></script>
+  <script src="/lib/zxing-browser.min.js"></script>
   <script src="/kiosk.js"></script>
 </body>
 </html>

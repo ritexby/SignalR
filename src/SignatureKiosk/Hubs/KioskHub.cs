@@ -47,6 +47,11 @@ public class KioskHub : Hub
         var ip = ClientIp();
         _storage.TouchDevice(deviceId, ip);
         _tracker.Add(deviceId, Context.ConnectionId, ip);
+        // If the same token drives more than one screen (a cloned image, a token copied off a
+        // tablet), the operator is alerted by AlertMonitor. Deliberately NOT disconnecting the
+        // others: a browser that reloads or a second tab would otherwise silence the real tablet
+        // for good, and a compromised token is fixed by revoking it, not by guessing which screen
+        // is genuine.
         await _coord.NotifyAdminsDevicesAsync();
 
         return _coord.BuildCurrentCommand(deviceId);
@@ -71,10 +76,21 @@ public class KioskHub : Hub
     }
 
     /// <summary>Called by a tablet after a completed signing flow so it returns to the slideshow.</summary>
+    // Identity comes from the token claim, not from Context.Items: after an automatic reconnect the
+    // connection is new and Items is empty until RegisterKiosk finishes, and a call landing in that
+    // window used to succeed while doing nothing, leaving the signer's document on screen.
     public async Task FinishDocument()
     {
-        if (Context.Items.TryGetValue(DeviceItemKey, out var value) && value is string deviceId)
-            await _coord.ReturnToSlidesAsync(deviceId);
+        var deviceId = DeviceId;
+        if (!string.IsNullOrEmpty(deviceId)) await _coord.ReturnToSlidesAsync(deviceId);
+    }
+
+    /// <summary>Called by a tablet once a code has been scanned, so it returns to whatever it
+    /// should be showing (its ads, or the document it was on).</summary>
+    public async Task FinishScan()
+    {
+        var deviceId = DeviceId;
+        if (!string.IsNullOrEmpty(deviceId)) await _coord.StopScanAsync(deviceId);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)

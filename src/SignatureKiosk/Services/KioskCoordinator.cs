@@ -60,9 +60,60 @@ public class KioskCoordinator
         return new SlidesPayload { Images = urls, IntervalSec = state.IntervalSec };
     }
 
+    /// <summary>
+    /// A signer session must not outlive the client. If a tablet is powered off (or crashes) in the
+    /// middle of signing, its client-side idle timer never fires, so the server enforces its own
+    /// ceiling: an abandoned document is dropped rather than shown to whoever comes next.
+    /// </summary>
+    // Deliberately generous: this is a backstop for a tablet that is gone (switched off, crashed,
+    // taken away), not an idle timeout. A tablet that is still connected governs itself with the
+    // operator-configured idle timeout, so a slow signer is never cut off mid-document.
+    private static readonly TimeSpan SignerSessionMaxAge = TimeSpan.FromHours(2);
+
+    private static bool IsExpired(KioskState state) =>
+        state.Mode == "document" && state.DocumentSetUtc is { } set && DateTime.UtcNow - set > SignerSessionMaxAge;
+
+    /// <summary>
+    /// Clear every abandoned signer session, without waiting for the tablet to reconnect. A tablet
+    /// that is switched off (or broken, or returned) mid-signing would otherwise leave the client's
+    /// personal data at rest indefinitely. Returns how many were cleared.
+    /// </summary>
+    public int SweepExpiredSessions()
+    {
+        // Only tablets that are NOT connected: an online tablet is showing the document to someone
+        // right now and manages its own return-to-ads. Sweeping it would wipe the session under an
+        // active signer, whose signature would then be refused.
+        var online = _tracker.OnlineDeviceIds();
+        var candidates = _storage.GetStates().Devices
+            .Where(kv => !online.Contains(kv.Key) && IsExpired(kv.Value))
+            .Select(kv => kv.Key).ToList();
+        if (candidates.Count == 0) return 0;   // never rewrite the file for nothing
+
+        return _storage.MutateStates(states =>
+        {
+            var n = 0;
+            foreach (var deviceId in candidates)
+            {
+                if (!states.Devices.TryGetValue(deviceId, out var s) || !IsExpired(s)) continue;
+                s.Mode = "slides";
+                s.Fields.Clear();
+                s.DynamicCheckboxes.Clear();
+                s.DocumentSetUtc = null;
+                n++;
+            }
+            return n;
+        });
+    }
+
     public CurrentCommand BuildCurrentCommand(string deviceId)
     {
         var state = _storage.ResolveState(deviceId);
+        if (IsExpired(state))
+        {
+            // Abandoned session: clear it now and show ads instead of the previous client's data.
+            ClearSignerSession(deviceId);
+            state = _storage.ResolveState(deviceId);
+        }
         if (state.Mode == "document")
         {
             // Resolve with THIS device's own signer data only, so a tablet never receives
@@ -89,6 +140,7 @@ public class KioskCoordinator
             s.Mode = mode;
             s.Fields = new Dictionary<string, string>(fields);
             s.DynamicCheckboxes = checkboxes.Select(c => new DocCheckbox { Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList();
+            s.DocumentSetUtc = mode == "document" ? DateTime.UtcNow : null;
         }
     }
 
@@ -159,11 +211,30 @@ public class KioskCoordinator
     /// and injecting any per-signer <paramref name="checkboxes"/>. A document is never shown to more
     /// than one tablet: the signer data lives only on this device, so it can never reach anyone else.
     /// </summary>
+    // Signer data is stored per device and re-read on every hub connect, sign and scan-stop, so it
+    // must stay small. These bounds are far above any real consent form.
+    private const int MaxFields = 100;
+    private const int MaxFieldNameLength = 200;
+    private const int MaxFieldValueLength = 4000;
+    private const int MaxDynamicCheckboxes = 100;
+    private const int MaxCheckboxLabelLength = 2000;
+
+    private static string Cut(string? s, int max) =>
+        string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max]);
+
     public async Task ShowDocumentAsync(string deviceId, IReadOnlyDictionary<string, string>? fields = null,
         IReadOnlyList<DocCheckbox>? checkboxes = null)
     {
-        var fieldMap = fields is null ? new Dictionary<string, string>() : new Dictionary<string, string>(fields);
-        var cbs = checkboxes is null ? new List<DocCheckbox>() : checkboxes.ToList();
+        var fieldMap = new Dictionary<string, string>();
+        if (fields is not null)
+            foreach (var kv in fields.Take(MaxFields))
+                fieldMap[Cut(kv.Key, MaxFieldNameLength)] = Cut(kv.Value, MaxFieldValueLength);
+
+        var cbs = (checkboxes ?? Array.Empty<DocCheckbox>())
+            .Where(c => c is not null)
+            .Take(MaxDynamicCheckboxes)
+            .Select(c => new DocCheckbox { Label = Cut(c.Label, MaxCheckboxLabelLength), Required = c.Required, Checked = c.Checked })
+            .ToList();
 
         _storage.MutateStates(states => SetDeviceState(states, new[] { deviceId }, "document", fieldMap, cbs));
 
@@ -198,8 +269,44 @@ public class KioskCoordinator
             s.Mode = "slides";
             s.Fields.Clear();
             s.DynamicCheckboxes.Clear();
+            s.DocumentSetUtc = null;
         });
     }
+
+    /// <summary>
+    /// Ask ONE tablet to open its camera and scan a barcode / QR code. Scanning is a transient
+    /// screen: it is not stored as a mode, so a reconnect returns the tablet to its normal screen
+    /// and no scan session can outlive the tablet's session.
+    /// </summary>
+    public Task StartScanAsync(string deviceId) =>
+        _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("StartScan");
+
+    /// <summary>Cancel scanning on one tablet and return it to whatever it should be showing.</summary>
+    public async Task StopScanAsync(string deviceId)
+    {
+        await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("StopScan");
+        var cmd = BuildCurrentCommand(deviceId);
+        if (cmd.Mode == "document")
+            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", cmd.Document);
+        else
+            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", cmd.Slides);
+    }
+
+    /// <summary>Tell admins the alert set changed so the bell and the alerts page update live.</summary>
+    public Task NotifyAdminsAlertsAsync() => _hub.Clients.Group("admins").SendAsync("AlertsChanged");
+
+    /// <summary>Tell admins a scan arrived so the scan page updates live.</summary>
+    public Task NotifyAdminsScanAsync(ScanRecord rec) =>
+        _hub.Clients.Group("admins").SendAsync("ScanReceived", new
+        {
+            id = rec.Id,
+            createdUtc = rec.CreatedUtc,
+            code = rec.Code,
+            format = rec.Format,
+            deviceId = rec.DeviceId,
+            deviceName = rec.DeviceName,
+            workstationName = rec.WorkstationName
+        });
 
     /// <summary>Flash an identifying marker on one device; returns the code shown so the operator can match it.</summary>
     public async Task<string> IdentifyAsync(string deviceId)
@@ -223,7 +330,7 @@ public class KioskCoordinator
             deviceId = rec.DeviceId,
             deviceName = rec.DeviceName,
             workstationName = rec.WorkstationName,
-            checkedCount = rec.Items.Count(i => i.Checked),
+            checkedCount = rec.Items.Count(i => i is { Checked: true }),
             totalCount = rec.Items.Count
         });
 }

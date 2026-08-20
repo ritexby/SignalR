@@ -21,16 +21,19 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v4.1</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v4.5</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
         <button class="tab" data-tab="signatures">Подписи</button>
+        <button class="tab" data-tab="scan">Сканировать ШК/QR</button>
         <button class="tab" data-tab="devices">Планшеты</button>
         <button class="tab" data-tab="groups">Группы</button>
         <button class="tab" data-tab="workstations">Места</button>
         <button class="tab" data-tab="apikeys">API-ключи</button>
         <button class="tab" data-tab="apidocs">API</button>
+        <button class="tab" data-tab="logs">Логи</button>
+        <button class="tab tab-alerts" data-tab="alerts">Уведомления <span id="alertBadge" class="alert-badge hidden">0</span></button>
       </nav>
       <button id="logout" class="btn btn-ghost">Выйти</button>
     </header>
@@ -71,6 +74,10 @@
             <select id="docTarget"></select>
           </label>
           <div class="toolbar-actions">
+            <button id="previewDoc" class="btn btn-ghost" title="Посмотреть, как документ будет выглядеть на планшете, с тестовыми значениями тегов">Предпросмотр</button>
+            <button id="exportDoc" class="btn btn-ghost" title="Сохранить все страницы в файл как резервную копию">Экспорт</button>
+            <button id="importDoc" class="btn btn-ghost" title="Восстановить страницы из ранее сохранённого файла">Импорт</button>
+            <input id="importDocFile" type="file" accept="application/json,.json" hidden />
             <button id="saveDocument" class="btn btn-ghost">Сохранить</button>
             <button id="showSlides" class="btn btn-ghost">Вернуть рекламу</button>
             <button id="showDocument" class="btn btn-primary">Показать документ</button>
@@ -109,6 +116,29 @@
         <div id="signaturesList" class="sig-list"></div>
       </section>
 
+      <!-- Barcode / QR scanning -->
+      <section class="panel hidden" data-panel="scan">
+        <div class="panel-head">
+          <h2>Сканировать ШК/QR</h2>
+          <button id="reloadScans" class="btn btn-ghost">Обновить</button>
+        </div>
+        <div class="toolbar">
+          <label class="field">Планшет:
+            <select id="scanTarget"></select>
+          </label>
+          <div class="toolbar-actions">
+            <button id="stopScan" class="btn btn-ghost">Остановить</button>
+            <button id="startScan" class="btn btn-primary">Начать сканирование</button>
+          </div>
+        </div>
+        <div class="note-box">
+          На выбранном планшете откроется камера. Поднесите QR или штрихкод (EAN-13, EAN-8, Code-128)
+          к окну на экране. После успешного считывания планшет покажет «Код считан», код сохранится
+          в списке ниже, и планшет вернётся к обычному экрану.
+        </div>
+        <div id="scansList" class="sig-list"></div>
+      </section>
+
       <!-- Devices -->
       <section class="panel hidden" data-panel="devices">
         <div class="panel-head">
@@ -130,6 +160,45 @@
           <span id="devFilterCount" class="filter-count"></span>
         </div>
         <div id="devicesList" class="dev-list"></div>
+
+        <div class="alert-settings">
+          <h3>Управление планшетами по локальной сети</h3>
+          <p class="hint">Приложение FreeKiosk на планшете отвечает на запросы по своему адресу в локальной сети.
+            Включите управление, и на карточке каждого планшета появится кнопка «Управление»: перезагрузка,
+            перезапуск приложения, очистка кэша, экран, яркость, снимок экрана. Сервер и планшеты должны быть в одной сети.</p>
+          <div class="check-group">
+            <label class="check-inline"><input id="kcEnabled" type="checkbox" /> Управление включено</label>
+            <label class="check-inline"><input id="kcAutoHeal" type="checkbox" /> Автоматически лечить зависшие планшеты</label>
+            <label class="check-inline hidden"><input id="kcClearApiKey" type="checkbox" /> Удалить сохранённый ключ API</label>
+          </div>
+          <div class="kc-grid">
+            <label class="field">Порт FreeKiosk
+              <input id="kcPort" type="number" min="1" max="65535" />
+            </label>
+            <label class="field">Ключ API (если задан)
+              <input id="kcApiKey" type="password" autocomplete="new-password" placeholder="пусто = без ключа" />
+            </label>
+            <label class="field">Таймаут ответа, сек
+              <input id="kcTimeout" type="number" min="1" max="30" />
+            </label>
+            <label class="field">Лечить после офлайна, мин
+              <input id="kcHealAfter" type="number" min="1" max="1440" />
+            </label>
+            <label class="field">Предупреждать при заряде ниже, %
+              <input id="kcBattery" type="number" min="0" max="90" />
+            </label>
+            <label class="field">Предупреждать при свободном месте ниже, %
+              <input id="kcStorage" type="number" min="0" max="90" />
+            </label>
+          </div>
+          <div class="toolbar-actions kc-actions">
+            <button id="saveKioskControl" class="btn btn-primary">Сохранить</button>
+          </div>
+          <p class="hint">Автолечение сначала перезапускает приложение на планшете, и только если планшет
+            так и не вышел на связь, перезагружает его целиком. Перезагрузка работает при включённом режиме
+            Device Owner на планшете. После трёх безуспешных попыток автолечение останавливается, и оператор
+            получает уведомление, что планшет требует осмотра.</p>
+        </div>
       </section>
 
       <!-- Groups -->
@@ -175,6 +244,73 @@
         </div>
         <p class="hint">Все запросы к <code>/api/ext/*</code> требуют заголовок <code>X-Api-Key</code> с ключом из вкладки «API-ключи». Базовый адрес: <code id="apiBaseUrl"></code>.</p>
         <div id="apiDocsList" class="api-docs"></div>
+      </section>
+
+      <!-- Operational logs -->
+      <section class="panel hidden" data-panel="logs">
+        <div class="panel-head">
+          <h2>Логи ошибок и сбоев</h2>
+          <button id="reloadLogs" class="btn btn-ghost">Обновить</button>
+        </div>
+        <div class="toolbar">
+          <label class="field grow">Поиск
+            <input id="logSearch" type="search" placeholder="текст, планшет, источник" />
+          </label>
+          <label class="field">Уровень
+            <select id="logLevel">
+              <option value="all">Все</option>
+              <option value="error">Только ошибки</option>
+              <option value="warn">Предупреждения</option>
+              <option value="info">Информация</option>
+            </select>
+          </label>
+          <div class="toolbar-actions">
+            <label class="check-inline"><input id="logAuto" type="checkbox" checked /> Автообновление</label>
+            <button id="clearLogs" class="btn btn-danger">Очистить</button>
+          </div>
+        </div>
+        <p class="hint">Сюда попадают ошибки сервиса (сбои сохранения, генерации PDF, соединений) и сбои планшетов
+          (ошибки на экране, нет доступа к камере, неудачная отправка). Записи хранятся на сервере и переживают перезапуск.</p>
+        <div id="logsCount" class="dev-filter-count"></div>
+        <div id="logsList" class="logs-list"></div>
+      </section>
+
+      <!-- Operator alerts -->
+      <section class="panel hidden" data-panel="alerts">
+        <div class="panel-head">
+          <h2>Уведомления оператору</h2>
+          <div class="toolbar-actions">
+            <button id="testAlert" class="btn btn-ghost">Проверить уведомление</button>
+            <button id="ackAlerts" class="btn btn-ghost">Отметить все прочитанными</button>
+            <button id="reloadAlerts" class="btn btn-ghost">Обновить</button>
+          </div>
+        </div>
+        <p class="hint">Уведомление появляется, когда планшет пропал со связи дольше заданного времени
+          или когда за короткий период накопились ошибки. Оно исчезает само, как только причина устранена.</p>
+        <div id="alertsList" class="logs-list"></div>
+
+        <div class="alert-settings">
+          <h3>Настройки</h3>
+          <div class="toolbar">
+            <label class="check-inline"><input id="alertEnabled" type="checkbox" /> Уведомления включены</label>
+            <label class="field">Планшет офлайн дольше, мин
+              <input id="alertOffline" type="number" min="1" max="1440" />
+            </label>
+            <label class="field">Ошибок подряд
+              <input id="alertErrCount" type="number" min="1" max="1000" />
+            </label>
+            <label class="field">За период, мин
+              <input id="alertErrWindow" type="number" min="1" max="1440" />
+            </label>
+            <div class="toolbar-actions">
+              <button id="saveAlertSettings" class="btn btn-primary">Сохранить</button>
+            </div>
+          </div>
+          <div class="toolbar">
+            <label class="check-inline"><input id="alertDesktop" type="checkbox" /> Показывать системные уведомления браузера</label>
+            <label class="check-inline"><input id="alertSound" type="checkbox" /> Звуковой сигнал</label>
+          </div>
+        </div>
       </section>
     </main>
   </div>

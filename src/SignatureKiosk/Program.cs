@@ -19,6 +19,33 @@ builder.Services.AddSingleton<DeviceTracker>();
 builder.Services.AddSingleton<KioskCoordinator>();
 builder.Services.AddSingleton<TokenAuthService>();
 builder.Services.AddSingleton<PdfService>();
+builder.Services.AddSingleton<ScanBroker>();
+builder.Services.AddSingleton<EventLogService>();
+builder.Services.AddSingleton<AlertService>();
+// Talking to the tablets' own FreeKiosk API (server -> tablet). Kept on its own HttpClient so a
+// slow or unreachable tablet cannot tie up anything else.
+builder.Services.AddHttpClient("freekiosk", c =>
+    {
+        // A tablet answers with a small JSON document. Without a cap, one that streams forever
+        // would be buffered until the timeout, and this is the process that runs signing.
+        c.MaxResponseContentBufferSize = 1024 * 1024;
+    })
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        // Never follow a redirect. The address is checked before the call, but .NET re-sends our
+        // headers to whatever a redirect points at, so one misbehaving tablet could otherwise walk
+        // the fleet API key to any host it likes, or turn this into a call to an internal service.
+        AllowAutoRedirect = false,
+        // Tablets are on the local network; a proxy configured for outbound internet traffic must
+        // never see these requests.
+        UseProxy = false,
+        ConnectTimeout = TimeSpan.FromSeconds(5)
+    });
+builder.Services.AddSingleton<FreeKioskClient>();
+builder.Services.AddSingleton<KioskHealthCache>();
+builder.Services.AddHostedService<AlertMonitor>();
+// Mirror server warnings/errors into the operator-visible log ("Логи" tab).
+builder.Services.AddSingleton<ILoggerProvider>(sp => new EventLogProvider(sp.GetRequiredService<EventLogService>()));
 
 builder.Services.AddAuthentication(SkAuthHandler.SchemeName)
     .AddScheme<AuthenticationSchemeOptions, SkAuthHandler>(SkAuthHandler.SchemeName, null);
@@ -48,12 +75,35 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("login", Fixed(10));    // admin password guesses
     options.AddPolicy("enroll", Fixed(20));   // activation-code redemption
     options.AddPolicy("sign", Fixed(60));     // signature submissions (bursty by design)
+    // Diagnostics get their own budget: a tablet stuck in an error loop must never exhaust the
+    // limit that signature submissions depend on (a whole site can share one public IP).
+    options.AddPolicy("diag", Fixed(30));
+    // External integrations: generous for normal use, but bounded so a runaway caller cannot
+    // starve the storage lock that signing depends on.
+    options.AddPolicy("ext", Fixed(600));
+    // Scanning gets its own budget so a tablet stuck in a scan loop cannot consume the permits
+    // that signature submission depends on (a whole site can share one public IP).
+    options.AddPolicy("scan", Fixed(60));
 });
 
 var app = builder.Build();
 
 var storage = app.Services.GetRequiredService<StorageService>();
 var tracker = app.Services.GetRequiredService<DeviceTracker>();
+// Resolve the event log now so its ILoggerProvider is live from the very first request, and
+// record the restart: for a 24/7 fleet an unexpected restart is itself an operational event.
+var eventLog = app.Services.GetRequiredService<EventLogService>();
+eventLog.Add("info", "service", "Сервис запущен");
+app.Lifetime.ApplicationStopping.Register(() => eventLog.Add("info", "service", "Сервис остановлен"));
+
+// Any unhandled failure returns a JSON body instead of an empty 500, so the admin panel and the
+// tablets can show something useful. The failure itself is already mirrored into the event log.
+app.UseExceptionHandler(branch => branch.Run(async context =>
+{
+    context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+    context.Response.ContentType = "application/json; charset=utf-8";
+    await context.Response.WriteAsJsonAsync(new { error = "Внутренняя ошибка сервера. Подробности во вкладке «Логи»." });
+}));
 
 var adminPassword = app.Configuration["AdminPassword"];
 if (string.IsNullOrWhiteSpace(adminPassword) || adminPassword == "admin")
@@ -160,6 +210,12 @@ app.MapPost("/api/kiosk/enroll", (EnrollRequest req) =>
     return Results.Ok(new { deviceId = device.Id, name = device.Name, token });
 }).RequireRateLimiting("enroll");
 
+// A hand-drawn signature is a few tens of KB; anything far larger is a malformed or hostile
+// payload that would otherwise be written to disk and embedded in a PDF.
+const int MaxSignaturePngBytes = 2 * 1024 * 1024;
+// The same bound expressed on the encoded data URL, checked before decoding.
+const int MaxSignatureDataUrlChars = 3 * 1024 * 1024;
+
 // ==================== Device-authenticated: submit signature ====================
 
 app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskCoordinator coord, PdfService pdf) =>
@@ -167,9 +223,104 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
     if (sub is null || string.IsNullOrWhiteSpace(sub.Signature))
         return Results.BadRequest(new { error = "signature required" });
 
+    // Check the encoded size before decoding: a huge data URL would otherwise be materialised in
+    // full (tens of MB) only to be rejected afterwards.
+    if (sub.Signature.Length > MaxSignatureDataUrlChars)
+        return Results.BadRequest(new { error = "signature image too large" });
+    if ((sub.SubmissionId?.Length ?? 0) > 128)
+        return Results.BadRequest(new { error = "invalid submissionId" });
+
     var png = DecodeDataUrlPng(sub.Signature);
     if (png is null || !IsPng(png))
         return Results.BadRequest(new { error = "invalid signature image" });
+    if (png.Length > MaxSignaturePngBytes)
+        return Results.BadRequest(new { error = "signature image too large" });
+
+    // Reject a malformed item list at the door: a null element used to be stored and then threw on
+    // every later read of the signatures list, which no endpoint could repair.
+    var items = sub.Items ?? new List<SubmittedItem>();
+    if (items.Count > 200 || items.Any(i => i is null || (i.Label?.Length ?? 0) > 2000))
+        return Results.BadRequest(new { error = "invalid items" });
+
+    var deviceId = ctx.User.FindFirst("device_id")?.Value;
+    if (deviceId is null) return Results.BadRequest(new { error = "device required" });
+
+    var submissionId = sub.SubmissionId?.Trim();
+    var cleared = false;
+    try
+    {
+        var state = storage.ResolveState(deviceId);
+        var signing = state.Mode == "document";
+
+        // A record already stored for this submission means the signing session that produced it is
+        // finished (the session is cleared immediately after storing).
+        var existing = string.IsNullOrEmpty(submissionId)
+            ? null
+            : storage.FindSignatureBySubmissionId(deviceId, submissionId);
+
+        if (existing is not null)
+        {
+            // The tablet lost the response and retried: hand back the original record. If a NEW
+            // document is already on this tablet, this is a stale replay from a previous client:
+            // refuse it and leave the current signer's session untouched.
+            if (signing)
+                return Results.Json(new { error = "stale submission: another document is open" },
+                    statusCode: StatusCodes.Status409Conflict);
+            cleared = true;                       // nothing to clear: the tablet is on slides
+            return Results.Ok(new { id = existing.Id, duplicate = true });
+        }
+
+        // A signature only means something while this tablet is actually showing a document. A
+        // submit outside that window (a retry after the session was cleared, or a stray call) would
+        // otherwise be stored with no signer data and raw {{tags}} in the PDF, which looks like a
+        // valid consent record but is worthless.
+        if (!signing)
+            return Results.Json(new { error = "no document is being signed on this tablet" },
+                statusCode: StatusCodes.Status409Conflict);
+
+        var device = storage.GetDevice(deviceId);
+        Workstation? ws = device?.WorkstationId is null
+            ? null
+            : storage.GetWorkstations().FirstOrDefault(w => w.Id == device.WorkstationId);
+
+        // Resolve the document with THIS device's signer data so the PDF and the stored record
+        // show the real values, not the {{tags}}.
+        var fields = state.Fields is { Count: > 0 } ? state.Fields : null;
+        var resolvedDoc = DocumentTemplating.Resolve(storage.GetDocument(), fields, state.DynamicCheckboxes);
+        var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, fields);
+
+        // The record is safely stored: from here the signer's data may leave the tablet.
+        ClearSession();
+
+        try { pdf.Generate(rec, resolvedDoc, png); }
+        catch (Exception ex) { app.Logger.LogError(ex, "PDF generation failed for {Id}", rec.Id); }
+
+        await coord.NotifyAdminsSignatureAsync(rec);
+        return Results.Ok(new { id = rec.Id });
+    }
+    finally
+    {
+        // Privacy above all: whatever happened, the signer's data leaves this tablet. Otherwise a
+        // failed submit would leave one client's document there for the next person to see.
+        ClearSession();
+    }
+
+    void ClearSession()
+    {
+        if (cleared) return;
+        cleared = true;
+        try { coord.ClearSignerSession(deviceId); }
+        catch (Exception ex) { app.Logger.LogError(ex, "Failed to clear signer session for {Device}", deviceId); }
+    }
+}).RequireAuthorization("Device").RequireRateLimiting("sign");
+
+// ==================== Device-authenticated: submit a scanned code ====================
+
+app.MapPost("/api/scan", async (ScanSubmission sub, HttpContext ctx, KioskCoordinator coord, ScanBroker broker) =>
+{
+    var code = (sub?.Code ?? "").Trim();
+    if (code.Length == 0) return Results.BadRequest(new { error = "code required" });
+    if (code.Length > StorageService.MaxScanCodeLength) return Results.BadRequest(new { error = "code too long" });
 
     var deviceId = ctx.User.FindFirst("device_id")?.Value;
     var device = deviceId is null ? null : storage.GetDevice(deviceId);
@@ -177,23 +328,30 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         ? null
         : storage.GetWorkstations().FirstOrDefault(w => w.Id == device.WorkstationId);
 
-    // Resolve the document with THIS device's signer data so the PDF and the stored record
-    // show the real values, not the {{tags}}.
-    var state = deviceId is null ? null : storage.ResolveState(deviceId);
-    var fields = state?.Fields is { Count: > 0 } ? state.Fields : null;
-    var resolvedDoc = DocumentTemplating.Resolve(storage.GetDocument(), fields, state?.DynamicCheckboxes);
-    var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, fields);
-
-    try { pdf.Generate(rec, resolvedDoc, png); }
-    catch (Exception ex) { app.Logger.LogError(ex, "PDF generation failed for {Id}", rec.Id); }
-
-    // Privacy: clear this device's signer data and drop it out of document mode immediately, so a
-    // reconnect during the local thank-you screen cannot redisplay the signed data.
-    if (deviceId is not null) coord.ClearSignerSession(deviceId);
-
-    await coord.NotifyAdminsSignatureAsync(rec);
+    var rec = storage.AddScan(code, (sub?.Format ?? "").Trim(), device, ws);
+    // Hand the code to an external caller that asked for it and is waiting right now.
+    if (deviceId is not null) broker.Publish(deviceId, rec);
+    await coord.NotifyAdminsScanAsync(rec);
     return Results.Ok(new { id = rec.Id });
-}).RequireAuthorization("Device").RequireRateLimiting("sign");
+}).RequireAuthorization("Device").RequireRateLimiting("scan");
+
+// ==================== Device-authenticated: report a tablet-side failure ====================
+
+// A tablet reports its own errors (JS exceptions, camera denied, failed submits) so the operator
+// sees fleet problems on the "Логи" tab instead of having to inspect each device.
+app.MapPost("/api/log", (ClientLogDto dto, HttpContext ctx, EventLogService logs) =>
+{
+    var message = (dto?.Message ?? "").Trim();
+    if (message.Length == 0) return Results.BadRequest(new { error = "message required" });
+
+    var deviceId = ctx.User.FindFirst("device_id")?.Value;
+    var deviceName = ctx.User.FindFirst("name")?.Value;
+    var level = (dto?.Level ?? "error").Trim().ToLowerInvariant();
+    if (level != "warn" && level != "info") level = "error";
+
+    logs.Add(level, "tablet", message, dto?.Detail, deviceId, deviceName);
+    return Results.Ok(new { ok = true });
+}).RequireAuthorization("Device").RequireRateLimiting("diag");
 
 // ==================== Admin authentication ====================
 
@@ -228,10 +386,11 @@ app.MapGet("/api/admin/me", (HttpContext ctx) =>
 var admin = app.MapGroup("/api/admin").RequireAuthorization("Admin");
 
 // ---- Devices ----
-admin.MapGet("/devices", () =>
+admin.MapGet("/devices", (KioskHealthCache healthCache) =>
 {
     var online = tracker.OnlineDeviceIds();
     var liveIps = tracker.OnlineIps();
+    var healthById = healthCache.All();
     var groups = storage.GetGroups().ToDictionary(g => g.Id, g => g.Name);
     var wss = storage.GetWorkstations().ToDictionary(w => w.Id, w => w);
     var devices = storage.GetDevices()
@@ -256,6 +415,9 @@ admin.MapGet("/devices", () =>
                 online = isOnline,
                 d.LastSeenUtc,
                 lastIp = ip,
+                d.ControlIp,
+                d.ControlPort,
+                health = healthById.TryGetValue(d.Id, out var h) ? h : null,
                 d.EnrolledUtc
             };
         });
@@ -378,8 +540,288 @@ admin.MapGet("/document", () => Results.Ok(storage.GetDocument()));
 admin.MapPut("/document", (DocumentConfig? doc) =>
 {
     if (doc is null) return Results.BadRequest(new { error = "document required" });
+    DocumentTemplating.Sanitize(doc);
+    var badImages = DocumentTemplating.UnsupportedImages(doc);
+    if (badImages.Count > 0)
+        return Results.BadRequest(new
+        {
+            error = "Эти картинки нельзя использовать в документе: их не удастся вложить в PDF. " +
+                    "Подойдут PNG, JPG или BMP. Проблемные файлы: " + string.Join(", ", badImages)
+        });
     storage.SaveDocument(doc);
     return Results.Ok(new { ok = true });
+});
+
+// The documented set of API fields (tags) so the editor and integrators use the same names.
+admin.MapGet("/document/fields", () => Results.Ok(new { fields = DocumentTemplating.KnownFields }));
+
+// Preview: resolve the template with operator-supplied test values EXACTLY as a tablet would see
+// it (tags substituted, conditions applied, API checkboxes injected), without touching any tablet
+// and without storing anything. If a document is posted, the unsaved editor state is previewed.
+admin.MapPost("/document/preview", (PreviewDto? dto) =>
+{
+    var doc = dto?.Document ?? storage.GetDocument();
+    DocumentTemplating.Sanitize(doc);
+    var resolved = DocumentTemplating.Resolve(doc, dto?.Fields, dto?.Checkboxes);
+    return Results.Ok(new
+    {
+        document = resolved,
+        placeholders = DocumentTemplating.Placeholders(doc),
+        missingPlaceholders = DocumentTemplating.Missing(doc, dto?.Fields),
+        pagesTotal = (doc.Pages ?? new List<DocPage>()).Count,
+        pagesShown = resolved.Pages.Count
+    });
+});
+
+// ---- Tablet control through the FreeKiosk REST API on each tablet ----
+// Every call goes server -> tablet, so it only works while the tablets are reachable on the
+// network. A failure here never affects signing: it is reported and nothing else.
+// The key is write-only, like every other secret here: it goes out as "set or not set", never as
+// the value itself, so an open admin screen does not put the fleet credential on display.
+static object KioskControlView(KioskControlSettings s) => new
+{
+    s.Enabled, s.Port, s.TimeoutSec, s.AutoHeal, s.AutoHealAfterMinutes,
+    s.BatteryWarnPercent, s.StorageWarnPercent,
+    ApiKeySet = !string.IsNullOrEmpty(s.ApiKey)
+};
+
+admin.MapGet("/kiosk-control/settings", () => Results.Ok(KioskControlView(storage.GetKioskControlSettings())));
+
+admin.MapPut("/kiosk-control/settings", (KioskControlSettingsDto? dto, KioskHealthCache healthCache) =>
+{
+    if (dto is null) return Results.BadRequest(new { error = "settings required" });
+    var current = storage.GetKioskControlSettings();
+    var settings = new KioskControlSettings
+    {
+        Enabled = dto.Enabled,
+        Port = dto.Port,
+        TimeoutSec = dto.TimeoutSec,
+        AutoHeal = dto.AutoHeal,
+        AutoHealAfterMinutes = dto.AutoHealAfterMinutes,
+        BatteryWarnPercent = dto.BatteryWarnPercent,
+        StorageWarnPercent = dto.StorageWarnPercent,
+        // Blank means "leave the stored key alone"; clearing it is an explicit request.
+        ApiKey = dto.ClearApiKey ? "" : string.IsNullOrEmpty(dto.ApiKey) ? current.ApiKey : dto.ApiKey
+    };
+    storage.SaveKioskControlSettings(settings);
+
+    // Readings taken through the old address or key describe a state we can no longer verify, so
+    // drop them. Changing only a threshold leaves the readings on the cards where they were.
+    var saved = storage.GetKioskControlSettings();
+    if (saved.Enabled != current.Enabled || saved.Port != current.Port || saved.ApiKey != current.ApiKey)
+        healthCache.Clear();
+
+    return Results.Ok(KioskControlView(saved));
+});
+
+// Where to reach this tablet (its own IP), when it differs from the address the server sees.
+admin.MapPut("/devices/{id}/control-address", async (string id, ControlAddressDto? dto,
+    KioskCoordinator coord, KioskHealthCache healthCache) =>
+{
+    var ip = dto?.Ip?.Trim();
+    // An empty value clears the override and falls back to the address the tablet connected from.
+    if (!string.IsNullOrEmpty(ip) && !FreeKioskClient.IsUsableTabletAddress(ip, out _))
+        return Results.BadRequest(new { error = "Укажите IP-адрес планшета в локальной сети, например 192.168.1.50." });
+    if (!storage.SetDeviceControlAddress(id, ip, dto?.Port)) return Results.NotFound();
+    // The old reading came from the old address; it says nothing about the new one.
+    healthCache.Forget(id);
+    await coord.NotifyAdminsDevicesAsync();
+    return Results.Ok(new { ok = true });
+});
+
+// The commands an operator can trigger from a device card. Mapped explicitly (no free-form path
+// from the client) so a request can never be turned into an arbitrary call to the tablet.
+var kioskCommands = new Dictionary<string, (string Path, string Title)>(StringComparer.OrdinalIgnoreCase)
+{
+    ["reboot"] = ("/api/reboot", "Перезагрузка планшета"),
+    ["restart-app"] = ("/api/restart-ui", "Перезапуск приложения"),
+    ["reload"] = ("/api/reload", "Обновление страницы"),
+    ["clear-cache"] = ("/api/clearCache", "Очистка кэша"),
+    ["screen-on"] = ("/api/screen/on", "Включение экрана"),
+    ["screen-off"] = ("/api/screen/off", "Выключение экрана"),
+    ["beep"] = ("/api/audio/beep", "Звуковой сигнал"),
+    ["wake"] = ("/api/wake", "Пробуждение")
+};
+
+admin.MapPost("/devices/{id}/kiosk/{command}", async (string id, string command, FreeKioskClient kiosk, EventLogService logs) =>
+{
+    var dev = storage.GetDevice(id);
+    if (dev is null) return Results.NotFound();
+    if (!kioskCommands.TryGetValue(command, out var cmd))
+        return Results.BadRequest(new { error = "Неизвестная команда." });
+
+    var res = await kiosk.SendAsync(dev, cmd.Path);
+    logs.Add(res.Ok ? "info" : "warn", "control",
+        cmd.Title + (res.Ok ? " выполнена" : " не удалась: " + res.Error), null, dev.Id, dev.Name);
+    return res.Ok
+        ? Results.Ok(new { ok = true })
+        : Results.Json(new { error = res.Error }, statusCode: StatusCodes.Status502BadGateway);
+});
+
+admin.MapPost("/devices/{id}/kiosk/brightness", async (string id, ValueDto? dto, FreeKioskClient kiosk) =>
+{
+    var dev = storage.GetDevice(id);
+    if (dev is null) return Results.NotFound();
+    var value = Math.Clamp(dto?.Value ?? 100, 0, 100);
+    var res = await kiosk.SendAsync(dev, "/api/brightness", HttpMethod.Post, new { brightness = value, value });
+    return res.Ok ? Results.Ok(new { ok = true, value })
+                  : Results.Json(new { error = res.Error }, statusCode: StatusCodes.Status502BadGateway);
+});
+
+admin.MapPost("/devices/{id}/kiosk/volume", async (string id, ValueDto? dto, FreeKioskClient kiosk) =>
+{
+    var dev = storage.GetDevice(id);
+    if (dev is null) return Results.NotFound();
+    var value = Math.Clamp(dto?.Value ?? 50, 0, 100);
+    var res = await kiosk.SendAsync(dev, "/api/volume", HttpMethod.Post, new { volume = value, value });
+    return res.Ok ? Results.Ok(new { ok = true, value })
+                  : Results.Json(new { error = res.Error }, statusCode: StatusCodes.Status502BadGateway);
+});
+
+admin.MapPost("/devices/{id}/kiosk/say", async (string id, TextDto? dto, FreeKioskClient kiosk) =>
+{
+    var dev = storage.GetDevice(id);
+    if (dev is null) return Results.NotFound();
+    var text = (dto?.Text ?? "").Trim();
+    if (text.Length == 0 || text.Length > 500) return Results.BadRequest(new { error = "Текст обязателен (до 500 символов)." });
+    var res = await kiosk.SendAsync(dev, "/api/tts", HttpMethod.Post, new { text, locale = "ru-RU" });
+    return res.Ok ? Results.Ok(new { ok = true })
+                  : Results.Json(new { error = res.Error }, statusCode: StatusCodes.Status502BadGateway);
+});
+
+admin.MapPost("/devices/{id}/kiosk/toast", async (string id, TextDto? dto, FreeKioskClient kiosk) =>
+{
+    var dev = storage.GetDevice(id);
+    if (dev is null) return Results.NotFound();
+    var text = (dto?.Text ?? "").Trim();
+    if (text.Length == 0 || text.Length > 200) return Results.BadRequest(new { error = "Текст обязателен (до 200 символов)." });
+    var res = await kiosk.SendAsync(dev, "/api/toast", HttpMethod.Post, new { text, message = text });
+    return res.Ok ? Results.Ok(new { ok = true })
+                  : Results.Json(new { error = res.Error }, statusCode: StatusCodes.Status502BadGateway);
+});
+
+// Live health snapshot straight from the tablet (also used to verify the address is right).
+admin.MapGet("/devices/{id}/kiosk/health", async (string id, FreeKioskClient kiosk, KioskHealthCache healthCache) =>
+{
+    var dev = storage.GetDevice(id);
+    if (dev is null) return Results.NotFound();
+    var health = await kiosk.GetHealthAsync(dev);
+    // This is the freshest reading there is, so the tablet card shows it too without waiting
+    // for the next monitor pass.
+    healthCache.Set(dev.Id, health);
+    return Results.Ok(health);
+});
+
+// What the tablet is actually showing right now.
+admin.MapGet("/devices/{id}/kiosk/screenshot", async (string id, FreeKioskClient kiosk) =>
+{
+    var dev = storage.GetDevice(id);
+    if (dev is null) return Results.NotFound();
+    var (bytes, contentType, error) = await kiosk.GetBytesAsync(dev, "/api/screenshot");
+    return bytes is null
+        ? Results.Json(new { error }, statusCode: StatusCodes.Status502BadGateway)
+        : Results.File(bytes, contentType ?? "image/png");
+});
+
+// ---- Operator alerts ----
+admin.MapGet("/alerts", (AlertService alerts) =>
+    Results.Ok(new { unacknowledged = alerts.UnacknowledgedCount, alerts = alerts.List() }));
+
+admin.MapPost("/alerts/ack", async (AlertService alerts, KioskCoordinator coord, AckDto? dto) =>
+{
+    if (string.IsNullOrWhiteSpace(dto?.Id)) alerts.AcknowledgeAll(); else alerts.Acknowledge(dto.Id!);
+    await coord.NotifyAdminsAlertsAsync();
+    return Results.Ok(new { ok = true });
+});
+
+admin.MapGet("/alerts/settings", () => Results.Ok(storage.GetAlertSettings()));
+
+admin.MapPut("/alerts/settings", (AlertSettings? settings) =>
+{
+    if (settings is null) return Results.BadRequest(new { error = "settings required" });
+    storage.SaveAlertSettings(settings);
+    return Results.Ok(storage.GetAlertSettings());
+});
+
+// Raise a harmless test alert so the operator can check that notifications reach them.
+admin.MapPost("/alerts/test", async (AlertService alerts, KioskCoordinator coord) =>
+{
+    // A fixed id: pressing the button repeatedly refreshes one test alert instead of piling up
+    // entries that nothing ever clears.
+    alerts.Raise("test:manual", "test", "warn",
+        "Тестовое уведомление", "Проверка: уведомления доходят до оператора. Можно закрыть.", DateTime.UtcNow);
+    await coord.NotifyAdminsAlertsAsync();
+    return Results.Ok(new { ok = true });
+});
+
+admin.MapDelete("/alerts/{id}", async (string id, AlertService alerts, KioskCoordinator coord) =>
+{
+    var cleared = alerts.Clear(id);
+    if (cleared) await coord.NotifyAdminsAlertsAsync();
+    return cleared ? Results.Ok(new { ok = true }) : Results.NotFound();
+});
+
+// ---- Operational log ----
+admin.MapGet("/logs", (EventLogService logs, string? level, string? q, int? limit) =>
+    Results.Ok(new { total = logs.Count, entries = logs.List(level, q, limit ?? 300) }));
+
+admin.MapDelete("/logs", (EventLogService logs) => { logs.Clear(); return Results.Ok(new { ok = true }); });
+
+// ---- Barcode / QR scanning ----
+// Scanning always targets exactly ONE tablet (the operator picks it), like the document.
+admin.MapPost("/scan/start", async (TargetDto? dto, KioskCoordinator coord) =>
+{
+    var deviceId = DeviceFromTarget(dto?.Target);
+    if (deviceId is null) return Results.BadRequest(new { error = "Выберите планшет для сканирования." });
+    await coord.StartScanAsync(deviceId);
+    return Results.Ok(new { ok = true, deviceId });
+});
+
+admin.MapPost("/scan/stop", async (TargetDto? dto, KioskCoordinator coord) =>
+{
+    var deviceId = DeviceFromTarget(dto?.Target);
+    if (deviceId is null) return Results.BadRequest(new { error = "Выберите планшет." });
+    await coord.StopScanAsync(deviceId);
+    return Results.Ok(new { ok = true, deviceId });
+});
+
+admin.MapGet("/scans", (int? limit) => Results.Ok(storage.GetScans(Math.Clamp(limit ?? 200, 1, 1000))));
+admin.MapDelete("/scans/{id}", (string id) =>
+    storage.DeleteScan(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
+
+// ---- Document backup: export the whole template to a file, import it back ----
+// Export is a plain JSON snapshot with a kind/version header so an import can be validated.
+admin.MapGet("/document/export", () =>
+{
+    var doc = storage.GetDocument();
+    var payload = new DocumentBackup
+    {
+        Kind = DocumentBackup.KindValue,
+        Version = 1,
+        ExportedUtc = DateTime.UtcNow,
+        Document = doc
+    };
+    var json = System.Text.Json.JsonSerializer.Serialize(payload,
+        new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web) { WriteIndented = true });
+    var name = "signtablet-document-" + DateTime.Now.ToString("yyyyMMdd-HHmm") + ".json";
+    return Results.File(System.Text.Encoding.UTF8.GetBytes(json), "application/json", name);
+});
+
+// Import replaces the current template with a previously exported one (restore a backup).
+admin.MapPost("/document/import", (DocumentBackup? backup) =>
+{
+    var doc = backup?.Document;
+    if (backup is null || doc is null || !string.Equals(backup.Kind, DocumentBackup.KindValue, StringComparison.Ordinal))
+        return Results.BadRequest(new { error = "Это не файл шаблона документа HELIX SignTablet." });
+    if (backup.Version is < 1 or > 1)
+        return Results.BadRequest(new { error = "Версия файла шаблона не поддерживается." });
+    // Validate AFTER sanitising: a file whose pages are all unusable would otherwise pass the check
+    // and then replace the working template with an empty one.
+    DocumentTemplating.Sanitize(doc);
+    if (doc.Pages.Count == 0)
+        return Results.BadRequest(new { error = "В файле нет ни одной пригодной страницы документа." });
+    storage.SaveDocument(doc);
+    return Results.Ok(new { ok = true, pages = doc.Pages.Count });
 });
 
 // Placeholders currently used in the template, so operators and integrators know which
@@ -409,11 +851,13 @@ admin.MapPost("/show-slides", async (TargetDto dto, KioskCoordinator coord) =>
 });
 
 // ---- Signatures ----
-admin.MapGet("/signatures", () =>
-    Results.Ok(storage.ListSignatures().Select(r => new
+// Newest first, bounded: after a year of use the archive holds tens of thousands of records and
+// returning all of them would stall every other storage operation.
+admin.MapGet("/signatures", (int? limit) =>
+    Results.Ok(storage.ListSignatures(Math.Clamp(limit ?? 200, 1, 1000)).Select(r => new
     {
         r.Id, r.CreatedUtc, r.DocumentTitle, r.DeviceId, r.DeviceName, r.WorkstationName,
-        checkedCount = r.Items.Count(i => i.Checked), totalCount = r.Items.Count
+        checkedCount = r.Items.Count(i => i is { Checked: true }), totalCount = r.Items.Count
     })));
 
 admin.MapGet("/signatures/{id}", (string id) =>
@@ -450,7 +894,9 @@ admin.MapGet("/signatures/{id}/pdf", (string id, PdfService pdf) =>
 
 // ==================== External integration API (X-Api-Key) ====================
 
-var ext = app.MapGroup("/api/ext").AddEndpointFilter(async (ctx, next) =>
+// The external API is rate limited too: without it a flood of requests (even ones with a bad key)
+// would contend for the same storage lock that signing and tablet registration need.
+var ext = app.MapGroup("/api/ext").RequireRateLimiting("ext").AddEndpointFilter(async (ctx, next) =>
 {
     var key = ctx.HttpContext.Request.Headers["X-Api-Key"].ToString();
     if (!storage.ValidateApiKey(key))
@@ -547,6 +993,53 @@ ext.MapPost("/show-document", async (ExtShowDocumentDto dto, KioskCoordinator co
     var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
     return Results.Ok(new { ok = true, deviceId, missingPlaceholders = missing });
 });
+
+// Ask a tablet to scan a barcode / QR code and WAIT for the result, returning the code in the
+// response. The tablet opens its camera, the client shows the code, and it comes back here.
+// timeoutSec (default 60, max 300) bounds the wait so the caller is never blocked indefinitely.
+ext.MapPost("/scan-request", async (ExtScanRequestDto dto, KioskCoordinator coord, ScanBroker broker, HttpContext ctx) =>
+{
+    var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
+    if (deviceId is null) return Results.Json(new { error }, statusCode: status);
+
+    var timeout = TimeSpan.FromSeconds(Math.Clamp(dto?.TimeoutSec ?? 60, 5, 300));
+    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+    cts.CancelAfter(timeout);
+
+    // Register the waiter BEFORE telling the tablet to scan, so a very fast scan cannot be missed.
+    var wait = broker.Wait(deviceId, cts.Token);
+    await coord.StartScanAsync(deviceId);
+
+    try
+    {
+        var rec = await wait;
+        return Results.Ok(new { ok = true, deviceId, code = rec.Code, format = rec.Format, scanId = rec.Id, createdUtc = rec.CreatedUtc });
+    }
+    catch (OperationCanceledException)
+    {
+        // The client went away: do not touch the tablet and do not write to a dead connection.
+        if (ctx.RequestAborted.IsCancellationRequested) return Results.Empty;
+
+        // Only close the camera if nobody else is waiting for this tablet. A newer request may have
+        // superseded this one, and stopping the camera would cancel THAT scan mid-air.
+        if (!broker.IsWaiting(deviceId)) await coord.StopScanAsync(deviceId);
+        return Results.Json(new { ok = false, deviceId, error = "timeout: код не был отсканирован" },
+            statusCode: StatusCodes.Status408RequestTimeout);
+    }
+});
+
+// Cancel a scan in progress on a tablet.
+ext.MapPost("/scan-cancel", async (ExtShowDocumentDto dto, KioskCoordinator coord) =>
+{
+    var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
+    if (deviceId is null) return Results.Json(new { error }, statusCode: status);
+    await coord.StopScanAsync(deviceId);
+    return Results.Ok(new { ok = true, deviceId });
+});
+
+// Recent scans (newest first), so an integrator can poll instead of waiting.
+ext.MapGet("/scans", (int? limit) =>
+    Results.Ok(storage.GetScans(Math.Clamp(limit ?? 50, 1, 500))));
 
 // Return one tablet to advertising and clear its signer data.
 ext.MapPost("/return-slides", async (ExtShowDocumentDto dto, KioskCoordinator coord) =>

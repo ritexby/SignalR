@@ -1,4 +1,5 @@
 using System.Reflection;
+using Microsoft.Extensions.Logging;
 using PdfSharp;
 using PdfSharp.Drawing;
 using PdfSharp.Fonts;
@@ -14,13 +15,19 @@ namespace SignatureKiosk.Services;
 /// </summary>
 public class PdfService
 {
+    /// <summary>Upper bound on image blocks rendered into one PDF, so a pathological document
+    /// cannot make a single signature consume hundreds of MB.</summary>
+    private const int MaxImageBlocks = 30;
+
     private readonly StorageService _storage;
+    private readonly ILogger<PdfService>? _log;
     private static bool _fontsReady;
     private static readonly object _fontLock = new();
 
-    public PdfService(StorageService storage)
+    public PdfService(StorageService storage, ILogger<PdfService>? logger = null)
     {
         _storage = storage;
+        _log = logger;
         EnsureFonts();
     }
 
@@ -63,10 +70,40 @@ public class PdfService
             w.Gap(12);
         }
 
+        // Images referenced by blocks must stay alive until Save (PDFsharp reads them lazily), and
+        // each distinct file is decoded ONCE: the same logo repeated across a document used to be
+        // decoded per block, which under concurrent signing could take hundreds of MB.
+        var keepImages = new Dictionary<string, XImage>(StringComparer.Ordinal);
+        var imageBlocks = 0;
+        void RenderBlocks(IEnumerable<DocBlock> blocks)
+        {
+            foreach (var block in blocks)
+            {
+                if (block is null) continue;
+                if (!string.IsNullOrEmpty(block.ImageUrl))
+                {
+                    if (imageBlocks >= MaxImageBlocks) continue;   // bounded work per document
+                    var file = MediaFile(block.ImageUrl);
+                    if (file == null) continue;
+                    if (!keepImages.TryGetValue(file, out var xi))
+                    {
+                        // Skip an image PDFsharp cannot decode rather than failing the whole PDF.
+                        try { xi = XImage.FromFile(file); }
+                        catch (Exception ex) { _log?.LogWarning(ex, "Skipping undecodable image {File} in PDF", file); continue; }
+                        keepImages[file] = xi;
+                    }
+                    imageBlocks++;
+                    w.BlockImage(xi, block.ImageWidth);
+                }
+                else if (block.Runs is { Count: > 0 }) { w.Rich(block.Runs, isHeading: false); w.Gap(8); }
+            }
+        }
+
         foreach (var page in doc.Pages ?? new List<DocPage>())
         {
-            if (!string.IsNullOrWhiteSpace(page.Heading)) { w.Line(page.Heading, w.H2); w.Gap(2); }
-            if (!string.IsNullOrWhiteSpace(page.Body)) { w.Paragraph(page.Body, w.Body); w.Gap(8); }
+            var heading = DocumentTemplating.HeadingRuns(page);
+            if (heading.Count > 0) { w.Rich(heading, isHeading: true); w.Gap(2); }
+            RenderBlocks(DocumentTemplating.Blocks(page));
         }
 
         if (rec.Items is { Count: > 0 })
@@ -75,20 +112,58 @@ public class PdfService
             w.Line("Отмеченные пункты:", w.H2);
             w.Gap(3);
             foreach (var it in rec.Items)
-                w.Paragraph((it.Checked ? "[X]  " : "[  ]  ") + it.Label, w.Body);
+            {
+                if (it is null) continue;   // tolerate a record stored before items were validated
+                w.Paragraph((it.Checked ? "[X]  " : "[  ]  ") + (it.Label ?? ""), w.Body);
+            }
         }
+
+        // Custom signature-page content (text / images) authored in the admin.
+        if (doc.SignBlocks is { Count: > 0 }) { w.Gap(6); RenderBlocks(doc.SignBlocks); }
 
         w.Gap(26);
         // PDFsharp calls MemoryStream.GetBuffer(), which requires a publicly-visible buffer.
         using var ms = new MemoryStream(signaturePng, 0, signaturePng.Length, writable: false, publiclyVisible: true);
-        var img = XImage.FromStream(ms);
-        w.Signature("Подпись клиента:", img);
+        // If the signature image cannot be decoded, still produce the PDF (with the document text,
+        // signer data and checked items) and say so in it: losing the whole record would be worse.
+        // The PNG itself is always kept alongside the record either way.
+        XImage? img = null;
+        try { img = XImage.FromStream(ms); }
+        catch (Exception ex) { _log?.LogWarning(ex, "Signature image could not be decoded for {Id}", rec.Id); }
 
-        // ms and img must stay alive across Save: PDFsharp reads the image bytes lazily there.
-        pdf.Save(path);
-        w.Finish();
-        img.Dispose();
-        return path;
+        if (img is not null) w.Signature("Подпись клиента:", img);
+        else
+        {
+            w.Line("Подпись клиента:", w.H2);
+            w.Gap(3);
+            w.Paragraph("Изображение подписи не удалось встроить в PDF. Оригинал подписи сохранён в записи и доступен в админке.", w.Body);
+        }
+
+        try
+        {
+            // ms and images must stay alive across Save: PDFsharp reads the image bytes lazily there.
+            pdf.Save(path);
+            return path;
+        }
+        finally
+        {
+            // Release everything even if Save throws (disk full, unwritable path): otherwise a
+            // failing generation stranded every decoded image until the next collection.
+            w.Finish();
+            img?.Dispose();
+            foreach (var xi in keepImages.Values) xi.Dispose();
+            pdf.Dispose();
+        }
+    }
+
+    /// <summary>Map a block's "/media/{file}" reference to a real file under the image store, or null.</summary>
+    private string? MediaFile(string? url)
+    {
+        var clean = DocumentTemplating.CleanImageUrl(url);
+        if (clean is null) return null;
+        var name = clean["/media/".Length..];
+        var path = Path.Combine(_storage.ImagesDir, name);
+        return File.Exists(path) ? path : null;
     }
 
     // ---------- Simple top-to-bottom flow with word wrap and pagination ----------
@@ -157,6 +232,101 @@ public class PdfService
                 }
                 if (line.Length > 0) Draw(line, font);
             }
+        }
+
+        // ---------- Rich runs (bold / italic / size / colour) ----------
+        private readonly Dictionary<(double, bool), XFont> _fontCache = new();
+
+        private XFont FontFor(double sizePt, bool bold)
+        {
+            var key = (sizePt, bold);
+            if (!_fontCache.TryGetValue(key, out var f))
+                _fontCache[key] = f = new XFont("DejaVu", sizePt, bold ? XFontStyleEx.Bold : XFontStyleEx.Regular);
+            return f;
+        }
+
+        private static double SizePt(string? size, bool heading) => size switch
+        {
+            "l" => heading ? 18 : 15,
+            "h" => heading ? 24 : 20,
+            _ => heading ? 14 : 11
+        };
+
+        private static XBrush BrushFor(string? color)
+        {
+            if (!string.IsNullOrEmpty(color) && color.Length == 7 && color[0] == '#'
+                && int.TryParse(color.AsSpan(1, 2), System.Globalization.NumberStyles.HexNumber, null, out var r)
+                && int.TryParse(color.AsSpan(3, 2), System.Globalization.NumberStyles.HexNumber, null, out var g)
+                && int.TryParse(color.AsSpan(5, 2), System.Globalization.NumberStyles.HexNumber, null, out var b))
+                return new XSolidBrush(XColor.FromArgb(r, g, b));
+            return XBrushes.Black;
+        }
+
+        /// <summary>Render a list of styled runs with word-wrap and pagination. Italic is simulated with
+        /// a shear, since no proportional italic face is embedded, so this stays a single-font document.</summary>
+        public void Rich(List<TextRun> runs, bool isHeading)
+        {
+            var pending = new List<(string text, XFont font, XBrush brush, bool italic, double x, double w)>();
+            double x = Margin, lineH = 0;
+
+            void Flush()
+            {
+                if (pending.Count == 0) return;
+                double h = lineH * 1.2;
+                Ensure(h);
+                double baseline = _y + lineH;
+                foreach (var t in pending) DrawWord(t.text, t.font, t.brush, t.italic, t.x, baseline);
+                _y += h;
+                pending.Clear(); x = Margin; lineH = 0;
+            }
+
+            foreach (var run in runs ?? new List<TextRun>())
+            {
+                var font = FontFor(SizePt(run.Size, isHeading), isHeading || run.Bold);
+                var brush = BrushFor(run.Color);
+                double space = _gfx.MeasureString(" ", font).Width;
+                var segments = (run.Text ?? "").Replace("\r", "").Split('\n');
+                for (int si = 0; si < segments.Length; si++)
+                {
+                    if (si > 0) Flush(); // an explicit newline inside the run ends the line
+                    foreach (var word in segments[si].Split(' '))
+                    {
+                        if (word.Length == 0) continue;
+                        double ww = _gfx.MeasureString(word, font).Width;
+                        double sp = pending.Count > 0 ? space : 0;
+                        if (pending.Count > 0 && x + sp + ww > Margin + _contentW) { Flush(); sp = 0; }
+                        x += sp;
+                        pending.Add((word, font, brush, run.Italic, x, ww));
+                        x += ww;
+                        lineH = Math.Max(lineH, font.GetHeight());
+                    }
+                }
+            }
+            Flush();
+        }
+
+        private void DrawWord(string text, XFont font, XBrush brush, bool italic, double x, double baseline)
+        {
+            if (!italic) { _gfx.DrawString(text, font, brush, new XPoint(x, baseline)); return; }
+            var state = _gfx.Save();
+            _gfx.TranslateTransform(x, baseline);
+            _gfx.MultiplyTransform(new XMatrix(1, 0, -0.22, 1, 0, 0)); // shear -> right-leaning italic
+            _gfx.DrawString(text, font, brush, new XPoint(0, 0));
+            _gfx.Restore(state);
+        }
+
+        /// <summary>Draw a block image scaled to a percent of the content width, capped to the page.</summary>
+        public void BlockImage(XImage img, int widthPct)
+        {
+            if (img.PixelWidth <= 0 || img.PixelHeight <= 0) return;
+            double pct = Math.Clamp(widthPct <= 0 ? 100 : widthPct, 10, 100) / 100.0;
+            double dw = _contentW * pct;
+            double dh = dw * img.PixelHeight / img.PixelWidth;
+            double maxH = _pageH - 2 * Margin;
+            if (dh > maxH) { double k = maxH / dh; dh *= k; dw *= k; }
+            Ensure(dh + 8);
+            _gfx.DrawImage(img, Margin, _y, dw, dh);
+            _y += dh + 8;
         }
 
         public void Signature(string label, XImage img)
