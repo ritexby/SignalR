@@ -121,8 +121,19 @@ html, body {
   box-shadow: 0 0 0 3px rgba(255,255,255,.12), 0 18px 50px rgba(0,0,0,.6);
 }
 .scan-window video { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* The front camera faces the client, so an untouched preview moves the opposite way to their
+   hand and aiming a code becomes guesswork. Mirroring it makes the window behave like a mirror,
+   as every camera app does. Purely visual: the decoder reads the raw frames, not the CSS. */
+.scan-window video.mirrored { transform: scaleX(-1); }
 .scan-reticle { position: absolute; inset: 12%; border: 3px solid var(--accent); border-radius: 14px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.25); pointer-events: none; }
 .scan-msg { color: #cbd5e1; font-size: 1.05rem; min-height: 1.3em; text-align: center; }
+/* Which camera reads a barcode depends on the tablet and on how it is mounted, so the client can
+   switch on the spot. Sized for a finger, like everything else the client touches. */
+.scan-flip {
+  appearance: none; border: 1px solid #475569; background: #1e293b; color: #e2e8f0;
+  border-radius: 12px; padding: 14px 26px; font-size: 1.05rem; font-weight: 600; cursor: pointer;
+}
+.scan-flip:active { background: #334155; }
 .scan-result { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .scan-check { width: 68px; height: 68px; border-radius: 50%; background: var(--ok); position: relative; }
 .scan-check::after { content: ""; position: absolute; left: 50%; top: 47%; width: 17px; height: 33px; border: solid #fff; border-width: 0 6px 6px 0; transform: translate(-50%, -50%) rotate(45deg); }
@@ -150,3 +161,12 @@ html, body {
 @media (prefers-reduced-motion: reduce){ .identify { animation: none; } }
 .identify-code { font-size: min(46vw, 46vh); font-weight: 800; line-height: 1; letter-spacing: .02em; }
 .identify-name { font-size: clamp(1.2rem, 4vw, 2rem); opacity: .9; }
+
+/* Custom content under the signature field. Same styling as the block above it, with room to
+   breathe so it never crowds the pad the client is writing in. */
+.sign-custom-below { margin-top: 18px; }
+
+/* Группа вариантов: выбрать можно один, и «ни одного» это тоже состояние. Заголовок отделяет
+   её от обычных пунктов согласия, чтобы клиент видел, что здесь выбор, а не набор галочек. */
+.group { margin: 18px 0 6px; }
+.group-title { font-weight: 700; margin-bottom: 8px; color: var(--text); }

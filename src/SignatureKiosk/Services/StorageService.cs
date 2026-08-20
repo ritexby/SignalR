@@ -482,6 +482,7 @@ public class StorageService
                 WorkstationId = workstation?.Id,
                 WorkstationName = workstation?.Name,
                 Items = sub.Items ?? new List<SubmittedItem>(),
+                Groups = sub.Groups ?? new List<SubmittedGroup>(),
                 Fields = fields is { Count: > 0 } ? new Dictionary<string, string>(fields) : null,
                 SubmissionId = string.IsNullOrWhiteSpace(sub.SubmissionId) ? null : sub.SubmissionId!.Trim()
             };

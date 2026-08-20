@@ -118,7 +118,32 @@ public class PdfService
             }
         }
 
-        // Custom signature-page content (text / images) authored in the admin.
+        // Группы: печатается весь набор вариантов, а не только выбранный. Документ должен
+        // показывать, из чего человек выбирал, иначе по нему нельзя судить о выборе.
+        if (rec.Groups is { Count: > 0 })
+        {
+            foreach (var g in rec.Groups)
+            {
+                if (g is null) continue;
+                w.Gap(6);
+                if (!string.IsNullOrWhiteSpace(g.Title)) w.Line(g.Title, w.H2);
+                w.Gap(3);
+                var options = g.Options ?? new List<DocGroupOption>();
+                if (options.Count == 0 && !string.IsNullOrWhiteSpace(g.SelectedLabel))
+                    w.Paragraph("[X]  " + g.SelectedLabel, w.Body);
+                foreach (var o in options)
+                {
+                    if (o is null) continue;
+                    var chosen = !string.IsNullOrEmpty(g.Selected) &&
+                                 string.Equals(o.Key, g.Selected, StringComparison.OrdinalIgnoreCase);
+                    w.Paragraph((chosen ? "[X]  " : "[  ]  ") + (o.Label ?? o.Key ?? ""), w.Body);
+                }
+                if (string.IsNullOrEmpty(g.Selected))
+                    w.Paragraph("Вариант не выбран.", w.Body);
+            }
+        }
+
+        // Custom signature-page content authored in the admin, above the signature.
         if (doc.SignBlocks is { Count: > 0 }) { w.Gap(6); RenderBlocks(doc.SignBlocks); }
 
         w.Gap(26);
@@ -138,6 +163,9 @@ public class PdfService
             w.Gap(3);
             w.Paragraph("Изображение подписи не удалось встроить в PDF. Оригинал подписи сохранён в записи и доступен в админке.", w.Body);
         }
+
+        // Content the admin placed under the signature (company details, a stamp, a note).
+        if (doc.SignBlocksBelow is { Count: > 0 }) { w.Gap(10); RenderBlocks(doc.SignBlocksBelow); }
 
         try
         {

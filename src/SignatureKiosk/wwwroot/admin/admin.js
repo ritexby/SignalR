@@ -3,6 +3,11 @@
 (function () {
   "use strict";
 
+  // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
+  // build of the page it is running, so a WebView still on an older page can be spotted rather
+  // than silently ignoring anything added since.
+  var APP_VERSION = "4.7";
+
   var state = {
     slidesTarget: "all",   // recipient for advertising slides (all / group / device)
     docTarget: "",         // recipient for the document: exactly ONE device, or "" if none yet
@@ -221,11 +226,54 @@
   // ---------------- Document editor ----------------
   // The documented set of API fields (tags) offered in the editor. Keep in sync with the
   // server (DocumentTemplating.KnownFields).
-  var KNOWN_FIELDS = ["ФИО", "ДР", "Адрес регистрации", "ПОЛ", "email", "telephone", "document",
-    "date", "cross-border", "text1", "text2", "text3", "text4", "text5", "text6", "text7", "text8", "text9", "text10"];
+  // Fallback only. The real list comes from the server (/field-schema) so the editor, the API
+  // documentation and the validation cannot drift apart: adding a tag in one place used to mean
+  // remembering to add it in the other.
+  var KNOWN_FIELDS = ["ФИО", "ДР", "Адрес регистрации", "Пол", "email", "telephone", "document",
+    "date", "cross-border", "urine", "UG",
+    "text1", "text2", "text3", "text4", "text5", "text6", "text7", "text8", "text9", "text10"];
   // Curated colour palette (matches the tablet and the PDF renderer).
   var RT_COLORS = ["#1a1c22", "#16a34a", "#dc2626", "#2563eb", "#ea580c", "#7c3aed", "#0d9488", "#6b7280"];
   var COND_OPS = [["eq", "равно"], ["ne", "не равно"], ["empty", "пусто"], ["notempty", "не пусто"], ["in", "одно из (через запятую)"]];
+  // Tags that only ever carry a fixed set of values. Offering them as a list removes the guesswork
+  // (was it "M" or "муж"? "да" or "yes"?) and the typo that silently makes a condition never match.
+  var FIELD_VALUES = {
+    "Пол": ["M", "F"],
+    "cross-border": ["true", "false"],
+    "urine": ["true", "false"],
+    "UG": ["true", "false"]
+  };
+
+  /// Имена чекбоксов и групп, которые есть в документе. Условие может ссылаться на них так же,
+  /// как на тег, но считаться оно будет уже на планшете, по ходу заполнения.
+  function docKeys() {
+    var checks = [], groups = {};
+    ((state.doc || {}).pages || []).forEach(function (p) {
+      (p.checkboxes || []).forEach(function (c) { if (c.key && checks.indexOf(c.key) < 0) checks.push(c.key); });
+      (p.groups || []).forEach(function (g) {
+        if (!g.key) return;
+        groups[g.key] = (g.options || []).map(function (o) { return o.key; }).filter(Boolean);
+      });
+    });
+    return { checks: checks, groups: groups };
+  }
+
+  /// Всё, что можно поставить в условие: имя чекбокса, имя группы или тег.
+  function isDocKey(name) {
+    var k = docKeys();
+    return k.checks.indexOf(name) >= 0 || Object.prototype.hasOwnProperty.call(k.groups, name);
+  }
+
+  /// Replace the fallback list with what the server actually accepts.
+  function loadFieldSchema() {
+    return apiJson("/field-schema").then(function (s) {
+      if (!s || !s.fields || !s.fields.length) return;
+      KNOWN_FIELDS = s.fields.map(function (f) { return f.name; });
+      FIELD_VALUES = {};
+      s.fields.forEach(function (f) { if (f.values && f.values.length) FIELD_VALUES[f.name] = f.values; });
+    }).catch(function (e) { console.error(e); });
+  }
+  var OTHER_OPTION = "\u0000other";   // cannot collide with a real tag or value
 
   function loadDoc() { return apiJson("/document").then(function (d) { state.doc = d; renderDoc(); }); }
   function renderDoc() {
@@ -327,14 +375,36 @@
     var s = window.getSelection();
     return !!(s && s.rangeCount && ed.contains(s.anchorNode) && ed.contains(s.focusNode));
   }
-  function wrapSelection(ed, applyFn) {
+  var RT_SIZE_CLASSES = ["rt-n", "rt-l", "rt-h"];
+
+  /// Wrap the selection in a span the caller configures. A size or colour set on the new span has
+  /// to win, so anything of the same kind already inside the selection is stripped first;
+  /// otherwise an older nested span kept overriding the button that was just pressed.
+  function wrapSelection(ed, applyFn, kind) {
     var s = window.getSelection();
     if (!insideEditor(ed)) { ed.focus(); return; }
     var range = s.getRangeAt(0); if (range.collapsed) return;
     var span = document.createElement("span"); applyFn(span);
     try { span.appendChild(range.extractContents()); range.insertNode(span); } catch (e) { return; }
+    if (kind === "size")
+      span.querySelectorAll("span").forEach(function (inner) {
+        RT_SIZE_CLASSES.forEach(function (c) { inner.classList.remove(c); });
+        if (!inner.className && !inner.getAttribute("style")) unwrap(inner);
+      });
+    if (kind === "color")
+      span.querySelectorAll("span").forEach(function (inner) {
+        inner.style.color = "";
+        if (!inner.className && !inner.getAttribute("style")) unwrap(inner);
+      });
     s.removeAllRanges(); var nr = document.createRange(); nr.selectNodeContents(span); s.addRange(nr);
     ed.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  /// Replace an element with its own children, so stripped spans do not pile up in the markup.
+  function unwrap(node) {
+    var parent = node.parentNode; if (!parent) return;
+    while (node.firstChild) parent.insertBefore(node.firstChild, node);
+    parent.removeChild(node);
   }
   function insertTag(ed, tag) {
     ed.focus(); var s = window.getSelection(), text = "{{" + tag + "}}";
@@ -359,16 +429,16 @@
     var bar = el("div", "rt-toolbar");
     bar.appendChild(tbBtn("Ж", "Жирный", function () { if (insideEditor(ed)) { document.execCommand("bold", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); } }));
     bar.appendChild(tbBtn("К", "Курсив", function () { if (insideEditor(ed)) { document.execCommand("italic", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); } }, true));
-    bar.appendChild(tbBtn("A", "Обычный размер", function () { wrapSelection(ed, function (s) { s.className = "rt-n"; }); }));
-    bar.appendChild(tbBtn("A+", "Крупный", function () { wrapSelection(ed, function (s) { s.className = "rt-l"; }); }));
-    bar.appendChild(tbBtn("A++", "Огромный", function () { wrapSelection(ed, function (s) { s.className = "rt-h"; }); }));
+    bar.appendChild(tbBtn("A", "Обычный размер", function () { wrapSelection(ed, function (s) { s.className = "rt-n"; }, "size"); }));
+    bar.appendChild(tbBtn("A+", "Крупный", function () { wrapSelection(ed, function (s) { s.className = "rt-l"; }, "size"); }));
+    bar.appendChild(tbBtn("A++", "Огромный", function () { wrapSelection(ed, function (s) { s.className = "rt-h"; }, "size"); }));
     RT_COLORS.forEach(function (c) {
       var sw = el("button", "rt-swatch"); sw.type = "button"; sw.style.background = c; sw.title = "Цвет " + c;
       sw.addEventListener("mousedown", function (e) { e.preventDefault(); });
-      sw.addEventListener("click", function (e) { e.preventDefault(); wrapSelection(ed, function (s) { s.style.color = c; }); });
+      sw.addEventListener("click", function (e) { e.preventDefault(); wrapSelection(ed, function (s) { s.style.color = c; }, "color"); });
       bar.appendChild(sw);
     });
-    bar.appendChild(tbBtn("○", "Цвет по умолчанию", function () { wrapSelection(ed, function (s) { s.style.color = "inherit"; }); }));
+    bar.appendChild(tbBtn("○", "Цвет по умолчанию", function () { wrapSelection(ed, function (s) { s.style.color = "inherit"; }, "color"); }));
     var tsel = el("select", "rt-tag"); tsel.appendChild(new Option("+ тег", ""));
     KNOWN_FIELDS.forEach(function (f) { tsel.appendChild(new Option(f, f)); });
     tsel.addEventListener("change", function () { if (tsel.value) { insertTag(ed, tsel.value); tsel.value = ""; } });
@@ -383,14 +453,93 @@
     var mode = el("select", "cond-mode");
     mode.appendChild(new Option("Показывать всегда", "")); mode.appendChild(new Option("Показывать по условию", "cond"));
     var fields = el("div", "cond-fields");
-    var fld = el("input", "cond-field"); fld.type = "text"; fld.placeholder = "тег (например ПОЛ)"; fld.setAttribute("list", "knownFieldsList"); fld.setAttribute("data-role", "cfield");
+
+    // The tag is a real dropdown, not a text box with suggestions: a datalist only offers what
+    // still matches what is typed, so once a tag was chosen the list looked empty and the operator
+    // had to clear the box by hand before choosing another one.
+    var fld = el("select", "cond-field"); fld.setAttribute("data-role", "cfieldsel");
+    fld.appendChild(new Option("выберите тег", ""));
+    var keys = docKeys();
+    var tagGroup = document.createElement("optgroup"); tagGroup.label = "Теги из API";
+    KNOWN_FIELDS.forEach(function (f) { tagGroup.appendChild(new Option(f, f)); });
+    fld.appendChild(tagGroup);
+    // Отдельной группой, потому что это другая природа: считается на планшете, пока клиент
+    // заполняет документ, а не один раз на сервере до отправки.
+    if (keys.checks.length) {
+      var cg = document.createElement("optgroup"); cg.label = "Чекбоксы в документе";
+      keys.checks.forEach(function (k) { cg.appendChild(new Option(k, k)); });
+      fld.appendChild(cg);
+    }
+    var groupNames = Object.keys(keys.groups);
+    if (groupNames.length) {
+      var gg = document.createElement("optgroup"); gg.label = "Группы вариантов";
+      groupNames.forEach(function (k) { gg.appendChild(new Option(k, k)); });
+      fld.appendChild(gg);
+    }
+    fld.appendChild(new Option("другой тег...", OTHER_OPTION));
+    // Kept for a tag outside the known list, so nothing that used to work stops working.
+    var fldOther = el("input", "cond-field-other"); fldOther.type = "text";
+    fldOther.placeholder = "свой тег"; fldOther.setAttribute("data-role", "cfield");
+
     var op = el("select", "cond-op"); op.setAttribute("data-role", "cop");
     COND_OPS.forEach(function (o) { op.appendChild(new Option(o[1], o[0])); });
+
+    // The value is a dropdown when the tag has a fixed set, and a text box otherwise.
+    var valSel = el("select", "cond-val-sel"); valSel.setAttribute("data-role", "cvalsel");
     var val = el("input", "cond-val"); val.type = "text"; val.placeholder = "значение"; val.setAttribute("data-role", "cval");
-    fields.appendChild(fld); fields.appendChild(op); fields.appendChild(val);
-    function sync() { fields.style.display = mode.value === "cond" ? "" : "none"; val.style.display = (op.value === "empty" || op.value === "notempty") ? "none" : ""; }
-    mode.addEventListener("change", sync); op.addEventListener("change", sync);
-    if (cond && cond.field) { mode.value = "cond"; fld.value = cond.field; op.value = cond.op || "eq"; val.value = cond.value || ""; }
+
+    fields.appendChild(fld); fields.appendChild(fldOther); fields.appendChild(op);
+    fields.appendChild(valSel); fields.appendChild(val);
+
+    function currentField() { return fld.value === OTHER_OPTION ? fldOther.value.trim() : fld.value; }
+
+    /// Rebuild the value control for the tag in hand, keeping whatever value is already set.
+    function syncValues(keep) {
+      var f = currentField();
+      var dk = docKeys();
+      var known = FIELD_VALUES[f];
+      if (dk.checks.indexOf(f) >= 0) known = ["true", "false"];
+      else if (Object.prototype.hasOwnProperty.call(dk.groups, f)) known = dk.groups[f].slice();
+      // "одно из" takes a comma separated list, so a single-choice dropdown would not express it.
+      var listable = known && op.value !== "in";
+      valSel.innerHTML = "";
+      if (listable) {
+        known.forEach(function (v) { valSel.appendChild(new Option(v, v)); });
+        valSel.appendChild(new Option("другое...", OTHER_OPTION));
+        if (keep && known.indexOf(keep) < 0) { valSel.value = OTHER_OPTION; val.value = keep; }
+        else { valSel.value = keep || known[0]; val.value = ""; }
+      } else if (keep != null) {
+        val.value = keep;
+      }
+      valSel.style.display = listable ? "" : "none";
+      val.style.display = (!listable || valSel.value === OTHER_OPTION) ? "" : "none";
+    }
+
+    function sync() {
+      fields.style.display = mode.value === "cond" ? "" : "none";
+      fldOther.style.display = fld.value === OTHER_OPTION ? "" : "none";
+      var needsValue = op.value !== "empty" && op.value !== "notempty";
+      valSel.style.display = needsValue && valSel.options.length ? "" : "none";
+      val.style.display = needsValue && (!valSel.options.length || valSel.value === OTHER_OPTION) ? "" : "none";
+    }
+
+    mode.addEventListener("change", sync);
+    fld.addEventListener("change", function () { syncValues(null); sync(); });
+    fldOther.addEventListener("input", function () { syncValues(val.value); sync(); });
+    op.addEventListener("change", function () { syncValues(readValue()); sync(); });
+    valSel.addEventListener("change", sync);
+
+    function readValue() { return valSel.options.length && valSel.value !== OTHER_OPTION ? valSel.value : val.value; }
+
+    if (cond && cond.field) {
+      mode.value = "cond";
+      if (KNOWN_FIELDS.indexOf(cond.field) >= 0) fld.value = cond.field;
+      else { fld.value = OTHER_OPTION; fldOther.value = cond.field; }
+      op.value = cond.op || "eq";
+      syncValues(cond.value || "");
+    } else {
+      syncValues(null);
+    }
     sync();
     box.appendChild(mode); box.appendChild(fields);
     return box;
@@ -398,10 +547,17 @@
   function readCondition(box) {
     if (!box) return null;
     var mode = box.querySelector(".cond-mode"); if (!mode || mode.value !== "cond") return null;
-    var field = (box.querySelector('[data-role="cfield"]').value || "").trim(); if (!field) return null;
+    var sel = box.querySelector('[data-role="cfieldsel"]');
+    var other = box.querySelector('[data-role="cfield"]');
+    var field = (sel && sel.value && sel.value !== OTHER_OPTION ? sel.value : (other ? other.value : "")).trim();
+    if (!field) return null;
     var op = box.querySelector('[data-role="cop"]').value || "eq";
-    var value = (box.querySelector('[data-role="cval"]').value || "").trim();
-    return { field: field, op: op, value: value };
+    var valSel = box.querySelector('[data-role="cvalsel"]');
+    var valInput = box.querySelector('[data-role="cval"]');
+    var value = (valSel && valSel.options.length && valSel.value !== OTHER_OPTION)
+      ? valSel.value
+      : (valInput ? valInput.value : "");
+    return { field: field, op: op, value: (value || "").trim() };
   }
 
   function headingRunsOf(page) { return (page.headingRuns && page.headingRuns.length) ? page.headingRuns : (page.heading ? [{ text: page.heading }] : []); }
@@ -564,6 +720,13 @@
       addCb.addEventListener("click", function () { cbList.appendChild(checkboxRow({ label: "", required: true })); });
       card.appendChild(addCb);
 
+      card.appendChild(el("div", "field", "Группы вариантов (выбрать можно один)"));
+      var grpList = el("div", "cb-list"); grpList.setAttribute("data-role", "grouplist");
+      (page.groups || []).forEach(function (g) { grpList.appendChild(groupCard(g)); }); card.appendChild(grpList);
+      var addGrp = el("button", "btn btn-ghost", "+ Группа вариантов");
+      addGrp.addEventListener("click", function () { grpList.appendChild(groupCard({ options: [{ key: "", label: "" }, { key: "", label: "" }] })); });
+      card.appendChild(addGrp);
+
       var dyn = el("label", "check-inline dyn-anchor");
       var dynCb = el("input"); dynCb.type = "checkbox"; dynCb.checked = !!page.includeDynamic; dynCb.setAttribute("data-role", "includedynamic");
       dyn.appendChild(dynCb); dyn.appendChild(document.createTextNode(" Показывать здесь чекбоксы, присланные по API"));
@@ -572,26 +735,72 @@
       wrap.appendChild(card);
     });
 
-    // Signature page: custom content (text / image) shown above the signature pad.
+    // Signature page: custom content (text / image) on either side of the signature field.
     var signCard = el("div", "page-card sign-page-card");
     var st = el("div", "page-title"); st.appendChild(el("strong", null, "Страница подписи")); signCard.appendChild(st);
-    signCard.appendChild(el("p", "sig-meta", "Показывается над полем подписи на планшете. Можно добавить текст или картинку (например реквизиты, печать, пояснение)."));
-    signCard.appendChild(el("div", "field", "Блоки (текст / картинка)"));
+    signCard.appendChild(el("p", "sig-meta", "Здесь можно разместить текст или картинку (реквизиты, печать, пояснение) над полем подписи и под ним. То же самое попадёт в PDF."));
+
+    signCard.appendChild(el("div", "field", "Над полем подписи"));
     var sblist = el("div", "block-list"); sblist.setAttribute("data-role", "signblocklist");
     (state.doc.signBlocks || []).forEach(function (b) { sblist.appendChild(blockCard(b)); });
     signCard.appendChild(sblist);
-    var addSb = el("button", "btn btn-ghost", "+ Блок на странице подписи");
+    var addSb = el("button", "btn btn-ghost", "+ Блок над подписью");
     addSb.addEventListener("click", function () { sblist.appendChild(blockCard({ runs: [] })); });
     signCard.appendChild(addSb);
+
+    signCard.appendChild(el("div", "sign-divider", "Поле подписи"));
+
+    signCard.appendChild(el("div", "field", "Под полем подписи"));
+    var sblistBelow = el("div", "block-list"); sblistBelow.setAttribute("data-role", "signblocklistbelow");
+    (state.doc.signBlocksBelow || []).forEach(function (b) { sblistBelow.appendChild(blockCard(b)); });
+    signCard.appendChild(sblistBelow);
+    var addSbBelow = el("button", "btn btn-ghost", "+ Блок под подписью");
+    addSbBelow.addEventListener("click", function () { sblistBelow.appendChild(blockCard({ runs: [] })); });
+    signCard.appendChild(addSbBelow);
     wrap.appendChild(signCard);
   }
   function checkboxRow(cb) {
-    var row = el("div", "cb-row"); row.setAttribute("data-role", "cbrow");
+    var box = el("div", "cb-item"); box.setAttribute("data-role", "cbrow");
+    var row = el("div", "cb-row");
     var label = el("input"); label.type = "text"; label.placeholder = "Текст пункта"; label.value = cb.label || ""; label.setAttribute("data-role", "cblabel"); row.appendChild(label);
+    // Имя, по которому внешняя система адресует именно этот пункт. Без имени пункт остаётся
+    // обычным чекбоксом из шаблона, как раньше.
+    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = cb.key || ""; key.setAttribute("data-role", "cbkey"); row.appendChild(key);
     var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = cb.required !== false; req.setAttribute("data-role", "cbreq");
     reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательный")); row.appendChild(reqLabel);
     var chkLabel = el("label"); var chk = el("input"); chk.type = "checkbox"; chk.checked = !!cb.checked; chk.setAttribute("data-role", "cbchecked");
     chkLabel.appendChild(chk); chkLabel.appendChild(document.createTextNode(" отмечен")); row.appendChild(chkLabel);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { box.remove(); updatePlaceholders(); }); row.appendChild(del);
+    box.appendChild(row);
+    box.appendChild(conditionEditor(cb.visibleWhen, "cbcond"));
+    return box;
+  }
+
+  // --- группа вариантов: выбрать можно один, «ни одного» тоже состояние ---
+  function groupCard(g) {
+    var card = el("div", "group-card"); card.setAttribute("data-role", "grouprow");
+    var head = el("div", "cb-row");
+    var title = el("input"); title.type = "text"; title.placeholder = "Заголовок группы"; title.value = g.title || ""; title.setAttribute("data-role", "gtitle"); head.appendChild(title);
+    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = g.key || ""; key.setAttribute("data-role", "gkey"); head.appendChild(key);
+    var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = !!g.required; req.setAttribute("data-role", "greq");
+    reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательно выбрать")); head.appendChild(reqLabel);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { card.remove(); updatePlaceholders(); }); head.appendChild(del);
+    card.appendChild(head);
+
+    var opts = el("div", "opt-list"); opts.setAttribute("data-role", "optlist");
+    (g.options || []).forEach(function (o) { opts.appendChild(optionRow(o)); });
+    card.appendChild(opts);
+    var addOpt = el("button", "btn btn-ghost btn-sm", "+ Вариант");
+    addOpt.addEventListener("click", function () { opts.appendChild(optionRow({ key: "", label: "" })); });
+    card.appendChild(addOpt);
+    card.appendChild(conditionEditor(g.visibleWhen, "gcond"));
+    return card;
+  }
+
+  function optionRow(o) {
+    var row = el("div", "cb-row"); row.setAttribute("data-role", "optrow");
+    var label = el("input"); label.type = "text"; label.placeholder = "Текст варианта"; label.value = o.label || ""; label.setAttribute("data-role", "olabel"); row.appendChild(label);
+    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = o.key || ""; key.setAttribute("data-role", "okey"); row.appendChild(key);
     var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { row.remove(); updatePlaceholders(); }); row.appendChild(del);
     return row;
   }
@@ -610,14 +819,41 @@
         var lab = r.querySelector('[data-role="cblabel"]').value;
         var req = r.querySelector('[data-role="cbreq"]').checked;
         var chk = !!(r.querySelector('[data-role="cbchecked"]') || {}).checked;
-        if (lab.trim()) checkboxes.push({ label: lab, required: req, checked: chk });
+        var key = (r.querySelector('[data-role="cbkey"]') || {}).value || "";
+        if (!lab.trim()) return;
+        var item = { key: key.trim(), label: lab, required: req, checked: chk };
+        var cond = readCondition(r.querySelector('[data-role="cbcond"]'));
+        if (cond) item.visibleWhen = cond;
+        checkboxes.push(item);
       });
-      var page = { heading: "", body: "", headingRuns: headingRuns, blocks: blocks, checkboxes: checkboxes, includeDynamic: includeDynamic };
+      var groups = [];
+      card.querySelectorAll('[data-role="grouprow"]').forEach(function (r) {
+        var options = [];
+        r.querySelectorAll('[data-role="optrow"]').forEach(function (o) {
+          var okey = (o.querySelector('[data-role="okey"]').value || "").trim();
+          var olabel = o.querySelector('[data-role="olabel"]').value || "";
+          if (okey) options.push({ key: okey, label: olabel });
+        });
+        var gkey = (r.querySelector('[data-role="gkey"]').value || "").trim();
+        // Группа без имени или без вариантов не может быть ни показана, ни адресована по API.
+        if (!gkey || !options.length) return;
+        var grp = {
+          key: gkey,
+          title: r.querySelector('[data-role="gtitle"]').value || "",
+          required: r.querySelector('[data-role="greq"]').checked,
+          options: options
+        };
+        var gcond = readCondition(r.querySelector('[data-role="gcond"]'));
+        if (gcond) grp.visibleWhen = gcond;
+        groups.push(grp);
+      });
+      var page = { heading: "", body: "", headingRuns: headingRuns, blocks: blocks, checkboxes: checkboxes, groups: groups, includeDynamic: includeDynamic };
       if (pageCond) page.visibleWhen = pageCond;
       pages.push(page);
     });
     state.doc.pages = pages;
     state.doc.signBlocks = collectBlocks(document.querySelector('[data-role="signblocklist"]'));
+    state.doc.signBlocksBelow = collectBlocks(document.querySelector('[data-role="signblocklistbelow"]'));
   }
   $("addPage").addEventListener("click", function () { collectDoc(); state.doc.pages.push({ headingRuns: [{ text: "Новая страница" }], blocks: [], checkboxes: [], includeDynamic: false }); renderPages(); });
   $("saveDocument").addEventListener("click", function () { collectDoc(); apiSend("/document", "PUT", state.doc).then(function () { toast("Документ сохранён"); }); });
@@ -646,7 +882,10 @@
       (p.blocks || []).forEach(function (b) { if (b.visibleWhen && b.visibleWhen.field) add(b.visibleWhen.field); });
     });
     (state.doc.signBlocks || []).forEach(function (b) { if (b.visibleWhen && b.visibleWhen.field) add(b.visibleWhen.field); });
-    return out;
+    (state.doc.signBlocksBelow || []).forEach(function (b) { if (b.visibleWhen && b.visibleWhen.field) add(b.visibleWhen.field); });
+    // Условие на чекбокс задаёт клиент на планшете, а не внешняя система: спрашивать для него
+    // тестовое значение бессмысленно и только путало бы оператора.
+    return out.filter(function (name) { return !isDocKey(name); });
   }
 
   function openPreviewSetup(placeholders) {
@@ -657,9 +896,20 @@
     var inputs = {};
     if (!placeholders.length) c.appendChild(el("p", "sig-meta", "В шаблоне нет тегов - будет показан документ как есть."));
     placeholders.forEach(function (k) {
-      var f = labeledInput(k, previewDefault(k));
-      f.input.setAttribute("list", "knownFieldsList");
-      c.appendChild(f.wrap); inputs[k] = f.input;
+      // A tag with a fixed set of values gets a dropdown here too, so a preview cannot be run
+      // against a value the real system would never send.
+      var known = FIELD_VALUES[k];
+      if (known) {
+        var wrap = el("label", "field", k);
+        var sel = el("select");
+        known.forEach(function (v) { sel.appendChild(new Option(v, v)); });
+        sel.value = known.indexOf(previewDefault(k)) >= 0 ? previewDefault(k) : known[0];
+        wrap.appendChild(sel);
+        c.appendChild(wrap); inputs[k] = sel;
+      } else {
+        var f = labeledInput(k, previewDefault(k));
+        c.appendChild(f.wrap); inputs[k] = f.input;
+      }
     });
 
     var cbLabel = el("label", "field", "Чекбоксы из API (по одному в строке, «+» в начале - отмечен)");
@@ -685,8 +935,9 @@
   function previewDefault(tag) {
     var map = {
       "ФИО": "Иванова Анна Петровна", "ДР": "01.01.1990", "Адрес регистрации": "г. Минск, ул. Ленина 1",
-      "ПОЛ": "F", "email": "anna@example.by", "telephone": "+375291234567",
-      "document": "MP1234567", "date": new Date().toLocaleDateString("ru-RU"), "cross-border": "да"
+      "Пол": "F", "email": "anna@example.by", "telephone": "+375291234567",
+      "document": "MP1234567", "date": new Date().toLocaleDateString("ru-RU"),
+      "cross-border": "true", "urine": "true", "UG": "true"
     };
     return map[tag] || (/^text\d+$/.test(tag) ? "Текст из внешней системы" : "");
   }
@@ -769,8 +1020,23 @@
           row.appendChild(el("span", null, (cb.label || "") + (cb.required ? " *" : "")));
           body.appendChild(row);
         });
+        // Группы показываются целиком, вместе с невыбранными вариантами: оператор должен видеть,
+        // из чего клиент будет выбирать, а не только присланный выбор.
+        (page.groups || []).forEach(function (g) {
+          body.appendChild(el("div", "pv-group-title", (g.title || g.key || "") + (g.required ? " *" : "")));
+          (g.options || []).forEach(function (o) {
+            var chosen = g.selected && o.key === g.selected;
+            var row = el("div", "pv-check" + (chosen ? " on" : ""));
+            row.appendChild(el("span", "pv-box", chosen ? "✓" : ""));
+            row.appendChild(el("span", null, o.label || o.key || ""));
+            body.appendChild(row);
+          });
+          if (!g.selected) body.appendChild(el("div", "sig-meta", "Вариант не выбран."));
+        });
       } else {
         (doc.signBlocks || []).forEach(function (b) { previewBlock(body, b); });
+        body.appendChild(el("div", "pv-signline", "Поле подписи"));
+        (doc.signBlocksBelow || []).forEach(function (b) { previewBlock(body, b); });
         body.appendChild(el("div", "pv-prompt", doc.signPrompt || ""));
         body.appendChild(el("div", "pv-pad", "поле подписи"));
       }
@@ -841,7 +1107,7 @@
     c.appendChild(el("p", "sig-meta", "Значения подставятся в плейсхолдеры и отправятся на: " + targetLabel(state.docTarget)));
     var inputs = {};
     placeholders.forEach(function (k) { var f = labeledInput(k, ""); c.appendChild(f.wrap); inputs[k] = f.input; });
-    var btn = el("button", "btn btn-primary", "Показать документ");
+    var btn = el("button", "btn btn-primary", "Отправить на планшет");
     btn.addEventListener("click", function () {
       var fields = {}; placeholders.forEach(function (k) { fields[k] = inputs[k].value; });
       closeModal(); doShowDocument(fields);
@@ -998,6 +1264,22 @@
         : "Последняя связь: " + (d.lastSeenUtc ? new Date(d.lastSeenUtc).toLocaleString("ru-RU") : "-")));
       info.appendChild(el("div", "dev-meta", (d.online ? "Текущий IP: " : "Последний IP: ") + (d.lastIp || "-") +
         (d.controlIp ? "   ·   Адрес управления: " + d.controlIp + (d.controlPort ? ":" + d.controlPort : "") : "")));
+
+      // Which build of the kiosk page the tablet is really running. A tablet whose WebView has not
+      // reloaded since an older deploy keeps showing ads and answering nothing else, and this is
+      // the only place that difference is visible.
+      if (d.online) {
+        if (!d.appVersion) {
+          var oldPage = el("div", "dev-meta dev-health warn",
+            "На планшете открыта старая версия страницы. Новые функции работать не будут: " +
+            "обновите страницу на планшете (кнопка «Управление», затем «Обновить страницу»).");
+          info.appendChild(oldPage);
+        } else if (d.appVersion !== APP_VERSION) {
+          info.appendChild(el("div", "dev-meta dev-health warn",
+            "Версия страницы на планшете: " + d.appVersion + ", на сервере: " + APP_VERSION +
+            ". Обновите страницу на планшете."));
+        }
+      }
 
       // Health read from the tablet itself (FreeKiosk API), when tablet control is configured.
       var kc = state.kioskControl || {};
@@ -1743,8 +2025,8 @@
     },
     {
       method: "POST", path: "/api/ext/show-document",
-      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, ПОЛ (M/F), email, telephone, document, date, cross-border (да/нет), text1..text10. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Массив checkboxes добавляет пункты согласия: checked - начальное состояние (можно прислать отмеченным или пустым), required - обязателен. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId). В ответе missingPlaceholders - какие теги не переданы.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","ПОЛ":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026","cross-border":"да",\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"label":"Согласен на рассылку","checked":false,"required":false}]}\' \\\n  {BASE}/api/ext/show-document'
+      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, Пол (M/F), email, telephone, document, date, cross-border, urine, UG (true/false), text1..text10. Булевы теги принимают только true или false, в любом виде: настоящий JSON-булев true, либо строку true в кавычках, регистр не важен. Другое значение возвращает ошибку с именем тега, а не молчаливо скрытый блок. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Массив checkboxes добавляет пункты согласия: checked - начальное состояние (можно прислать отмеченным или пустым), required - обязателен. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId). В ответе missingPlaceholders - какие теги не переданы.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","Пол":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026",\n                 "cross-border":true,"urine":true,"UG":false,\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"key":"consent","checked":true},\n                     {"label":"Согласен на рассылку","checked":false,"required":false}],\n       "groups":[{"key":"transfer","selected":"deny"}]}\' \\\n  {BASE}/api/ext/show-document'
     },
     {
       method: "POST", path: "/api/ext/scan-request",
@@ -1781,9 +2063,15 @@
     KNOWN_FIELDS.forEach(function (f) { tags.appendChild(el("code", "ph-tag", "{{" + f + "}}")); });
     intro.appendChild(tags);
     intro.appendChild(el("h3", null, "Условия показа блоков и страниц"));
-    intro.appendChild(el("p", "api-desc", "В редакторе документа блок текста или целую страницу можно показывать по условию на тег: равно, не равно, пусто, не пусто, одно из. Пример: блок показывать, если ПОЛ равно F; страницу «Трансграничная передача» - если cross-border равно да."));
+    intro.appendChild(el("p", "api-desc", "В редакторе документа блок текста или целую страницу можно показывать по условию на тег: равно, не равно, пусто, не пусто, одно из. Пример: блок показывать, если Пол равно F; страницу «Трансграничная передача» - если cross-border равно true."));
     intro.appendChild(el("h3", null, "Оформление и чекбоксы"));
-    intro.appendChild(el("p", "api-desc", "Текст заголовков и блоков оформляется в редакторе (жирный, курсив, размер, цвет) и так же выводится на планшете и в PDF. В блок можно вставить картинку и задать её ширину. Чекбоксы из API (массив checkboxes) приходят с полем checked - отмеченным или пустым."));
+    intro.appendChild(el("p", "api-desc", "Текст заголовков и блоков оформляется в редакторе (жирный, курсив, размер, цвет) и так же выводится на планшете и в PDF. В блок можно вставить картинку и задать её ширину. Чекбоксы из API (массив checkboxes) приходят с полем checked - отмеченным или пустым. На странице подписи блоки размещаются и над полем подписи, и под ним: реквизиты, печать, пояснение. Условия показа работают и там."));
+    intro.appendChild(el("h3", null, "Именованные чекбоксы и группы вариантов"));
+    intro.appendChild(el("p", "api-desc", "У чекбокса в редакторе можно задать имя, и тогда внешняя система задаёт состояние именно ему: {\"key\":\"consent\",\"checked\":true}. Чекбокс без имени и чекбокс с незнакомым именем по-прежнему просто дописываются на страницу с якорем «Показывать здесь чекбоксы, присланные по API». Текст можно переопределить полем label, иначе берётся из шаблона."));
+    intro.appendChild(el("p", "api-desc", "Группа вариантов это набор, где выбрать можно только один, и «ни одного» тоже допустимое состояние. Задаётся массивом groups: {\"key\":\"transfer\",\"selected\":\"deny\"}. Пустое selected снимает выбор. Имена чекбоксов и групп живут отдельно от тегов: одно имя никогда не значит две вещи."));
+    intro.appendChild(el("h3", null, "Условия по тому, что отметил клиент"));
+    intro.appendChild(el("p", "api-desc", "В условии показа можно выбрать не только тег, но и имя чекбокса или группы. Такое условие считается прямо на планшете, пока клиент заполняет документ: блок появляется и исчезает по нажатию. Обязательный пункт, скрытый условием, не блокирует кнопку «Далее», иначе клиент упирался бы в галочку, которой не видит."));
+    intro.appendChild(el("p", "api-desc", "В подпись и в PDF попадает только то, что клиент действительно видел: сервер пересчитывает условия по его финальным отметкам. Скрытый пункт не записывается как сознательный отказ. В записи подписи чекбоксы лежат с ключами, а группы отдельным списком, вместе со всеми вариантами, из которых выбирали."));
     intro.appendChild(el("h3", null, "Резервная копия шаблона"));
     intro.appendChild(el("p", "api-desc", "На вкладке «Документ» кнопки «Экспорт» и «Импорт» сохраняют все страницы в файл и восстанавливают их обратно. Импорт заменяет текущие страницы целиком, поэтому перед правками полезно сделать экспорт."));
     intro.appendChild(el("h3", null, "Логи"));
@@ -1888,7 +2176,8 @@
     // connection (and no alerts) until the operator reloaded the page.
     connectHub();
     var safe = function (fn) { return function () { return fn().catch(function (e) { console.error(e); }); }; };
-    Promise.all([safe(loadGroups)(), safe(loadWorkstations)(), safe(loadImages)(), safe(loadDoc)(),
+    Promise.all([safe(loadFieldSchema)().then(safe(loadDoc)),
+      safe(loadGroups)(), safe(loadWorkstations)(), safe(loadImages)(),
       safe(loadDevices)(), safe(loadKioskControl)()])
       .then(function () { renderTargetOptions(); return safe(loadPlaylist)(); })
       .then(safe(loadSignatures))

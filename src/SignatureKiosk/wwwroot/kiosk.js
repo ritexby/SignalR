@@ -77,7 +77,8 @@
     scanVideo: document.getElementById("scanVideo"),
     scanMsg: document.getElementById("scanMsg"),
     scanResult: document.getElementById("scanResult"),
-    scanCode: document.getElementById("scanCode")
+    scanCode: document.getElementById("scanCode"),
+    scanFlip: document.getElementById("scanFlip")
   };
 
   function showStatus(t) { el.statusText.textContent = t; el.status.classList.remove("hidden"); }
@@ -142,6 +143,7 @@
     showLayer("document");
     doc.config = config || { title: "", pages: [] };
     doc.checks = {};
+    doc.picks = {};          // группа -> ключ выбранного варианта ("" = ничего не выбрано)
     doc.pad = null;
     doc.submitting = false;
     doc.screens = [];
@@ -149,6 +151,8 @@
       doc.screens.push({ type: "page", pageIndex: i });
       // Honour the initial checked state of API-supplied checkboxes.
       (p.checkboxes || []).forEach(function (cb, ci) { if (cb && cb.checked) doc.checks[checkKey(i, ci)] = true; });
+      // И выбор в группах, если внешняя система его прислала.
+      (p.groups || []).forEach(function (g) { if (g && g.key) doc.picks[g.key] = g.selected || ""; });
     });
     doc.screens.push({ type: "signature" });
     doc.screens.push({ type: "thankyou" });
@@ -185,7 +189,7 @@
   // Wipe every trace of the signer session from the tablet when returning to ads.
   function clearDocState() {
     endDocSession();
-    doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {};
+    doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {}; doc.picks = {};
     doc.pad = null; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
     el.docBody.innerHTML = ""; el.docFooter.innerHTML = "";
     el.docTitle.textContent = ""; el.docProgress.textContent = "";
@@ -193,11 +197,66 @@
 
   function checkKey(page, idx) { return "p" + page + "_c" + idx; }
 
+  // Условие, которое сервер не смог решить сам, потому что оно зависит от того, что клиент
+  // отмечает прямо сейчас. Сервер уже убрал всё, что решается по тегам, поэтому сюда доходят
+  // только условия на чекбоксы и группы. Чекбокс в скрытом блоке считается неотмеченным: так
+  // взаимные ссылки между блоками разрешаются сами и не могут зациклиться.
+  function liveValue(key) {
+    if (Object.prototype.hasOwnProperty.call(doc.picks, key)) return doc.picks[key] || "";
+    var found = "";
+    (doc.config.pages || []).forEach(function (p, pi) {
+      (p.checkboxes || []).forEach(function (cb, ci) {
+        if (cb && cb.key === key) found = doc.checks[checkKey(pi, ci)] ? "true" : "false";
+      });
+    });
+    return found;
+  }
+
+  function condHolds(cond) {
+    if (!cond || !cond.field) return true;
+    var val = String(liveValue(cond.field) || "").trim().toLowerCase();
+    var target = String(cond.value || "").trim().toLowerCase();
+    switch (cond.op) {
+      case "ne": return val !== target;
+      case "empty": return val.length === 0;
+      case "notempty": return val.length > 0;
+      case "in": return target.split(",").map(function (x) { return x.trim(); })
+        .filter(function (x) { return x.length; }).indexOf(val) >= 0;
+      default: return val === target;
+    }
+  }
+
+  function dependsOn(key) {
+    var uses = false;
+    function check(c) { if (c && c.field === key) uses = true; }
+    (doc.config.pages || []).forEach(function (p) {
+      check(p.visibleWhen);
+      (p.blocks || []).forEach(function (b) { check(b.visibleWhen); });
+      (p.checkboxes || []).forEach(function (c) { check(c.visibleWhen); });
+      (p.groups || []).forEach(function (g) { check(g.visibleWhen); });
+    });
+    (doc.config.signBlocks || []).forEach(function (b) { check(b.visibleWhen); });
+    (doc.config.signBlocksBelow || []).forEach(function (b) { check(b.visibleWhen); });
+    return uses;
+  }
+
+  function visible(list) {
+    return (list || []).filter(function (item) { return item && condHolds(item.visibleWhen); });
+  }
+
   function requiredSatisfied(pageIndex) {
     var page = doc.config.pages[pageIndex];
-    if (!page || !page.checkboxes) return true;
-    for (var i = 0; i < page.checkboxes.length; i++)
-      if (page.checkboxes[i].required && !doc.checks[checkKey(pageIndex, i)]) return false;
+    if (!page) return true;
+    // Скрытый условием пункт не держит кнопку «Далее»: иначе клиент упирается в галочку,
+    // которой не видит, и выйти из документа не может.
+    for (var i = 0; i < (page.checkboxes || []).length; i++) {
+      var cb = page.checkboxes[i];
+      if (cb.required && condHolds(cb.visibleWhen) && !doc.checks[checkKey(pageIndex, i)]) return false;
+    }
+    for (var g = 0; g < (page.groups || []).length; g++) {
+      var grp = page.groups[g];
+      if (grp.required && condHolds(grp.visibleWhen) && !(doc.picks[grp.key] || "")) return false;
+    }
     return true;
   }
 
@@ -260,12 +319,17 @@
 
     var blocks = (page.blocks && page.blocks.length) ? page.blocks
       : (page.body ? [{ runs: [{ text: page.body }] }] : []);
-    blocks.forEach(function (b) { appendBlock(body, b); });
+    visible(blocks).forEach(function (b) { appendBlock(body, b); });
+
+    // Нажатие меняет то, что показано: блок или пункт может появиться или исчезнуть, поэтому
+    // страница перерисовывается целиком, а не правится по месту.
+    function rerender() { renderPage(pageIndex); }
 
     if (page.checkboxes && page.checkboxes.length) {
       var checks = document.createElement("div");
       checks.className = "checks";
       page.checkboxes.forEach(function (cb, i) {
+        if (!condHolds(cb.visibleWhen)) return;
         var key = checkKey(pageIndex, i);
         var label = document.createElement("label");
         label.className = "check" + (doc.checks[key] ? " checked" : "");
@@ -275,7 +339,9 @@
         input.addEventListener("change", function () {
           doc.checks[key] = input.checked;
           label.classList.toggle("checked", input.checked);
-          updateFooter();
+          // Перерисовываем, только если от этого пункта что-то зависит: иначе страница
+          // дёргалась бы под пальцем на каждой галочке без всякой причины.
+          if (cb.key && dependsOn(cb.key)) rerender(); else updateFooter();
         });
         var span = document.createElement("span");
         span.className = "label";
@@ -289,8 +355,48 @@
         label.appendChild(span);
         checks.appendChild(label);
       });
-      body.appendChild(checks);
+      if (checks.childNodes.length) body.appendChild(checks);
     }
+
+    // Группы: выбрать можно один вариант, и «ни одного» это тоже состояние. Поэтому это
+    // чекбоксы, а не радиокнопки: нажатие по уже выбранному снимает выбор.
+    visible(page.groups).forEach(function (g) {
+      var box = document.createElement("div");
+      box.className = "group";
+      if (g.title) {
+        var t = document.createElement("div");
+        t.className = "group-title";
+        t.textContent = g.title;
+        if (g.required) {
+          var req = document.createElement("span");
+          req.className = "req"; req.textContent = "*";
+          t.appendChild(req);
+        }
+        box.appendChild(t);
+      }
+      var opts = document.createElement("div");
+      opts.className = "checks";
+      (g.options || []).forEach(function (o) {
+        var chosen = (doc.picks[g.key] || "") === o.key;
+        var label = document.createElement("label");
+        label.className = "check" + (chosen ? " checked" : "");
+        var input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = chosen;
+        input.addEventListener("change", function () {
+          doc.picks[g.key] = (doc.picks[g.key] || "") === o.key ? "" : o.key;
+          rerender();
+        });
+        var span = document.createElement("span");
+        span.className = "label";
+        span.textContent = o.label || o.key || "";
+        label.appendChild(input);
+        label.appendChild(span);
+        opts.appendChild(label);
+      });
+      box.appendChild(opts);
+      body.appendChild(box);
+    });
 
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
@@ -303,7 +409,7 @@
     body.className = "sign-screen";
 
     // Custom signature-page content (text / images) authored in the admin, above the pad.
-    var sblocks = doc.config.signBlocks || [];
+    var sblocks = visible(doc.config.signBlocks);
     if (sblocks.length) {
       var custom = document.createElement("div"); custom.className = "sign-custom";
       sblocks.forEach(function (b) { appendBlock(custom, b); });
@@ -322,6 +428,14 @@
     var line = document.createElement("div"); line.className = "sign-line"; wrap.appendChild(line);
     var hint = document.createElement("div"); hint.className = "sign-hint"; hint.textContent = "Распишитесь здесь"; wrap.appendChild(hint);
     body.appendChild(wrap);
+
+    // The same kind of custom content, but under the signature field.
+    var sbelow = visible(doc.config.signBlocksBelow);
+    if (sbelow.length) {
+      var below = document.createElement("div"); below.className = "sign-custom sign-custom-below";
+      sbelow.forEach(function (b) { appendBlock(below, b); });
+      body.appendChild(below);
+    }
 
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
@@ -344,7 +458,43 @@
         }
       }
     }
-    doc.pad = new SignaturePad(canvas, { minWidth: 1.2, maxWidth: 3.2, penColor: "#111827" });
+    // Стилус опрашивается заметно чаще, чем обновляется экран, а библиотека по умолчанию
+    // выбрасывает точки ближе 5 пикселей к предыдущей и обрабатывает движение не чаще раза
+    // в 16 мс. Из-за этого линия тянется за наконечником: до 5 пикселей отставания на медленном
+    // росчерке, что при подписи и есть основной режим. Обе задержки убраны.
+    doc.pad = new SignaturePad(canvas, {
+      minWidth: 1.2, maxWidth: 3.2, penColor: "#111827",
+      throttle: 0,        // рисовать каждое движение сразу, без окна в 16 мс
+      minDistance: 0      // не выбрасывать близкие точки: именно они дают отставание от пера
+    });
+
+    // Между двумя кадрами планшет успевает снять несколько точек пера, и браузер отдаёт их не
+    // отдельными событиями, а внутри getCoalescedEvents последнего. Без них быстрый росчерк
+    // рисуется парой прямых срезов вместо кривой. Слушатель висит на самом холсте, а библиотека
+    // слушает window, поэтому промежуточные точки успевают дойти до неё раньше основного события
+    // и порядок не нарушается.
+    var MAX_COALESCED = 32;   // защита от патологического всплеска событий
+    var replaying = false;    // точки, разосланные здесь же, повторно разбирать не нужно
+    canvas.addEventListener("pointermove", function (e) {
+      if (replaying || typeof e.getCoalescedEvents !== "function") return;
+      var pts;
+      try { pts = e.getCoalescedEvents(); } catch (err) { return; }
+      if (!pts || pts.length < 2) return;                 // последняя точка это само событие
+      var start = Math.max(0, pts.length - 1 - MAX_COALESCED);
+      replaying = true;
+      try {
+        for (var i = start; i < pts.length - 1; i++) {
+          var c = pts[i];
+          canvas.dispatchEvent(new PointerEvent("pointermove", {
+            clientX: c.clientX, clientY: c.clientY,
+            pressure: c.pressure, pointerId: e.pointerId, pointerType: e.pointerType,
+            buttons: 1, bubbles: true, cancelable: false
+          }));
+        }
+      } finally { replaying = false; }   // рассылка синхронная, флаг всегда снимается
+    }, true);
+    // Настройки пера доступны наружу, чтобы их можно было проверить тестом, а не на глаз.
+    window.__padForTest = doc.pad;
     doc.pad.addEventListener("beginStroke", function () { hint.style.display = "none"; });
     doc.pad.addEventListener("endStroke", updateFooter);
     sizeCanvas();
@@ -438,14 +588,37 @@
     }
   }
 
+  // В запись уходит только то, что клиент действительно видел: скрытый условием пункт нельзя
+  // считать ни отмеченным, ни сознательно пропущенным.
   function collectItems() {
     var items = [];
     (doc.config.pages || []).forEach(function (page, pi) {
+      if (!condHolds(page.visibleWhen)) return;
       (page.checkboxes || []).forEach(function (cb, ci) {
-        items.push({ label: cb.label, checked: !!doc.checks[checkKey(pi, ci)] });
+        if (!condHolds(cb.visibleWhen)) return;
+        items.push({ key: cb.key || "", label: cb.label, checked: !!doc.checks[checkKey(pi, ci)] });
       });
     });
     return items;
+  }
+
+  function collectGroups() {
+    var groups = [];
+    (doc.config.pages || []).forEach(function (page) {
+      if (!condHolds(page.visibleWhen)) return;
+      visible(page.groups).forEach(function (g) {
+        var selected = doc.picks[g.key] || "";
+        var chosen = (g.options || []).filter(function (o) { return o.key === selected; })[0];
+        groups.push({
+          key: g.key || "",
+          title: g.title || "",
+          selected: selected,
+          selectedLabel: chosen ? (chosen.label || chosen.key) : "",
+          options: (g.options || []).map(function (o) { return { key: o.key, label: o.label }; })
+        });
+      });
+    });
+    return groups;
   }
 
   function submitSignature() {
@@ -460,7 +633,8 @@
     fetch("/api/sign", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + (getToken() || "") },
-      body: JSON.stringify({ items: collectItems(), signature: doc.pad.toDataURL("image/png"), submissionId: doc.submissionId })
+      body: JSON.stringify({ items: collectItems(), groups: collectGroups(),
+        signature: doc.pad.toDataURL("image/png"), submissionId: doc.submissionId })
     }).then(function (r) {
       if (doc.session !== session) return;          // document was replaced/cleared while sending
       if (!r.ok) throw new Error("bad status " + r.status);
@@ -521,7 +695,21 @@
   // command and always stopped when the screen closes, so the tablet never films silently.
   // gen invalidates a camera that is still starting when scanning has already been stopped, so a
   // stream can never be attached after the fact and keep filming behind another screen.
-  var scan = { controls: null, active: false, doneTimer: null, capTimer: null, gen: 0 };
+  // "user" is the front camera. Remembered per tablet, because which camera actually reads a
+  // barcode depends on the hardware and on how the tablet is mounted.
+  var scan = {
+    controls: null, active: false, doneTimer: null, capTimer: null, gen: 0,
+    facing: localStorage.getItem("sk_scan_facing") === "environment" ? "environment" : "user"
+  };
+
+  // Switching cameras restarts the reader: the constraint is fixed when the stream opens.
+  if (el.scanFlip) el.scanFlip.addEventListener("click", function () {
+    scan.facing = scan.facing === "user" ? "environment" : "user";
+    try { localStorage.setItem("sk_scan_facing", scan.facing); } catch (e) { /* private mode */ }
+    var wasActive = scan.active;
+    stopScan();
+    if (wasActive) startScan();
+  });
   var SCAN_MAX_MS = 90000;   // hard local cap: never film longer than this without a result
 
   function clearScanResult() {
@@ -564,6 +752,10 @@
     else leaveScan();
   }
 
+  // ZXing hint keys, by value: the browser bundle does not export the DecodeHintType enum.
+  var HINT_POSSIBLE_FORMATS = 2;
+  var HINT_TRY_HARDER = 3;
+
   function startScan() {
     if (scan.active) return;
     if (scan.doneTimer) { clearTimeout(scan.doneTimer); scan.doneTimer = null; }  // stale "return" timer
@@ -591,18 +783,31 @@
     var hints = new Map();
     try {
       var ZX = window.ZXing || window.ZXingBrowser;
-      if (ZX && ZX.DecodeHintType && ZX.BarcodeFormat) {
-        hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [
+      // The @zxing/browser bundle exports BarcodeFormat but NOT DecodeHintType, so the hint keys
+      // are given by value. They are a fixed part of the ZXing wire format: POSSIBLE_FORMATS is 2
+      // and TRY_HARDER is 3. Without this the reader ran with no hints at all, which is why a
+      // barcode held to the camera was never picked up.
+      if (ZX && ZX.BarcodeFormat) {
+        hints.set(HINT_POSSIBLE_FORMATS, [
           ZX.BarcodeFormat.QR_CODE, ZX.BarcodeFormat.EAN_13,
           ZX.BarcodeFormat.EAN_8, ZX.BarcodeFormat.CODE_128
         ]);
       }
+      // Spend more effort per frame. A tablet camera gives a soft, low contrast image, and
+      // without this a printed EAN-13 often never resolves at all.
+      hints.set(HINT_TRY_HARDER, true);
     } catch (e) { /* fall back to all formats */ }
 
     var reader = new window.ZXingBrowser.BrowserMultiFormatReader(hints.size ? hints : undefined);
-    // "user" is the front camera, as the tablets are wall-mounted facing the client.
+    // Wall-mounted tablets face the client, so the front camera is the default. It is also the
+    // weaker one on most tablets, so the client can switch to the rear camera on the spot and the
+    // choice is remembered.
+    el.scanFlip.classList.remove("hidden");
+    el.scanFlip.textContent = scan.facing === "user" ? "Камера сзади" : "Камера спереди";
+    // Mirror the front camera only: the rear one already faces the same way as the client's hand.
+    el.scanVideo.classList.toggle("mirrored", scan.facing === "user");
     reader.decodeFromConstraints(
-      { video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } } },
+      { video: { facingMode: scan.facing, width: { ideal: 1920 }, height: { ideal: 1080 } } },
       el.scanVideo,
       function (result, err, controls) {
         if (!scan.active || gen !== scan.gen) { try { controls.stop(); } catch (e) {} return; }
@@ -719,9 +924,18 @@
   // ==================================================================
   var conn = null;
 
+  // Reported on every connect so the operator can see which build a tablet is actually running.
+  // A WebView that has not reloaded since an older deploy keeps working but ignores anything
+  // added since, and without this the only symptom is a command that seems to do nothing.
+  var APP_VERSION = "4.7";
+
   function register() {
-    return conn.invoke("RegisterKiosk").then(applyCommand)
-      .catch(function (e) { console.error("register failed", e); });
+    return conn.invoke("RegisterKiosk").then(function (cmd) {
+      applyCommand(cmd);
+      // Sent separately, and failure is ignored: registering is what matters, the version is
+      // only there so the operator can spot a tablet still running an older page.
+      conn.invoke("ReportVersion", APP_VERSION).catch(function () { /* older server */ });
+    }).catch(function (e) { console.error("register failed", e); });
   }
 
   function isAuthError(e) {

@@ -5,7 +5,7 @@ namespace SignatureKiosk.Services;
 
 /// <summary>
 /// Fills a document template for one signer:
-///   • substitutes {{placeholder}} tags (for example {{ФИО}}, {{ПОЛ}}, {{date}}) with API values;
+///   • substitutes {{placeholder}} tags (for example {{ФИО}}, {{Пол}}, {{date}}) with API values;
 ///   • evaluates conditions so a block or a whole page is shown only for matching signers;
 ///   • injects API-supplied checkboxes.
 /// Formatting is carried as structured "runs" (text + bold/italic/size/colour), never HTML, so it
@@ -37,8 +37,8 @@ public static partial class DocumentTemplating
     /// <summary>The documented set of API fields (tags), in the order the editor offers them.</summary>
     public static readonly string[] KnownFields =
     {
-        "ФИО", "ДР", "Адрес регистрации", "ПОЛ", "email", "telephone", "document",
-        "date", "cross-border",
+        "ФИО", "ДР", "Адрес регистрации", "Пол", "email", "telephone", "document",
+        "date", "cross-border", "urine", "UG",
         "text1", "text2", "text3", "text4", "text5", "text6", "text7", "text8", "text9", "text10"
     };
 
@@ -70,8 +70,49 @@ public static partial class DocumentTemplating
         Size = r.Size
     };
 
-    private static DocCheckbox Cb(DocCheckbox c, IReadOnlyDictionary<string, string>? map) =>
-        new() { Label = Apply(c.Label, map), Required = c.Required, Checked = c.Checked };
+    private static DocCheckbox Cb(DocCheckbox c, IReadOnlyDictionary<string, string>? map,
+        HashSet<string>? live = null, IReadOnlyDictionary<string, bool>? states = null)
+    {
+        var key = (c.Key ?? "").Trim();
+        var isChecked = c.Checked;
+        if (key.Length > 0 && states is not null && states.TryGetValue(key, out var fromApi)) isChecked = fromApi;
+        return new DocCheckbox
+        {
+            Key = key,
+            Label = Apply(c.Label, map),
+            Required = c.Required,
+            Checked = isChecked,
+            VisibleWhen = live is null ? null : LiveCondition(c.VisibleWhen, live)
+        };
+    }
+
+    /// <summary>Resolve one group: substitute its texts and apply a selection sent by the API.</summary>
+    private static DocGroup Grp(DocGroup g, IReadOnlyDictionary<string, string>? map,
+        HashSet<string> live, IReadOnlyDictionary<string, string>? selections)
+    {
+        var key = (g.Key ?? "").Trim();
+        var options = (g.Options ?? new List<DocGroupOption>())
+            .Where(o => o is not null)
+            .Select(o => new DocGroupOption { Key = (o.Key ?? "").Trim(), Label = Apply(o.Label, map) })
+            .ToList();
+
+        var selected = (g.Selected ?? "").Trim();
+        if (key.Length > 0 && selections is not null && selections.TryGetValue(key, out var fromApi))
+            selected = (fromApi ?? "").Trim();
+        // A selection naming an option that does not exist means nothing chosen, never a phantom.
+        if (selected.Length > 0 && !options.Any(o => string.Equals(o.Key, selected, StringComparison.OrdinalIgnoreCase)))
+            selected = "";
+
+        return new DocGroup
+        {
+            Key = key,
+            Title = Apply(g.Title, map),
+            Options = options,
+            Required = g.Required,
+            Selected = selected.Length == 0 ? null : selected,
+            VisibleWhen = LiveCondition(g.VisibleWhen, live)
+        };
+    }
 
     // ---------- Conditions ----------
 
@@ -80,9 +121,13 @@ public static partial class DocumentTemplating
     {
         if (cond is null || string.IsNullOrWhiteSpace(cond.Field)) return true;
         fields ??= EmptyMap;
-        fields.TryGetValue(cond.Field.Trim(), out var raw);
-        var val = (raw ?? "").Trim();
-        var target = (cond.Value ?? "").Trim();
+        var field = cond.Field.Trim();
+        fields.TryGetValue(field, out var raw);
+        // Both sides go through the same normalisation, so a boolean tag sent as True matches a
+        // condition written as true, and a condition saved before the tag became a boolean
+        // (да / нет) keeps working instead of silently never matching.
+        var val = FieldSchema.Canonical(field, raw);
+        var target = FieldSchema.Canonical(field, cond.Value);
         return cond.Op switch
         {
             "ne" => !Eq(val, target),
@@ -121,29 +166,41 @@ public static partial class DocumentTemplating
     /// and the tablet only ever receives the blocks it is meant to see.
     /// </summary>
     public static DocumentConfig Resolve(DocumentConfig doc, IReadOnlyDictionary<string, string>? fields,
-        IReadOnlyList<DocCheckbox>? dynamicCheckboxes = null)
+        IReadOnlyList<DocCheckbox>? dynamicCheckboxes = null,
+        IReadOnlyDictionary<string, string>? groupSelections = null,
+        IReadOnlyDictionary<string, bool>? checkboxStates = null)
     {
         var map = BuildMap(fields);
         var hasDynamic = dynamicCheckboxes is { Count: > 0 };
+        // Names of checkboxes and groups in this document. A condition on one of them cannot be
+        // settled here: it depends on what the signer does next, so the block travels to the
+        // tablet with its condition intact and is evaluated there as they tick.
+        var live = LiveKeys(doc);
 
         var pages = new List<DocPage>();
         foreach (var p in doc.Pages ?? new List<DocPage>())
         {
             if (p is null) continue;                    // tolerate a document stored before Sanitize hardened
-            if (!Matches(p.VisibleWhen, map)) continue; // page hidden for this signer
+            if (!Keep(p.VisibleWhen, map, live)) continue;
 
             pages.Add(new DocPage
             {
                 HeadingRuns = HeadingRuns(p).Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
-                Blocks = ResolveBlocks(Blocks(p), map),
+                Blocks = ResolveBlocks(Blocks(p), map, live),
                 IncludeDynamic = p.IncludeDynamic,
-                Checkboxes = (p.Checkboxes ?? new List<DocCheckbox>()).Where(c => c is not null).Select(c => Cb(c, map)).ToList()
+                VisibleWhen = LiveCondition(p.VisibleWhen, live),
+                Checkboxes = (p.Checkboxes ?? new List<DocCheckbox>())
+                    .Where(c => c is not null && Keep(c.VisibleWhen, map, live))
+                    .Select(c => Cb(c, map, live, checkboxStates)).ToList(),
+                Groups = (p.Groups ?? new List<DocGroup>())
+                    .Where(g => g is not null && Keep(g.VisibleWhen, map, live))
+                    .Select(g => Grp(g, map, live, groupSelections)).ToList()
             });
         }
 
         if (hasDynamic)
         {
-            var injected = dynamicCheckboxes!.Where(c => c is not null).Select(c => Cb(c, map)).ToList();
+            var injected = dynamicCheckboxes!.Where(c => c is not null).Select(c => Cb(c, map, live, checkboxStates)).ToList();
             var anchor = pages.FirstOrDefault(p => p.IncludeDynamic) ?? pages.LastOrDefault();
             if (anchor != null) anchor.Checkboxes.AddRange(injected);
             else pages.Add(new DocPage { Checkboxes = injected });
@@ -153,30 +210,127 @@ public static partial class DocumentTemplating
         {
             Title = Apply(doc.Title, map),
             SignPrompt = Apply(doc.SignPrompt, map),
-            SignBlocks = ResolveBlocks(doc.SignBlocks ?? new List<DocBlock>(), map),
+            SignBlocks = ResolveBlocks(doc.SignBlocks ?? new List<DocBlock>(), map, live),
+            SignBlocksBelow = ResolveBlocks(doc.SignBlocksBelow ?? new List<DocBlock>(), map, live),
             ThankYouText = Apply(doc.ThankYouText, map),
             IdleReturnSec = doc.IdleReturnSec,
             Pages = pages
         };
     }
 
+    /// <summary>
+    /// Убрать то, что клиент в итоге не видел: условия на состояние чекбокса считаются на планшете
+    /// по ходу заполнения, и здесь применяется то же правило по финальным отметкам. Чекбокс внутри
+    /// скрытого блока считается неотмеченным, поэтому взаимные ссылки между блоками разрешаются
+    /// сами и не могут зациклиться.
+    /// </summary>
+    public static void ApplyLiveConditions(DocumentConfig doc,
+        IReadOnlyDictionary<string, bool> checkboxStates, IReadOnlyDictionary<string, string> groupSelections)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in checkboxStates) values[kv.Key] = kv.Value ? "true" : "false";
+        foreach (var kv in groupSelections) values[kv.Key] = kv.Value ?? "";
+
+        var pages = new List<DocPage>();
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null || !Matches(p.VisibleWhen, values)) continue;
+            p.VisibleWhen = null;
+            p.Blocks = (p.Blocks ?? new List<DocBlock>())
+                .Where(b => b is not null && Matches(b.VisibleWhen, values)).ToList();
+            foreach (var b in p.Blocks) b.VisibleWhen = null;
+            p.Checkboxes = (p.Checkboxes ?? new List<DocCheckbox>())
+                .Where(c => c is not null && Matches(c.VisibleWhen, values)).ToList();
+            foreach (var c in p.Checkboxes) c.VisibleWhen = null;
+            p.Groups = (p.Groups ?? new List<DocGroup>())
+                .Where(g => g is not null && Matches(g.VisibleWhen, values)).ToList();
+            foreach (var g in p.Groups) g.VisibleWhen = null;
+            pages.Add(p);
+        }
+        doc.Pages = pages;
+
+        doc.SignBlocks = (doc.SignBlocks ?? new List<DocBlock>()).Where(b => b is not null && Matches(b.VisibleWhen, values)).ToList();
+        foreach (var b in doc.SignBlocks) b.VisibleWhen = null;
+        doc.SignBlocksBelow = (doc.SignBlocksBelow ?? new List<DocBlock>()).Where(b => b is not null && Matches(b.VisibleWhen, values)).ToList();
+        foreach (var b in doc.SignBlocksBelow) b.VisibleWhen = null;
+    }
+
+    /// <summary>Every checkbox and group name in the document, in one set.</summary>
+    public static HashSet<string> LiveKeys(DocumentConfig doc)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null) continue;
+            foreach (var c in p.Checkboxes ?? new List<DocCheckbox>())
+                if (c is not null && !string.IsNullOrWhiteSpace(c.Key)) keys.Add(c.Key.Trim());
+            foreach (var g in p.Groups ?? new List<DocGroup>())
+                if (g is not null && !string.IsNullOrWhiteSpace(g.Key)) keys.Add(g.Key.Trim());
+        }
+        return keys;
+    }
+
+    /// <summary>True when this condition is about something the signer controls on the tablet.</summary>
+    private static bool IsLive(VisibleWhen? cond, HashSet<string> live) =>
+        cond is not null && !string.IsNullOrWhiteSpace(cond.Field) && live.Contains(cond.Field.Trim());
+
+    /// <summary>Keep the element: either its condition holds now, or it will be decided on the tablet.</summary>
+    private static bool Keep(VisibleWhen? cond, IReadOnlyDictionary<string, string>? map, HashSet<string> live) =>
+        IsLive(cond, live) || Matches(cond, map);
+
+    /// <summary>Only a condition the tablet still has to evaluate is passed on; a condition on a tag
+    /// has already been settled here and must not travel with the content.</summary>
+    private static VisibleWhen? LiveCondition(VisibleWhen? cond, HashSet<string> live) =>
+        IsLive(cond, live) ? new VisibleWhen { Field = cond!.Field.Trim(), Op = cond.Op, Value = cond.Value } : null;
+
     /// <summary>Resolve a list of blocks: drop those whose condition fails, substitute text runs,
     /// pass images through unchanged.</summary>
-    private static List<DocBlock> ResolveBlocks(IEnumerable<DocBlock> blocks, IReadOnlyDictionary<string, string>? map)
+    private static List<DocBlock> ResolveBlocks(IEnumerable<DocBlock> blocks,
+        IReadOnlyDictionary<string, string>? map, HashSet<string> live)
     {
         var result = new List<DocBlock>();
         foreach (var b in blocks)
         {
             if (b is null) continue;
-            if (!Matches(b.VisibleWhen, map)) continue;
+            if (!Keep(b.VisibleWhen, map, live)) continue;
             result.Add(new DocBlock
             {
                 Runs = (b.Runs ?? new List<TextRun>()).Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
                 ImageUrl = b.ImageUrl,
-                ImageWidth = b.ImageWidth
+                ImageWidth = b.ImageWidth,
+                VisibleWhen = LiveCondition(b.VisibleWhen, live)
             });
         }
         return result;
+    }
+
+    /// <summary>Bounded on purpose: neither an operator nor an imported file can build a page out
+    /// of hundreds of groups.</summary>
+    private const int MaxGroups = 30;
+    private const int MaxGroupOptions = 20;
+    public const int MaxKeyLength = 60;
+
+    /// <summary>
+    /// A checkbox or group name is what an integration writes in its own code, so it is kept to
+    /// plain characters: no spaces, no braces that could be mistaken for a {{tag}}.
+    /// </summary>
+    public static string CleanKey(string? key)
+    {
+        var k = (key ?? "").Trim();
+        if (k.Length == 0) return "";
+        var kept = new string(k.Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.').ToArray());
+        return kept.Length > MaxKeyLength ? kept[..MaxKeyLength] : kept;
+    }
+
+    /// <summary>Keep a condition only if it names a field. A half-filled one would silently hide
+    /// content, and there would be nothing on screen to explain why.</summary>
+    private static VisibleWhen? Normalized(VisibleWhen? cond)
+    {
+        if (cond is null || string.IsNullOrWhiteSpace(cond.Field)) return null;
+        CleanCondition(cond);
+        cond.Field = Clamp(cond.Field).Trim();
+        cond.Value = Clamp(cond.Value);
+        return cond;
     }
 
     // ---------- Sanitise on save ----------
@@ -207,11 +361,34 @@ public static partial class DocumentTemplating
             p.Blocks = Compact(p.Blocks);
             foreach (var b in p.Blocks) CleanBlock(b);
             p.Checkboxes = Compact(p.Checkboxes);
-            foreach (var c in p.Checkboxes) c.Label = Clamp(c.Label);
+            foreach (var c in p.Checkboxes)
+            {
+                c.Label = Clamp(c.Label);
+                c.Key = CleanKey(c.Key);
+                c.VisibleWhen = Normalized(c.VisibleWhen);
+            }
+            p.Groups = Compact(p.Groups);
+            foreach (var g in p.Groups)
+            {
+                g.Key = CleanKey(g.Key);
+                g.Title = Clamp(g.Title);
+                g.VisibleWhen = Normalized(g.VisibleWhen);
+                g.Options = Compact(g.Options);
+                foreach (var o in g.Options) { o.Key = CleanKey(o.Key); o.Label = Clamp(o.Label); }
+                // An option nobody can name is unusable from the API and indistinguishable from
+                // its neighbours in a stored record, so it is dropped rather than kept half-broken.
+                g.Options = g.Options.Where(o => o.Key.Length > 0).ToList();
+                if (g.Options.Count > MaxGroupOptions) g.Options = g.Options.Take(MaxGroupOptions).ToList();
+                var sel = (g.Selected ?? "").Trim();
+                g.Selected = g.Options.Any(o => string.Equals(o.Key, sel, StringComparison.OrdinalIgnoreCase)) ? sel : null;
+            }
+            if (p.Groups.Count > MaxGroups) p.Groups = p.Groups.Take(MaxGroups).ToList();
         }
 
         doc.SignBlocks = Compact(doc.SignBlocks);
         foreach (var b in doc.SignBlocks) CleanBlock(b);
+        doc.SignBlocksBelow = Compact(doc.SignBlocksBelow);
+        foreach (var b in doc.SignBlocksBelow) CleanBlock(b);
     }
 
     /// <summary>A non-null list without null elements.</summary>
@@ -264,6 +441,7 @@ public static partial class DocumentTemplating
         }
         foreach (var p in doc.Pages ?? new List<DocPage>()) if (p is not null) Check(p.Blocks);
         Check(doc.SignBlocks);
+        Check(doc.SignBlocksBelow);
         return bad.Distinct().ToList();
     }
 
@@ -329,8 +507,14 @@ public static partial class DocumentTemplating
                 foreach (var r in b.Runs ?? new List<TextRun>()) { if (r is not null) Scan(r.Text); }
             }
             foreach (var c in p.Checkboxes ?? new List<DocCheckbox>()) { if (c is not null) Scan(c.Label); }
+            foreach (var g in p.Groups ?? new List<DocGroup>())
+            {
+                if (g is null) continue;
+                Scan(g.Title);
+                foreach (var o in g.Options ?? new List<DocGroupOption>()) { if (o is not null) Scan(o.Label); }
+            }
         }
-        foreach (var b in doc.SignBlocks ?? new List<DocBlock>())
+        foreach (var b in (doc.SignBlocks ?? new List<DocBlock>()).Concat(doc.SignBlocksBelow ?? new List<DocBlock>()))
         {
             if (b is null) continue;
             foreach (var r in b.Runs ?? new List<TextRun>()) { if (r is not null) Scan(r.Text); }

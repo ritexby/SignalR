@@ -85,6 +85,21 @@ public class KioskHub : Hub
         if (!string.IsNullOrEmpty(deviceId)) await _coord.ReturnToSlidesAsync(deviceId);
     }
 
+    /// <summary>
+    /// The tablet reports which build of the kiosk page it is running. Deliberately a separate
+    /// call rather than an argument to RegisterKiosk: SignalR matches hub methods by exact
+    /// argument count, so adding a parameter would make every tablet still running an older page
+    /// fail to register at all. A tablet that never calls this is simply on an older page, which
+    /// is exactly what the operator needs to be told.
+    /// </summary>
+    public Task ReportVersion(string? appVersion)
+    {
+        var deviceId = DeviceId;
+        if (!string.IsNullOrEmpty(deviceId) && !string.IsNullOrWhiteSpace(appVersion))
+            _tracker.SetAppVersion(deviceId, appVersion);
+        return Task.CompletedTask;
+    }
+
     /// <summary>Called by a tablet once a code has been scanned, so it returns to whatever it
     /// should be showing (its ads, or the document it was on).</summary>
     public async Task FinishScan()

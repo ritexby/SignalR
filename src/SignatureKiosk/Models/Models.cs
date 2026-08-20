@@ -10,6 +10,11 @@ public class KioskState
     public int IntervalSec { get; set; } = 6;
     public Dictionary<string, string> Fields { get; set; } = new();       // per-signer values for {{tags}}
     public List<DocCheckbox> DynamicCheckboxes { get; set; } = new();     // per-signer checkboxes from the API
+    // Состояние именованных элементов, присланное внешней системой: отметки чекбоксов по ключу и
+    // выбранный вариант в каждой группе. Хранится вместе с остальным состоянием планшета, чтобы
+    // после переподключения он получил ровно то же самое.
+    public Dictionary<string, bool> CheckboxStates { get; set; } = new();
+    public Dictionary<string, string> GroupSelections { get; set; } = new();
     public DateTime? DocumentSetUtc { get; set; }                          // when the document was put on this device
 
     public KioskState Clone() => new()
@@ -18,7 +23,9 @@ public class KioskState
         PlaylistImageIds = new List<string>(PlaylistImageIds),
         IntervalSec = IntervalSec,
         Fields = new Dictionary<string, string>(Fields),
-        DynamicCheckboxes = DynamicCheckboxes.Select(c => new DocCheckbox { Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList(),
+        DynamicCheckboxes = DynamicCheckboxes.Select(c => new DocCheckbox { Key = c.Key, Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList(),
+        CheckboxStates = new Dictionary<string, bool>(CheckboxStates),
+        GroupSelections = new Dictionary<string, string>(GroupSelections),
         DocumentSetUtc = DocumentSetUtc
     };
 }
@@ -100,9 +107,37 @@ public class ImageInfo
 
 public class DocCheckbox
 {
+    // Optional name the external system uses to address this exact checkbox. Checkbox names live
+    // in their own namespace, separate from the {{tags}}: one name must never mean two things.
+    public string Key { get; set; } = "";
     public string Label { get; set; } = "";
     public bool Required { get; set; } = true;
     public bool Checked { get; set; } = false; // initial state (used by API-supplied checkboxes)
+    // Shown only while its condition holds. A condition on another checkbox is evaluated on the
+    // tablet as the signer ticks; a condition on a tag is evaluated on the server, as before.
+    public VisibleWhen? VisibleWhen { get; set; }
+}
+
+/// <summary>One option inside a group. Its key is what the API sends to select it.</summary>
+public class DocGroupOption
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+}
+
+/// <summary>
+/// A set of options where at most one is chosen: "разрешаю / запрещаю", and choosing neither is a
+/// third, valid state. Drawn as checkboxes rather than radio buttons on purpose, so tapping the
+/// chosen one clears it and the signer can get back to having chosen nothing.
+/// </summary>
+public class DocGroup
+{
+    public string Key { get; set; } = "";
+    public string Title { get; set; } = "";
+    public List<DocGroupOption> Options { get; set; } = new();
+    public bool Required { get; set; } = false;   // true: nothing chosen blocks the signer
+    public string? Selected { get; set; }         // option key, or null for nothing chosen
+    public VisibleWhen? VisibleWhen { get; set; }
 }
 
 /// <summary>A styled piece of text. Formatting is a curated set so it renders identically on the
@@ -143,6 +178,7 @@ public class DocPage
     public List<DocBlock> Blocks { get; set; } = new();        // rich, optionally-conditional content
     public VisibleWhen? VisibleWhen { get; set; }              // page-level condition
     public List<DocCheckbox> Checkboxes { get; set; } = new();
+    public List<DocGroup> Groups { get; set; } = new();
     public bool IncludeDynamic { get; set; } = false; // anchor: API-supplied checkboxes render here
 }
 
@@ -151,7 +187,10 @@ public class DocumentConfig
     public string Title { get; set; } = "Документ";
     public List<DocPage> Pages { get; set; } = new();
     public string SignPrompt { get; set; } = "Пожалуйста, поставьте вашу подпись в поле ниже";
-    public List<DocBlock> SignBlocks { get; set; } = new(); // custom content shown on the signature screen
+    // Custom content on the signature screen. SignBlocks sits above the signature field and
+    // SignBlocksBelow under it, so a stamp, a note or company details can go on either side.
+    public List<DocBlock> SignBlocks { get; set; } = new();
+    public List<DocBlock> SignBlocksBelow { get; set; } = new();
     public string ThankYouText { get; set; } = "Спасибо! Ваша подпись принята.";
     public int IdleReturnSec { get; set; } = 180; // auto-return to ads after this idle time (0 = off)
 }
@@ -266,13 +305,25 @@ public class DocumentBackup
 
 public class SubmittedItem
 {
+    public string Key { get; set; } = "";     // empty for a checkbox the operator did not name
     public string Label { get; set; } = "";
     public bool Checked { get; set; }
+}
+
+/// <summary>What the signer chose in a group: the option key, or empty for nothing chosen.</summary>
+public class SubmittedGroup
+{
+    public string Key { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Selected { get; set; } = "";
+    public string SelectedLabel { get; set; } = "";
+    public List<DocGroupOption> Options { get; set; } = new();
 }
 
 public class SignatureSubmission
 {
     public List<SubmittedItem> Items { get; set; } = new();
+    public List<SubmittedGroup> Groups { get; set; } = new();
     public string Signature { get; set; } = ""; // data URL (image/png)
     // Identifies one signing session. If the response is lost and the tablet retries, the server
     // returns the record it already stored instead of creating a second, data-less duplicate.
@@ -289,6 +340,7 @@ public class SignatureRecord
     public string? WorkstationId { get; set; }
     public string? WorkstationName { get; set; }
     public List<SubmittedItem> Items { get; set; } = new();
+    public List<SubmittedGroup> Groups { get; set; } = new();
     public Dictionary<string, string>? Fields { get; set; } // signer data used to fill {{tags}}
     public string? SubmissionId { get; set; }               // dedupes a retried submit
 }
@@ -313,7 +365,7 @@ public class CurrentCommand
 public record LoginDto(string? Password);
 public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec);
 public record TargetDto(string? Target);
-public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes);
+public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups);
 
 public record EnrollRequest(string? Code);
 public record CreateEnrollmentDto(string? Name, string? WorkstationId, List<string>? GroupIds, int? TtlMinutes);
@@ -324,9 +376,12 @@ public record ApiKeyDto(string? Label);
 
 public record ExtEnrollmentDto(string? WorkstationExternalId, string? Name);
 public record ExtWorkstationAssignDto(string? ExternalId);
-public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes);
+public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups);
 public record ExtScanRequestDto(string? DeviceId, string? WorkstationExternalId, int? TimeoutSec);
 public record AckDto(string? Id);
+/// <summary>Выбор варианта в группе, присланный внешней системой.</summary>
+public record GroupSelectionDto(string? Key, string? Selected, string? Title);
+
 public record ControlAddressDto(string? Ip, int? Port);
 /// <summary>What the admin panel sends when saving tablet control settings. The API key is
 /// write-only: blank keeps the stored key, and removing it is an explicit request.</summary>
@@ -334,4 +389,4 @@ public record KioskControlSettingsDto(bool Enabled, int Port, string? ApiKey, bo
     int TimeoutSec, bool AutoHeal, int AutoHealAfterMinutes, int BatteryWarnPercent, int StorageWarnPercent);
 public record ValueDto(int? Value);
 public record TextDto(string? Text);
-public record PreviewDto(DocumentConfig? Document, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes);
+public record PreviewDto(DocumentConfig? Document, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups);

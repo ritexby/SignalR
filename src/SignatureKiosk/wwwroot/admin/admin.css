@@ -124,9 +124,13 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .rt-tag { height: 28px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text); font-size: .82rem; margin-left: auto; }
 .rt-editor { min-height: 64px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 0 0 8px 8px; background: #fff; color: var(--text); line-height: 1.55; outline: none; }
 .rt-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(22,163,74,.12); }
-.rt-editor .rt-n { font-size: 1em; }
-.rt-editor .rt-l { font-size: 1.3em; }
-.rt-editor .rt-h { font-size: 1.7em; }
+/* Absolute, not relative: a size span can end up inside another one while editing, and with em
+   the sizes multiplied, so pressing "A" inside a huge heading changed nothing on screen. In rem
+   the innermost span always wins, which is what the operator expects from the button. */
+.rt-editor { font-size: 1rem; }
+.rt-editor .rt-n { font-size: 1rem; }
+.rt-editor .rt-l { font-size: 1.3rem; }
+.rt-editor .rt-h { font-size: 1.7rem; }
 
 /* ---------- Content blocks + conditions ---------- */
 .block-list { display: flex; flex-direction: column; gap: 12px; }
@@ -135,8 +139,9 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .cond-mode { padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); max-width: 260px; }
 .cond-fields { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .cond-fields input, .cond-fields select { padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); }
-.cond-field { min-width: 160px; }
-.cond-val { min-width: 140px; }
+.cond-field { min-width: 170px; }
+.cond-field-other { min-width: 150px; }
+.cond-val, .cond-val-sel { min-width: 150px; }
 /* Add / remove buttons size to their label instead of stretching the full card width. */
 .page-card > .btn, .block-card > .btn, #pagesEditor > .btn { align-self: flex-start; }
 
@@ -352,3 +357,21 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 /* The modal makes primary buttons full width for its form dialogs; here the button sits in a row
    of compact controls, so it keeps its own size. */
 .ctl-shot-btn.btn { width: auto; margin-top: 0; }
+
+/* Signature page editor: the signature field itself is not editable, so it is drawn as a marker
+   between the two block lists. Without it the operator cannot tell which list is which. */
+.sign-divider, .pv-signline {
+  margin: 14px 0; padding: 14px; text-align: center; border: 2px dashed var(--border);
+  border-radius: 10px; color: var(--muted); font-size: .88rem; font-weight: 600;
+  background: repeating-linear-gradient(45deg, #f8fafc, #f8fafc 10px, #f1f5f9 10px, #f1f5f9 20px);
+}
+
+/* ---- Именованные чекбоксы и группы вариантов ---- */
+.cb-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: #fbfcfe; }
+.cb-list { display: flex; flex-direction: column; gap: 10px; }
+.cb-key { max-width: 170px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem; }
+.group-card { border: 1px solid #cbd5e1; border-left: 4px solid #6366f1; border-radius: 10px; padding: 12px; background: #fbfcfe; display: flex; flex-direction: column; gap: 10px; }
+.opt-list { display: flex; flex-direction: column; gap: 8px; padding-left: 14px; border-left: 2px dashed var(--border); }
+/* Карточка группы это flex-колонка, поэтому кнопка иначе растягивается во всю ширину. */
+.group-card > .btn { align-self: flex-start; }
+.pv-group-title { font-weight: 700; margin: 14px 0 6px; }

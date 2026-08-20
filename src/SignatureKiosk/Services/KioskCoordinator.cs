@@ -98,6 +98,8 @@ public class KioskCoordinator
                 s.Mode = "slides";
                 s.Fields.Clear();
                 s.DynamicCheckboxes.Clear();
+                s.CheckboxStates.Clear();
+                s.GroupSelections.Clear();
                 s.DocumentSetUtc = null;
                 n++;
             }
@@ -118,7 +120,8 @@ public class KioskCoordinator
         {
             // Resolve with THIS device's own signer data only, so a tablet never receives
             // another signer's fields or checkboxes.
-            var doc = DocumentTemplating.Resolve(_storage.GetDocument(), state.Fields, state.DynamicCheckboxes);
+            var doc = DocumentTemplating.Resolve(_storage.GetDocument(), state.Fields, state.DynamicCheckboxes,
+                state.GroupSelections, state.CheckboxStates);
             return new CurrentCommand { Mode = "document", Document = doc };
         }
         return new CurrentCommand { Mode = "slides", Slides = BuildSlidesPayload(state) };
@@ -128,7 +131,8 @@ public class KioskCoordinator
 
     /// <summary>Set a device override's mode, signer fields and per-signer checkboxes (creating it from the default when absent).</summary>
     private static void SetDeviceState(StateStore states, IEnumerable<string> deviceIds, string mode,
-        Dictionary<string, string> fields, List<DocCheckbox> checkboxes)
+        Dictionary<string, string> fields, List<DocCheckbox> checkboxes,
+        Dictionary<string, bool>? checkboxStates = null, Dictionary<string, string>? groupSelections = null)
     {
         foreach (var deviceId in deviceIds)
         {
@@ -139,7 +143,9 @@ public class KioskCoordinator
             }
             s.Mode = mode;
             s.Fields = new Dictionary<string, string>(fields);
-            s.DynamicCheckboxes = checkboxes.Select(c => new DocCheckbox { Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList();
+            s.DynamicCheckboxes = checkboxes.Select(c => new DocCheckbox { Key = c.Key, Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList();
+            s.CheckboxStates = checkboxStates is null ? new Dictionary<string, bool>() : new Dictionary<string, bool>(checkboxStates);
+            s.GroupSelections = groupSelections is null ? new Dictionary<string, string>() : new Dictionary<string, string>(groupSelections);
             s.DocumentSetUtc = mode == "document" ? DateTime.UtcNow : null;
         }
     }
@@ -223,22 +229,45 @@ public class KioskCoordinator
         string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max]);
 
     public async Task ShowDocumentAsync(string deviceId, IReadOnlyDictionary<string, string>? fields = null,
-        IReadOnlyList<DocCheckbox>? checkboxes = null)
+        IReadOnlyList<DocCheckbox>? checkboxes = null, IReadOnlyList<GroupSelectionDto>? groups = null)
     {
         var fieldMap = new Dictionary<string, string>();
         if (fields is not null)
             foreach (var kv in fields.Take(MaxFields))
                 fieldMap[Cut(kv.Key, MaxFieldNameLength)] = Cut(kv.Value, MaxFieldValueLength);
 
-        var cbs = (checkboxes ?? Array.Empty<DocCheckbox>())
-            .Where(c => c is not null)
-            .Take(MaxDynamicCheckboxes)
-            .Select(c => new DocCheckbox { Label = Cut(c.Label, MaxCheckboxLabelLength), Required = c.Required, Checked = c.Checked })
-            .ToList();
+        var template = _storage.GetDocument();
+        // Имена, которые вообще есть в шаблоне. Чекбокс с известным именем не дописывается вниз
+        // страницы, а задаёт состояние тому, который уже стоит в нужном месте документа.
+        var known = DocumentTemplating.LiveKeys(template);
 
-        _storage.MutateStates(states => SetDeviceState(states, new[] { deviceId }, "document", fieldMap, cbs));
+        var cbs = new List<DocCheckbox>();
+        var states = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in (checkboxes ?? Array.Empty<DocCheckbox>()).Where(c => c is not null))
+        {
+            var key = DocumentTemplating.CleanKey(c.Key);
+            if (key.Length > 0 && known.Contains(key)) { states[key] = c.Checked; continue; }
+            if (cbs.Count >= MaxDynamicCheckboxes) continue;
+            cbs.Add(new DocCheckbox
+            {
+                Key = key,
+                Label = Cut(c.Label, MaxCheckboxLabelLength),
+                Required = c.Required,
+                Checked = c.Checked
+            });
+        }
 
-        var doc = DocumentTemplating.Resolve(_storage.GetDocument(), fieldMap, cbs);
+        var selections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var g in (groups ?? Array.Empty<GroupSelectionDto>()).Where(g => g is not null).Take(MaxDynamicCheckboxes))
+        {
+            var key = DocumentTemplating.CleanKey(g.Key);
+            if (key.Length == 0) continue;
+            selections[key] = DocumentTemplating.CleanKey(g.Selected);
+        }
+
+        _storage.MutateStates(st => SetDeviceState(st, new[] { deviceId }, "document", fieldMap, cbs, states, selections));
+
+        var doc = DocumentTemplating.Resolve(template, fieldMap, cbs, selections, states);
         await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", doc);
     }
 
@@ -269,6 +298,8 @@ public class KioskCoordinator
             s.Mode = "slides";
             s.Fields.Clear();
             s.DynamicCheckboxes.Clear();
+            s.CheckboxStates.Clear();
+            s.GroupSelections.Clear();
             s.DocumentSetUtc = null;
         });
     }

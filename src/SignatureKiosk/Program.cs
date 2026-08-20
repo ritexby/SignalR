@@ -14,6 +14,11 @@ builder.Services.AddSignalR().AddJsonProtocol(options =>
 {
     options.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
 });
+// An integration writes new { urine = true } and sends a real JSON boolean. Without this the whole
+// request is rejected before any handler runs, the document never appears, and the caller has
+// nothing to go on. Values arrive as strings either way: that is what a template substitutes.
+builder.Services.ConfigureHttpJsonOptions(o =>
+    o.SerializerOptions.Converters.Add(new LenientStringDictionaryConverter()));
 builder.Services.AddSingleton<StorageService>();
 builder.Services.AddSingleton<DeviceTracker>();
 builder.Services.AddSingleton<KioskCoordinator>();
@@ -286,7 +291,28 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         // Resolve the document with THIS device's signer data so the PDF and the stored record
         // show the real values, not the {{tags}}.
         var fields = state.Fields is { Count: > 0 } ? state.Fields : null;
-        var resolvedDoc = DocumentTemplating.Resolve(storage.GetDocument(), fields, state.DynamicCheckboxes);
+
+        // Условия на состояние чекбокса считаются на планшете, пока клиент их нажимает, поэтому
+        // документ пересчитывается здесь заново по тому, что он в итоге отметил. Так в записи и в
+        // PDF оказывается ровно то, что человек видел перед собой, и планшету не нужно ничего
+        // дополнительно присылать: достаточно самих отметок.
+        var finalStates = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var it in sub.Items ?? new List<SubmittedItem>())
+        {
+            var k = DocumentTemplating.CleanKey(it?.Key);
+            if (k.Length > 0) finalStates[k] = it!.Checked;
+        }
+        var finalGroups = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var g in sub.Groups ?? new List<SubmittedGroup>())
+        {
+            var k = DocumentTemplating.CleanKey(g?.Key);
+            if (k.Length > 0) finalGroups[k] = DocumentTemplating.CleanKey(g!.Selected);
+        }
+
+        var resolvedDoc = DocumentTemplating.Resolve(storage.GetDocument(), fields, state.DynamicCheckboxes,
+            finalGroups, finalStates);
+        // Блоки, скрытые условием на чекбокс, клиент не видел: их не должно быть и в PDF.
+        DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups);
         var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, fields);
 
         // The record is safely stored: from here the signer's data may leave the tablet.
@@ -390,6 +416,7 @@ admin.MapGet("/devices", (KioskHealthCache healthCache) =>
 {
     var online = tracker.OnlineDeviceIds();
     var liveIps = tracker.OnlineIps();
+    var appVersions = tracker.OnlineAppVersions();
     var healthById = healthCache.All();
     var groups = storage.GetGroups().ToDictionary(g => g.Id, g => g.Name);
     var wss = storage.GetWorkstations().ToDictionary(w => w.Id, w => w);
@@ -418,6 +445,9 @@ admin.MapGet("/devices", (KioskHealthCache healthCache) =>
                 d.ControlIp,
                 d.ControlPort,
                 health = healthById.TryGetValue(d.Id, out var h) ? h : null,
+                // Which build of the kiosk page this tablet is actually running. Blank on an old
+                // page that does not report it yet, which is itself the answer.
+                appVersion = isOnline && appVersions.TryGetValue(d.Id, out var v) ? v : null,
                 d.EnrolledUtc
             };
         });
@@ -461,6 +491,16 @@ admin.MapDelete("/devices/{id}", async (string id, KioskCoordinator coord) =>
 
 admin.MapPost("/devices/{id}/identify", async (string id, KioskCoordinator coord) =>
 {
+    // Same as scanning: the number is drawn by the tablet itself, so an offline tablet shows
+    // nothing and the operator would be left staring at a screen that never changes.
+    if (!tracker.IsOnline(id))
+    {
+        var dev = storage.GetDevice(id);
+        return Results.Json(new
+        {
+            error = "Планшет «" + (dev?.Name ?? id) + "» сейчас не на связи, номер на нём не появится."
+        }, statusCode: StatusCodes.Status409Conflict);
+    }
     var code = await coord.IdentifyAsync(id);
     return Results.Ok(new { code });
 });
@@ -536,6 +576,17 @@ admin.MapPut("/playlist", async (PlaylistSaveDto dto, KioskCoordinator coord) =>
 });
 
 // ---- Document ----
+// The tags an integration may send, and the fixed values some of them take. The editor reads this
+// instead of keeping its own copy, so adding a tag in one place cannot leave the other behind.
+admin.MapGet("/field-schema", () => Results.Ok(new
+{
+    fields = DocumentTemplating.KnownFields.Select(f => new
+    {
+        name = f,
+        values = FieldSchema.Options.TryGetValue(f, out var v) ? v : null
+    })
+}));
+
 admin.MapGet("/document", () => Results.Ok(storage.GetDocument()));
 admin.MapPut("/document", (DocumentConfig? doc) =>
 {
@@ -560,6 +611,8 @@ admin.MapGet("/document/fields", () => Results.Ok(new { fields = DocumentTemplat
 // and without storing anything. If a document is posted, the unsaved editor state is previewed.
 admin.MapPost("/document/preview", (PreviewDto? dto) =>
 {
+    var badField = FieldSchema.Validate(dto?.Fields);
+    if (badField is not null) return Results.BadRequest(new { error = badField });
     var doc = dto?.Document ?? storage.GetDocument();
     DocumentTemplating.Sanitize(doc);
     var resolved = DocumentTemplating.Resolve(doc, dto?.Fields, dto?.Checkboxes);
@@ -773,6 +826,17 @@ admin.MapPost("/scan/start", async (TargetDto? dto, KioskCoordinator coord) =>
 {
     var deviceId = DeviceFromTarget(dto?.Target);
     if (deviceId is null) return Results.BadRequest(new { error = "Выберите планшет для сканирования." });
+    // Scanning is a live command: nothing is stored and nothing is replayed on reconnect, so a
+    // tablet that is not connected would simply never hear it. Saying so beats a silent success.
+    if (!tracker.IsOnline(deviceId))
+    {
+        var dev = storage.GetDevice(deviceId);
+        return Results.Json(new
+        {
+            error = "Планшет «" + (dev?.Name ?? deviceId) + "» сейчас не на связи, команда сканирования до него не дойдёт. " +
+                    "Проверьте, что планшет включён, есть Wi-Fi и открыта страница киоска."
+        }, statusCode: StatusCodes.Status409Conflict);
+    }
     await coord.StartScanAsync(deviceId);
     return Results.Ok(new { ok = true, deviceId });
 });
@@ -836,7 +900,9 @@ admin.MapPost("/show-document", async (ShowDocumentDto dto, KioskCoordinator coo
     var deviceId = DeviceFromTarget(dto?.Target);
     if (deviceId is null)
         return Results.BadRequest(new { error = "Документ показывается только на один планшет. Выберите планшет." });
-    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes);
+    var badField = FieldSchema.Validate(dto?.Fields);
+    if (badField is not null) return Results.BadRequest(new { error = badField });
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups);
     var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
     return Results.Ok(new { ok = true, missingPlaceholders = missing });
 });
@@ -986,10 +1052,12 @@ string? DeviceFromTarget(string? target)
 // admin-authored template are filled from `fields`; `checkboxes` add per-signer consent items.
 ext.MapPost("/show-document", async (ExtShowDocumentDto dto, KioskCoordinator coord) =>
 {
+    var badField = FieldSchema.Validate(dto?.Fields);
+    if (badField is not null) return Results.BadRequest(new { error = badField });
     var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
     if (deviceId is null)
         return Results.Json(new { error }, statusCode: status);
-    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes);
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups);
     var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
     return Results.Ok(new { ok = true, deviceId, missingPlaceholders = missing });
 });

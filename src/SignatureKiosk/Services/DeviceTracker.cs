@@ -7,6 +7,10 @@ public class DeviceTracker
 {
     private readonly ConcurrentDictionary<string, HashSet<string>> _connections = new();
     private readonly Dictionary<string, string> _ips = new();  // deviceId -> IP of its live connection
+    // Which build of the kiosk page the tablet is actually running. A tablet whose WebView has not
+    // reloaded since an older deploy keeps working but silently ignores anything newer, so the
+    // operator has to be able to see it.
+    private readonly Dictionary<string, string> _appVersions = new();
     private readonly object _lock = new();
 
     /// <summary>Register a connection for a device. Returns true if the device just came online.</summary>
@@ -22,6 +26,9 @@ public class DeviceTracker
             bool wasEmpty = set.Count == 0;
             set.Add(connectionId);
             if (!string.IsNullOrWhiteSpace(ip)) _ips[deviceId] = ip;
+            // A reconnect must not keep a version reported by a previous page load: the tablet
+            // tells us again right after registering, or it is on a page too old to say.
+            _appVersions.Remove(deviceId);
             return wasEmpty;
         }
     }
@@ -52,6 +59,7 @@ public class DeviceTracker
                 {
                     _connections.TryRemove(deviceId, out _);
                     _ips.Remove(deviceId);
+                    _appVersions.Remove(deviceId);
                     return true;
                 }
             }
@@ -63,6 +71,20 @@ public class DeviceTracker
     public Dictionary<string, string> OnlineIps()
     {
         lock (_lock) return new Dictionary<string, string>(_ips);
+    }
+
+    /// <summary>Record the page build a tablet reported just after registering.</summary>
+    public void SetAppVersion(string deviceId, string appVersion)
+    {
+        var v = appVersion.Trim();
+        if (v.Length > 32) v = v[..32];
+        lock (_lock) if (_connections.ContainsKey(deviceId)) _appVersions[deviceId] = v;
+    }
+
+    /// <summary>The kiosk page build each online tablet reported when it connected.</summary>
+    public Dictionary<string, string> OnlineAppVersions()
+    {
+        lock (_lock) return new Dictionary<string, string>(_appVersions);
     }
 
     public bool IsOnline(string deviceId)
