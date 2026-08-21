@@ -295,6 +295,36 @@
     return (list || []).filter(function (item) { return item && condHolds(item.visibleWhen); });
   }
 
+  // Страница со скрывающим условием не должна показываться. Условие на тег сервер решает сам и
+  // такую страницу не присылает, а условие на чекбокс решается здесь, пока клиент отмечает.
+  // Раньше такая страница показывалась всё равно, а при отправке её отметки отбрасывались:
+  // человек видел страницу, ставил галочки, и они не попадали в запись.
+  function screenVisible(screen) {
+    if (!screen) return false;
+    if (screen.type !== "page") return true;
+    var page = doc.config.pages[screen.pageIndex];
+    return !!page && condHolds(page.visibleWhen);
+  }
+
+  // Ближайший показываемый экран в заданную сторону, начиная со следующего за from.
+  function stepIndex(from, dir) {
+    for (var i = from + dir; i >= 0 && i < doc.screens.length; i += dir)
+      if (screenVisible(doc.screens[i])) return i;
+    return -1;
+  }
+
+  // Номер шага считается по показываемым экранам, иначе клиент видел бы «Шаг 2 из 5», пролистав
+  // всего две страницы из пяти.
+  function stepPosition() {
+    var shown = 0, current = 0;
+    for (var i = 0; i < doc.screens.length; i++) {
+      if (doc.screens[i].type === "thankyou" || !screenVisible(doc.screens[i])) continue;
+      shown++;
+      if (i === doc.index) current = shown;
+    }
+    return { current: current, total: shown };
+  }
+
   function requiredSatisfied(pageIndex) {
     var page = doc.config.pages[pageIndex];
     if (!page) return true;
@@ -314,8 +344,16 @@
   function renderScreen() {
     var screen = doc.screens[doc.index];
     if (!screen) return;              // the document was cleared while a callback was in flight
+    // Страница могла стать скрытой от только что поставленной галочки: показывать её дальше
+    // нельзя, её отметки всё равно не попадут в запись.
+    if (!screenVisible(screen)) {
+      var to = stepIndex(doc.index, 1);
+      if (to < 0) to = stepIndex(doc.index, -1);
+      if (to >= 0 && to !== doc.index) { doc.index = to; return renderScreen(); }
+    }
+    var pos = stepPosition();
     el.docProgress.textContent = screen.type === "thankyou"
-      ? "" : "Шаг " + (doc.index + 1) + " из " + (doc.screens.length - 1);
+      ? "" : "Шаг " + pos.current + " из " + pos.total;
     if (screen.type === "page") return renderPage(screen.pageIndex);
     if (screen.type === "signature") return renderSignature();
     return renderThankYou();
@@ -392,8 +430,10 @@
       : (page.body ? [{ runs: [{ text: page.body }] }] : []);
 
     // Нажатие меняет то, что показано: блок или пункт может появиться или исчезнуть, поэтому
-    // страница перерисовывается целиком, а не правится по месту.
-    function rerender() { renderPage(pageIndex); }
+    // страница перерисовывается целиком, а не правится по месту. Через renderScreen, а не
+    // напрямую: от отметки могла измениться и видимость целых страниц, а значит и номер шага,
+    // и сама текущая страница могла стать скрытой.
+    function rerender() { renderScreen(); }
 
     function makeCheckbox(cb, i) {
       var key = checkKey(pageIndex, i);
@@ -617,8 +657,12 @@
     el.docFooter.innerHTML = "";
 
     var back = document.createElement("button");
-    back.className = "btn btn-ghost"; back.textContent = "Назад"; back.disabled = !opts.back;
-    back.addEventListener("click", function () { if (doc.index > 0) { doc.index--; renderScreen(); } });
+    back.className = "btn btn-ghost"; back.textContent = "Назад";
+    back.disabled = !opts.back || stepIndex(doc.index, -1) < 0;
+    back.addEventListener("click", function () {
+      var to = stepIndex(doc.index, -1);
+      if (to >= 0) { doc.index = to; renderScreen(); }
+    });
     el.docFooter.appendChild(back);
 
     var note = document.createElement("div");
@@ -637,7 +681,8 @@
       next.addEventListener("click", function () {
         var screen = doc.screens[doc.index];
         if (screen.type === "page" && !requiredSatisfied(screen.pageIndex)) return;
-        doc.index++; renderScreen();
+        var to = stepIndex(doc.index, 1);
+        if (to >= 0) { doc.index = to; renderScreen(); }
       });
       el.docFooter.appendChild(next);
     }
@@ -1027,7 +1072,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "5.0";
+  var APP_VERSION = "5.1";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {

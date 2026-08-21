@@ -693,6 +693,78 @@ public class StorageService
         }
     }
 
+    // ---------------- Расписание управления планшетами ----------------
+
+    private string SchedulePath => Path.Combine(_dataDir, "schedule.json");
+
+    /// <summary>Правила расписания, приведённые к допустимым значениям.</summary>
+    public List<ScheduleRule> GetScheduleRules()
+    {
+        List<ScheduleRule> list;
+        lock (_lock) list = ReadOr(SchedulePath, () => new ScheduleStore()).Rules ?? new List<ScheduleRule>();
+        foreach (var r in list) ClampRule(r);
+        return list;
+    }
+
+    /// <summary>Сохранить весь список целиком: правил немного, а частичные изменения дали бы
+    /// расхождение между тем, что видит оператор, и тем, что лежит на диске.</summary>
+    public List<ScheduleRule> SaveScheduleRules(List<ScheduleRule>? rules)
+    {
+        var list = (rules ?? new List<ScheduleRule>()).Where(r => r is not null).Take(MaxScheduleRules).ToList();
+        foreach (var r in list)
+        {
+            if (string.IsNullOrWhiteSpace(r.Id)) r.Id = "rule-" + ShortId();
+            ClampRule(r);
+        }
+        lock (_lock) Write(SchedulePath, new ScheduleStore { Rules = list });
+        return list;
+    }
+
+    /// <summary>Записать итог запуска правила, не трогая остальные его поля.</summary>
+    public void MarkScheduleRun(string id, string localDate, string result)
+    {
+        lock (_lock)
+        {
+            var store = ReadOr(SchedulePath, () => new ScheduleStore());
+            var rule = (store.Rules ?? new List<ScheduleRule>()).FirstOrDefault(r => r.Id == id);
+            if (rule is null) return;
+            rule.LastRunUtc = DateTime.UtcNow;
+            rule.LastRunLocalDate = localDate;
+            rule.LastResult = result.Length > 300 ? result[..300] : result;
+            Write(SchedulePath, store);
+        }
+    }
+
+    private const int MaxScheduleRules = 50;
+    private const int MaxScheduleDevices = 500;
+
+    private static void ClampRule(ScheduleRule r)
+    {
+        r.Time = NormalizeTime(r.Time);
+        r.Days = (r.Days ?? new List<int>()).Where(d => d is >= 1 and <= 7).Distinct().OrderBy(d => d).ToList();
+        if (ScheduleActions.Find(r.Action) is null) r.Action = "screen-on";
+        r.Value = Math.Clamp(r.Value, 0, 100);
+        r.Text = (r.Text ?? "").Trim();
+        if (r.Text.Length > 200) r.Text = r.Text[..200];
+        r.Note = (r.Note ?? "").Trim();
+        if (r.Note.Length > 200) r.Note = r.Note[..200];
+        r.Target = string.IsNullOrWhiteSpace(r.Target) ? "all" : r.Target.Trim();
+        r.DeviceIds = (r.DeviceIds ?? new List<string>())
+            .Where(id => !string.IsNullOrWhiteSpace(id)).Select(id => id.Trim()).Distinct()
+            .Take(MaxScheduleDevices).ToList();
+    }
+
+    /// <summary>ЧЧ:ММ или 07:00, если прислали что-то другое. Время задаёт человек руками,
+    /// и одна опечатка не должна ронять весь разбор расписания.</summary>
+    private static string NormalizeTime(string? time)
+    {
+        var parts = (time ?? "").Split(':');
+        if (parts.Length != 2 || !int.TryParse(parts[0], out var h) || !int.TryParse(parts[1], out var m))
+            return "07:00";
+        if (h is < 0 or > 23 || m is < 0 or > 59) return "07:00";
+        return h.ToString("00") + ":" + m.ToString("00");
+    }
+
     // ---------------- Scans (barcode / QR) ----------------
 
     private string ScansPath => Path.Combine(_dataDir, "scans.json");

@@ -231,7 +231,18 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .pv-prompt { text-align: center; color: var(--muted); }
 .pv-pad { height: 110px; border: 2px dashed #9aa3b2; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #aab; background: #fff; }
 /* The modal stretches primary buttons; the preview's own navigation must stay compact. */
-.pv-footer { display: flex; gap: 10px; justify-content: space-between; }
+.pv-footer { display: flex; gap: 10px; align-items: center; }
+/* Подпись между кнопками занимает всё свободное место, поэтому «Далее» всегда справа,
+   как на планшете, и не прыгает от длины текста. */
+.pv-note { flex: 1 1 auto; text-align: center; font-size: .88rem; color: #b45309; min-width: 0; }
+/* Пункт в предпросмотре нажимается: это настоящий чекбокс, а не значок. Иначе условие,
+   которое зависит от отметки клиента, нельзя было бы проверить до отправки на планшет. */
+.pv-live { cursor: pointer; user-select: none; }
+.pv-live input[type=checkbox] { width: 20px; height: 20px; margin: 1px 0 0; flex: 0 0 auto; accent-color: var(--accent); cursor: pointer; }
+.pv-live:hover { border-color: #cbd5e1; }
+.pv-live.on:hover { border-color: var(--accent); }
+.pv-group { display: flex; flex-direction: column; gap: 8px; margin: 4px 0; }
+.pv-hint { margin-top: 4px; font-size: .85rem; color: var(--accent); font-weight: 600; }
 .pv-footer .btn, .modal .pv-footer .btn { width: auto; margin-top: 0; }
 
 /* ---------- Operator alerts ---------- */
@@ -351,6 +362,10 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .dev-name { display: flex; align-items: center; gap: 10px; font-size: 1.02rem; margin-bottom: 3px; }
 .dev-meta { color: var(--muted); font-size: .84rem; line-height: 1.5; }
 .dev-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+/* Обратимое действие не должно выглядеть так же, как необратимое: блокировку можно снять,
+   удаление нет. Одинаково красные, они читались как одинаково опасные. */
+.btn-warn { background: #fff; color: #b45309; border-color: #fcd9a4; }
+.btn-warn:hover { background: #fffaf0; border-color: #f59e0b; color: #92400e; }
 .dev-item.revoked { opacity: .65; }
 .dot { margin-top: 6px; }
 
@@ -407,6 +422,54 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
    cell keeps every input box on the same line. */
 .kc-grid .field { display: flex; flex-direction: column; justify-content: space-between; margin-bottom: 6px; }
 .kc-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+/* ---- Расписание управления планшетами ---- */
+.sch-list { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; }
+/* Правило читается одной строкой слева направо: время, дни, что сделать, кому. Порядок полей
+   повторяет порядок слов во фразе, поэтому его не надо разбирать. */
+.sch-rule { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px;
+  border: 1.5px solid var(--line); border-left: 5px solid #6366f1; border-radius: 10px;
+  background: #fcfcff; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
+.sch-rule.off { opacity: .6; border-left-color: #cbd5e1; }
+/* Ширины хватает и на 24-часовой вид, и на 12-часовой с AM/PM: браузер показывает время по
+   своим настройкам, а в узком поле «21:00» превращалось в «09:00» и читалось как утро. */
+.sch-rule input[type=time] { width: 148px; font-variant-numeric: tabular-nums; }
+.sch-rule input, .sch-rule select { padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px;
+  background: #fff; color: var(--text); font-size: .95rem; }
+.sch-rule input:focus, .sch-rule select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
+.sch-action { min-width: 210px; }
+.sch-target { min-width: 190px; }
+.sch-note { flex: 1 1 160px; min-width: 120px; }
+.sch-value { width: 92px; }
+.sch-days { display: flex; gap: 3px; }
+/* День недели переключается нажатием: семь галочек с подписями заняли бы всю строку. */
+.sch-day { width: 32px; height: 32px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff;
+  color: var(--muted); font-size: .8rem; font-weight: 700; cursor: pointer; padding: 0; }
+.sch-day.on { background: #eef2ff; border-color: #6366f1; color: #4338ca; }
+.sch-flags { display: flex; align-items: center; gap: 6px; font-size: .86rem; color: var(--muted); font-weight: 600; }
+/* Набор планшетов: отметки на всю ширину строки, потому что их может быть много, а в общий
+   ряд полей они не помещаются и делают правило нечитаемым. */
+.sch-devices { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px;
+  border: 1.5px dashed #cdd0f5; border-radius: 8px; background: #fbfbff; }
+.sch-dev { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1.5px solid #dbe3ec;
+  border-radius: 999px; background: #fff; font-size: .86rem; color: var(--text); cursor: pointer; }
+.sch-dev.on { border-color: #6366f1; background: #eef2ff; color: #4338ca; font-weight: 600; }
+.sch-dev input { width: 15px; height: 15px; margin: 0; accent-color: #6366f1; cursor: pointer; }
+.sch-devices-count { flex-basis: 100%; font-size: .82rem; color: var(--muted); }
+.sch-devices-count.bad { color: #b45309; font-weight: 600; }
+.sch-devices-empty { font-size: .86rem; color: var(--muted); }
+.slides-devices { margin: 10px 0; }
+/* Окно предпросмотра: списки чекбоксов и строка отправки на планшет. */
+.pv-setup-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.pv-setup-send { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px;
+  padding-top: 12px; border-top: 1px solid var(--line); }
+.pv-setup-send .sch-target { min-width: 180px; padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; }
+.modal .pv-setup-send .btn { width: auto; margin-top: 0; }
+.sch-dev-all { border-style: dashed; font-weight: 600; color: var(--muted); }
+.sch-dev-all:hover { border-color: var(--accent); color: var(--accent); }
+
+.sch-last { flex-basis: 100%; font-size: .82rem; color: var(--muted); }
+.sch-last.bad { color: #b45309; }
 
 .ctl-wrap { display: flex; flex-direction: column; gap: 14px; text-align: left; }
 .ctl-wrap h3 { margin: 0; font-size: 1.05rem; }

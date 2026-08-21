@@ -27,12 +27,15 @@ public class KioskCoordinator
     public static string DeviceGroup(string deviceId) => "dev:" + deviceId;
     public static string RoomGroup(string groupId) => "grp:" + groupId;
 
-    private enum Kind { All, Group, Device }
+    private enum Kind { All, Group, Device, Devices }
     private static (Kind kind, string id) Parse(string? target)
     {
         if (string.IsNullOrWhiteSpace(target) || target == AllTarget) return (Kind.All, "");
         if (target.StartsWith("group:", StringComparison.Ordinal)) return (Kind.Group, target["group:".Length..]);
         if (target.StartsWith("device:", StringComparison.Ordinal)) return (Kind.Device, target["device:".Length..]);
+        // Произвольный набор планшетов: список приходит отдельным параметром, а не в строке
+        // адресата, потому что в строке он был бы неограниченной длины.
+        if (string.Equals(target, "devices", StringComparison.Ordinal)) return (Kind.Devices, "");
         return (Kind.Device, target); // bare id → device
     }
 
@@ -41,10 +44,13 @@ public class KioskCoordinator
     /// for group membership), so targeting reflects the current device configuration without
     /// waiting for a reconnect. "All" resolves to the currently online devices.
     /// </summary>
-    private List<string> DeviceIds(Kind kind, string id) => kind switch
+    private List<string> DeviceIds(Kind kind, string id, IReadOnlyList<string>? chosen = null) => kind switch
     {
         Kind.All => _tracker.OnlineDeviceIds().ToList(),
         Kind.Group => _storage.GetDevices().Where(d => d.GroupIds.Contains(id)).Select(d => d.Id).ToList(),
+        // Только те планшеты, которые действительно существуют: удалённый из набора просто
+        // выпадает, а остальные продолжают получать рекламу.
+        Kind.Devices => _storage.GetDevices().Where(d => (chosen ?? Array.Empty<string>()).Contains(d.Id)).Select(d => d.Id).ToList(),
         _ => new List<string> { id }
     };
 
@@ -160,7 +166,8 @@ public class KioskCoordinator
     /// but it is not flipped and receives no ShowSlides push. Only the explicit
     /// "return to slides" action moves a tablet out of document mode.
     /// </summary>
-    public async Task SaveAndShowSlidesAsync(string target, List<string> imageIds, int intervalSec)
+    public async Task SaveAndShowSlidesAsync(string target, List<string> imageIds, int intervalSec,
+        IReadOnlyList<string>? deviceIds = null)
     {
         intervalSec = Math.Clamp(intervalSec, 1, 3600);
         var (kind, id) = Parse(target);
@@ -168,7 +175,7 @@ public class KioskCoordinator
 
         // Resolve the concrete device set outside the state lock (these read other files):
         // "all" resolves to the currently online devices, group/device to storage membership.
-        var targets = DeviceIds(kind, id);
+        var targets = DeviceIds(kind, id, deviceIds);
 
         // Atomically update stored state and, from that same consistent snapshot, decide who
         // should receive the slides now: everyone in scope except tablets currently showing a

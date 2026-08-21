@@ -23,6 +23,18 @@ public static class FieldSchema
             ["UG"] = new[] { "true", "false" }
         };
 
+    /// <summary>
+    /// Как показывать значение человеку. На проводе пол остаётся M и F: так его шлёт внешняя
+    /// система и так записаны уже существующие условия. В интерфейсе показываются Ж и М,
+    /// потому что оператор думает по-русски, а латинские M и F он читает как «мужской» и
+    /// «женский» не сразу.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, Dictionary<string, string>> ValueLabels =
+        new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Пол"] = new(StringComparer.OrdinalIgnoreCase) { ["M"] = "М (мужской)", ["F"] = "Ж (женский)" }
+        };
+
     public static bool IsBoolean(string field) =>
         BooleanFields.Any(f => string.Equals(f, field, StringComparison.OrdinalIgnoreCase));
 
@@ -53,7 +65,20 @@ public static class FieldSchema
     public static string Canonical(string field, string? value)
     {
         var v = (value ?? "").Trim();
-        if (!IsBoolean(field) || v.Length == 0) return v;
+        if (v.Length == 0) return v;
+
+        // Пол: принимаем и латиницу, и кириллицу. Русские Ж и М пишут и в документах, и в
+        // интеграциях, а латинская M и русская М выглядят одинаково, так что различать их
+        // на глаз невозможно и требовать одного написания значит собирать ошибки на ровном месте.
+        if (string.Equals(field, "Пол", StringComparison.OrdinalIgnoreCase))
+            return v switch
+            {
+                "M" or "m" or "М" or "м" or "муж" or "Муж" => "M",
+                "F" or "f" or "Ж" or "ж" or "жен" or "Жен" => "F",
+                _ => v
+            };
+
+        if (!IsBoolean(field)) return v;
         return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) ? "true"
              : string.Equals(v, "false", StringComparison.OrdinalIgnoreCase) ? "false"
              // Documents written before this tag became a boolean used да / нет.

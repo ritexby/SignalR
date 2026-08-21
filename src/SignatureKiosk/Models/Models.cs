@@ -364,6 +364,68 @@ public class SignatureRecord
     public string? SubmissionId { get; set; }               // dedupes a retried submit
 }
 
+// ---------- Расписание управления планшетами ----------
+
+/// <summary>
+/// Одно правило расписания: во сколько, в какие дни, что сделать и с какими планшетами.
+/// Время местное для сервера: оператор задаёт «6:50 утра», а не UTC, и при переходе на летнее
+/// время правило остаётся в 6:50 по стенным часам.
+/// </summary>
+public class ScheduleRule
+{
+    public string Id { get; set; } = "";
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Время в формате ЧЧ:ММ по часам сервера.</summary>
+    public string Time { get; set; } = "07:00";
+
+    /// <summary>Дни недели, 1 = понедельник … 7 = воскресенье. Пусто означает каждый день.</summary>
+    public List<int> Days { get; set; } = new();
+
+    /// <summary>Что сделать. Список действий задан в ScheduleActions.</summary>
+    public string Action { get; set; } = "screen-on";
+
+    /// <summary>Значение для яркости и громкости, 0..100.</summary>
+    public int Value { get; set; } = 100;
+
+    /// <summary>Текст для сообщения на экране планшета.</summary>
+    public string Text { get; set; } = "";
+
+    /// <summary>
+    /// Кому: all (все планшеты), group:{id} (группа), device:{id} (один планшет) или
+    /// devices (произвольный набор, перечисленный в DeviceIds).
+    /// </summary>
+    public string Target { get; set; } = "all";
+
+    /// <summary>
+    /// Отмеченные планшеты, когда Target = devices. Набор задаётся прямо в правиле, чтобы не
+    /// приходилось заводить группу ради одного расписания: часто нужно «эти три планшета в
+    /// зале», а группировать их больше незачем.
+    /// </summary>
+    public List<string> DeviceIds { get; set; } = new();
+
+    /// <summary>
+    /// Не трогать планшет, на котором прямо сейчас открыт документ. По умолчанию включено:
+    /// погасить экран или перезагрузить планшет под рукой у подписывающего человека значит
+    /// потерять его подпись и заставить всё начинать заново.
+    /// </summary>
+    public bool SkipBusy { get; set; } = true;
+
+    public string Note { get; set; } = "";
+
+    // Итог последнего запуска, чтобы оператор видел, работает ли правило.
+    public DateTime? LastRunUtc { get; set; }
+    public string LastResult { get; set; } = "";
+
+    /// <summary>Местная дата последнего запуска (гггг-ММ-дд): правило срабатывает раз в сутки.</summary>
+    public string LastRunLocalDate { get; set; } = "";
+}
+
+public class ScheduleStore
+{
+    public List<ScheduleRule> Rules { get; set; } = new();
+}
+
 // ---------- Realtime payloads (server -> kiosk) ----------
 
 public class SlidesPayload
@@ -382,7 +444,8 @@ public class CurrentCommand
 // ---------- API DTOs ----------
 
 public record LoginDto(string? Password);
-public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec);
+/// <summary>DeviceIds задаёт произвольный набор планшетов, когда Target = devices.</summary>
+public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec, List<string>? DeviceIds = null);
 public record TargetDto(string? Target);
 public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups);
 

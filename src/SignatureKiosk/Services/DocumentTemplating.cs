@@ -688,6 +688,31 @@ public static partial class DocumentTemplating
     }
 
     /// <summary>Placeholders present in the document but not provided in fields.</summary>
+    /// <summary>
+    /// Имена, которые документ действительно использует: теги в тексте плюс поля, на которые
+    /// ссылаются условия показа. Нужно, чтобы в подписанный документ не попало то, чего человек
+    /// не видел: внешняя система вправе прислать и свои служебные поля, но подписывают не их.
+    /// </summary>
+    public static HashSet<string> UsedFields(DocumentConfig doc)
+    {
+        var used = new HashSet<string>(Placeholders(doc), StringComparer.OrdinalIgnoreCase);
+        void Add(VisibleWhen? cond)
+        {
+            foreach (var part in Parts(cond)) used.Add(part.Field.Trim());
+        }
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null) continue;
+            Add(p.VisibleWhen);
+            foreach (var b in p.Blocks ?? new List<DocBlock>()) Add(b?.VisibleWhen);
+            foreach (var c in p.Checkboxes ?? new List<DocCheckbox>()) Add(c?.VisibleWhen);
+            foreach (var g in p.Groups ?? new List<DocGroup>()) Add(g?.VisibleWhen);
+        }
+        foreach (var b in doc.SignBlocks ?? new List<DocBlock>()) Add(b?.VisibleWhen);
+        foreach (var b in doc.SignBlocksBelow ?? new List<DocBlock>()) Add(b?.VisibleWhen);
+        return used;
+    }
+
     public static List<string> Missing(DocumentConfig doc, IReadOnlyDictionary<string, string>? fields)
     {
         var provided = fields is null

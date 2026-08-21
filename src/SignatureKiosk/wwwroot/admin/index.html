@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v5.0</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v5.1</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -35,7 +35,7 @@
         <button class="tab" data-tab="logs">Логи</button>
         <button class="tab tab-alerts" data-tab="alerts">Уведомления <span id="alertBadge" class="alert-badge hidden">0</span></button>
       </nav>
-      <button id="logout" class="btn btn-ghost">Выйти</button>
+      <button id="logout" class="btn btn-ghost" data-icon="back">Выйти</button>
     </header>
 
     <main class="content">
@@ -57,9 +57,10 @@
               Загрузить картинки
               <input id="imageUpload" type="file" accept="image/*" multiple hidden />
             </label>
-            <button id="saveSlides" class="btn btn-primary">Сохранить и показать</button>
+            <button id="saveSlides" class="btn btn-primary" data-icon="send">Сохранить и показать</button>
           </div>
         </div>
+        <div id="slidesDevices" class="slides-devices hidden"></div>
         <div id="imageGrid" class="grid"></div>
       </section>
 
@@ -90,7 +91,7 @@
           Планшетов пока нет, поэтому отправить документ некуда. Заведите планшет на вкладке «Планшеты»: там создаётся код активации, который вводится на планшете один раз. Документ можно готовить и без планшета, а также посмотреть в предпросмотре.
         </div>
         <div class="note-box">
-          <div>Подстановка данных: пишите в тексте <code>{{ФИО}}</code>, <code>{{ДР}}</code>, <code>{{Адрес регистрации}}</code> - при показе через API на их место подставляются значения. Можно использовать в заголовках, тексте, пунктах чекбоксов и в условиях показа. Регистр не важен: <code>{{ПОЛ}}</code> и <code>{{Пол}}</code> это один тег.</div>
+          <div>Подстановка данных: пишите в тексте <code>{{ФИО}}</code>, <code>{{ДР}}</code>, <code>{{Адрес регистрации}}</code> - при показе через API на их место подставляются значения. Можно использовать в заголовках, тексте, пунктах чекбоксов и в условиях показа. Регистр не важен: <code>{{ПОЛ}}</code> и <code>{{Пол}}</code> это один тег. <b>Список ниже не ограничение:</b> в запросе можно прислать поле с любым именем, и если такой тег стоит в тексте, он заполнится. Список это то, что уже согласовано и предлагается в подсказках.</div>
           <div id="docPlaceholders" class="placeholders"></div>
         </div>
         <div class="doc-layout">
@@ -121,7 +122,7 @@
       <section class="panel hidden" data-panel="signatures">
         <div class="panel-head">
           <h2>Полученные подписи</h2>
-          <button id="reloadSignatures" class="btn btn-ghost">Обновить</button>
+          <button id="reloadSignatures" class="btn btn-ghost" data-icon="back">Обновить</button>
         </div>
         <div id="signaturesList" class="sig-list"></div>
       </section>
@@ -130,15 +131,15 @@
       <section class="panel hidden" data-panel="scan">
         <div class="panel-head">
           <h2>Сканировать ШК/QR</h2>
-          <button id="reloadScans" class="btn btn-ghost">Обновить</button>
+          <button id="reloadScans" class="btn btn-ghost" data-icon="back">Обновить</button>
         </div>
         <div class="toolbar">
           <label class="target-inline">Планшет:
             <select id="scanTarget"></select>
           </label>
           <div class="toolbar-actions">
-            <button id="stopScan" class="btn btn-ghost">Остановить</button>
-            <button id="startScan" class="btn btn-primary">Начать сканирование</button>
+            <button id="stopScan" class="btn btn-ghost" data-icon="x">Остановить</button>
+            <button id="startScan" class="btn btn-primary" data-icon="search">Начать сканирование</button>
           </div>
         </div>
         <div id="scanNoDevices" class="note-box note-warn hidden">
@@ -156,7 +157,7 @@
       <section class="panel hidden" data-panel="devices">
         <div class="panel-head">
           <h2>Планшеты</h2>
-          <button id="addDevice" class="btn btn-primary">+ Добавить планшет (код)</button>
+          <button id="addDevice" class="btn btn-primary" data-icon="plus">Добавить планшет (код)</button>
         </div>
         <p class="hint">Новый планшет добавляется кодом активации: сгенерируйте код, введите его на планшете один раз - он получит защищённый доступ.</p>
         <div class="filter-bar">
@@ -169,7 +170,7 @@
           </select>
           <select id="devGroupFilter" class="filter-select"></select>
           <select id="devWsFilter" class="filter-select"></select>
-          <button id="devFilterReset" class="btn btn-ghost btn-sm">Сбросить</button>
+          <button id="devFilterReset" class="btn btn-ghost btn-sm" data-icon="x">Сбросить</button>
           <span id="devFilterCount" class="filter-count"></span>
         </div>
         <div id="devicesList" class="dev-list"></div>
@@ -205,12 +206,29 @@
             </label>
           </div>
           <div class="toolbar-actions kc-actions">
-            <button id="saveKioskControl" class="btn btn-primary">Сохранить</button>
+            <button id="saveKioskControl" class="btn btn-primary" data-icon="save">Сохранить</button>
           </div>
           <p class="hint">Автолечение сначала перезапускает приложение на планшете, и только если планшет
             так и не вышел на связь, перезагружает его целиком. Перезагрузка работает при включённом режиме
             Device Owner на планшете. После трёх безуспешных попыток автолечение останавливается, и оператор
             получает уведомление, что планшет требует осмотра.</p>
+        </div>
+
+        <div class="alert-settings">
+          <h3>Расписание</h3>
+          <p class="hint">Команды по времени для всего парка, группы или одного планшета: утром включить
+            экраны, вечером погасить, ночью перезагрузить. Время указывается по часам сервера
+            (<span id="schServerTime">-</span>). Команды идут по локальной сети, поэтому управление выше
+            должно быть включено, а сервер и планшеты должны быть в одной сети.</p>
+          <div id="scheduleList" class="sch-list"></div>
+          <div class="toolbar-actions kc-actions">
+            <button id="addSchedule" class="btn btn-ghost" data-icon="plus">Добавить правило</button>
+            <button id="saveSchedule" class="btn btn-primary" data-icon="save">Сохранить расписание</button>
+          </div>
+          <p class="hint">Если сервис был выключен в назначенный момент, безопасные команды (экран, яркость,
+            громкость, возврат рекламы) выполняются с опозданием до 30 минут: иначе утром можно прийти к
+            тёмным планшетам. Перезагрузка, перезапуск и очистка кэша не догоняются никогда, чтобы
+            опоздавшая команда не перезагрузила парк среди рабочего дня.</p>
         </div>
       </section>
 
@@ -222,7 +240,7 @@
         <p class="hint">Объединяйте планшеты в группы, чтобы отправлять контент сразу на группу (выбор «Кому» на вкладках «Слайды» и «Документ»).</p>
         <div class="toolbar">
           <input id="newGroupName" class="grow" type="text" placeholder="Название группы" />
-          <button id="addGroup" class="btn btn-primary">Добавить</button>
+          <button id="addGroup" class="btn btn-primary" data-icon="plus">Добавить</button>
         </div>
         <div id="groupsList" class="simple-list"></div>
       </section>
@@ -231,7 +249,7 @@
       <section class="panel hidden" data-panel="workstations">
         <div class="panel-head">
           <h2>Рабочие места</h2>
-          <button id="addWorkstation" class="btn btn-primary">+ Добавить место</button>
+          <button id="addWorkstation" class="btn btn-primary" data-icon="plus">Добавить место</button>
         </div>
         <p class="hint"><code>Внешний ID</code> - ключ вашей учётной системы (например <code>WS-204</code>). По нему привязка «планшет ↔ место» доступна из внешнего API.</p>
         <div id="workstationsList" class="simple-list"></div>
@@ -245,7 +263,7 @@
         <p class="hint">Ключ даёт внешней системе доступ к <code>/api/ext/*</code>: список планшетов, статус, привязка к местам, создание кодов активации. Ключ показывается один раз при создании.</p>
         <div class="toolbar">
           <input id="newKeyLabel" class="grow" type="text" placeholder="Название ключа (напр. ERP)" />
-          <button id="addKey" class="btn btn-primary">Создать</button>
+          <button id="addKey" class="btn btn-primary" data-icon="plus">Создать</button>
         </div>
         <div id="keysList" class="simple-list"></div>
       </section>
@@ -263,7 +281,7 @@
       <section class="panel hidden" data-panel="logs">
         <div class="panel-head">
           <h2>Логи ошибок и сбоев</h2>
-          <button id="reloadLogs" class="btn btn-ghost">Обновить</button>
+          <button id="reloadLogs" class="btn btn-ghost" data-icon="back">Обновить</button>
         </div>
         <div class="toolbar">
           <label class="field grow">Поиск
@@ -279,7 +297,7 @@
           </label>
           <div class="toolbar-actions">
             <label class="check-inline"><input id="logAuto" type="checkbox" checked /> Автообновление</label>
-            <button id="clearLogs" class="btn btn-danger">Очистить</button>
+            <button id="clearLogs" class="btn btn-danger" data-icon="trash">Очистить</button>
           </div>
         </div>
         <p class="hint">Сюда попадают ошибки сервиса (сбои сохранения, генерации PDF, соединений) и сбои планшетов
@@ -293,9 +311,9 @@
         <div class="panel-head">
           <h2>Уведомления оператору</h2>
           <div class="toolbar-actions">
-            <button id="testAlert" class="btn btn-ghost">Проверить уведомление</button>
-            <button id="ackAlerts" class="btn btn-ghost">Отметить все прочитанными</button>
-            <button id="reloadAlerts" class="btn btn-ghost">Обновить</button>
+            <button id="testAlert" class="btn btn-ghost" data-icon="alert">Проверить уведомление</button>
+            <button id="ackAlerts" class="btn btn-ghost" data-icon="tick">Отметить все прочитанными</button>
+            <button id="reloadAlerts" class="btn btn-ghost" data-icon="back">Обновить</button>
           </div>
         </div>
         <p class="hint">Уведомление появляется, когда планшет пропал со связи дольше заданного времени
@@ -316,7 +334,7 @@
               <input id="alertErrWindow" type="number" min="1" max="1440" />
             </label>
             <div class="toolbar-actions">
-              <button id="saveAlertSettings" class="btn btn-primary">Сохранить</button>
+              <button id="saveAlertSettings" class="btn btn-primary" data-icon="save">Сохранить</button>
             </div>
           </div>
           <div class="toolbar">

@@ -59,6 +59,9 @@ builder.Services.AddHttpClient("freekiosk", c =>
 builder.Services.AddSingleton<FreeKioskClient>();
 builder.Services.AddSingleton<KioskHealthCache>();
 builder.Services.AddHostedService<AlertMonitor>();
+// Расписание управления планшетами: включить экраны утром, погасить вечером, перезагрузить ночью.
+builder.Services.AddSingleton<ScheduleRunner>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ScheduleRunner>());
 // Mirror server warnings/errors into the operator-visible log ("Логи" tab).
 builder.Services.AddSingleton<ILoggerProvider>(sp => new EventLogProvider(sp.GetRequiredService<EventLogService>()));
 
@@ -329,11 +332,23 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
             if (k.Length > 0) finalGroups[k] = DocumentTemplating.CleanKey(g!.Selected);
         }
 
-        var resolvedDoc = DocumentTemplating.Resolve(storage.GetDocument(), fields, state.DynamicCheckboxes,
+        var template = storage.GetDocument();
+        var resolvedDoc = DocumentTemplating.Resolve(template, fields, state.DynamicCheckboxes,
             finalGroups, finalStates);
         // Блоки, скрытые условием на чекбокс, клиент не видел: их не должно быть и в PDF.
         DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups);
-        var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, fields);
+
+        // В запись и в PDF идут только те поля, которые документ действительно использует.
+        // Внешняя система вправе прислать вместе с данными подписанта и свои служебные поля
+        // (номер заказа, идентификатор в их системе), но человек их не видел и не подписывал,
+        // поэтому в подписанном документе им не место, а хранить их незачем.
+        var used = DocumentTemplating.UsedFields(template);
+        var recordFields = fields is null
+            ? null
+            : fields.Where(kv => used.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
+        if (recordFields is { Count: 0 }) recordFields = null;
+
+        var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, recordFields);
 
         // The record is safely stored: from here the signer's data may leave the tablet.
         ClearSession();
@@ -578,11 +593,18 @@ admin.MapDelete("/images/{id}", (string id) =>
     storage.DeleteImage(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
 
 // ---- Playlist / slideshow ----
-admin.MapGet("/playlist", (string? target) =>
+admin.MapGet("/playlist", (string? target, string? ids) =>
 {
     var t = string.IsNullOrWhiteSpace(target) ? KioskCoordinator.AllTarget : target;
     KioskState state;
     if (t == KioskCoordinator.AllTarget) state = storage.GetStates().Default;
+    else if (t == "devices")
+    {
+        // Набор планшетов: показываем список первого отмеченного. Сохранение пишет всем
+        // отмеченным одно и то же, поэтому это и есть список набора.
+        var first = (ids ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+        state = first is null ? storage.GetStates().Default : storage.ResolveState(first);
+    }
     else if (t.StartsWith("device:", StringComparison.Ordinal)) state = storage.ResolveState(t["device:".Length..]);
     else if (t.StartsWith("group:", StringComparison.Ordinal))
     {
@@ -600,7 +622,9 @@ admin.MapGet("/playlist", (string? target) =>
 admin.MapPut("/playlist", async (PlaylistSaveDto dto, KioskCoordinator coord) =>
 {
     var target = string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!;
-    await coord.SaveAndShowSlidesAsync(target, dto?.ImageIds ?? new List<string>(), dto?.IntervalSec ?? 8);
+    if (target == "devices" && (dto?.DeviceIds is null || dto.DeviceIds.Count == 0))
+        return Results.BadRequest(new { error = "Отметьте хотя бы один планшет." });
+    await coord.SaveAndShowSlidesAsync(target, dto?.ImageIds ?? new List<string>(), dto?.IntervalSec ?? 8, dto?.DeviceIds);
     return Results.Ok(new { ok = true });
 });
 
@@ -612,7 +636,10 @@ admin.MapGet("/field-schema", () => Results.Ok(new
     fields = DocumentTemplating.KnownFields.Select(f => new
     {
         name = f,
-        values = FieldSchema.Options.TryGetValue(f, out var v) ? v : null
+        values = FieldSchema.Options.TryGetValue(f, out var v) ? v : null,
+        // Подписи для человека там, где значение на проводе и слово на экране это разные вещи:
+        // пол уходит как M и F, а оператор выбирает «М (мужской)» и «Ж (женский)».
+        valueLabels = FieldSchema.ValueLabels.TryGetValue(f, out var l) ? l : null
     })
 }));
 
@@ -641,7 +668,28 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
     if (badField is not null) return Results.BadRequest(new { error = badField });
     var doc = dto?.Document ?? storage.GetDocument();
     DocumentTemplating.Sanitize(doc);
-    var resolved = DocumentTemplating.Resolve(doc, dto?.Fields, dto?.Checkboxes);
+
+    // Разбор ровно такой же, как при показе на планшет, иначе предпросмотр обещал бы одно, а
+    // клиент видел другое. Чекбокс с именем, которое есть в документе, задаёт состояние тому
+    // пункту, который уже стоит на своём месте; остальные дописываются вниз страницы. Выбор в
+    // двойных зависимых чекбоксах раньше приходил в запрос, но не применялся вовсе.
+    var live = DocumentTemplating.LiveKeys(doc);
+    var extra = new List<DocCheckbox>();
+    var states = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+    foreach (var cb in (dto?.Checkboxes ?? new List<DocCheckbox>()).Where(x => x is not null))
+    {
+        var key = DocumentTemplating.CleanKey(cb.Key);
+        if (key.Length > 0 && live.Contains(key)) { states[key] = cb.Checked; continue; }
+        extra.Add(cb);
+    }
+    var selections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var g in (dto?.Groups ?? new List<GroupSelectionDto>()).Where(x => x is not null))
+    {
+        var key = DocumentTemplating.CleanKey(g.Key);
+        if (key.Length > 0) selections[key] = DocumentTemplating.CleanKey(g.Selected);
+    }
+
+    var resolved = DocumentTemplating.Resolve(doc, dto?.Fields, extra, selections, states);
     return Results.Ok(new
     {
         document = resolved,
@@ -800,6 +848,36 @@ admin.MapGet("/devices/{id}/kiosk/screenshot", async (string id, FreeKioskClient
     return bytes is null
         ? Results.Json(new { error }, statusCode: StatusCodes.Status502BadGateway)
         : Results.File(bytes, contentType ?? "image/png");
+});
+
+// ---- Расписание управления планшетами ----
+// Список действий отдаёт сервер, чтобы интерфейс и исполнитель не могли разойтись в именах.
+admin.MapGet("/schedule/actions", () => Results.Ok(ScheduleActions.All.Select(a => new
+{
+    key = a.Key,
+    title = a.Title,
+    needsValue = a.NeedsValue,
+    needsText = a.NeedsText,
+    catchUp = a.CatchUp
+})));
+
+admin.MapGet("/schedule", () => Results.Ok(new
+{
+    rules = storage.GetScheduleRules(),
+    // Часы сервера: оператор задаёт время по ним, и это должно быть видно, а не подразумеваться.
+    serverTime = DateTime.Now.ToString("HH:mm"),
+    serverZone = TimeZoneInfo.Local.StandardName
+}));
+
+admin.MapPut("/schedule", (List<ScheduleRule>? rules) => Results.Ok(new { rules = storage.SaveScheduleRules(rules) }));
+
+// Запуск правила по требованию: проверить его, не дожидаясь назначенного времени.
+admin.MapPost("/schedule/{id}/run", async (string id, ScheduleRunner runner, CancellationToken cancel) =>
+{
+    var rule = storage.GetScheduleRules().FirstOrDefault(r => r.Id == id);
+    if (rule is null) return Results.NotFound();
+    var result = await runner.RunNow(rule, cancel);
+    return Results.Ok(new { ok = true, result });
 });
 
 // ---- Operator alerts ----

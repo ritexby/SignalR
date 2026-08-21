@@ -6,10 +6,11 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "5.0";
+  var APP_VERSION = "5.1";
 
   var state = {
-    slidesTarget: "all",   // recipient for advertising slides (all / group / device)
+    slidesTarget: "all",   // кому идёт реклама: all / group:{id} / device:{id} / devices
+    slidesDeviceIds: [],   // отмеченные планшеты, когда выбран произвольный набор
     docTarget: "",         // recipient for the document: exactly ONE device, or "" if none yet
     scanTarget: "",        // tablet used for barcode / QR scanning
     images: [], playlist: [], interval: 6,
@@ -118,27 +119,55 @@
   });
 
   // ---------------- Tabs ----------------
+  // Открытая вкладка запоминается в адресе. Иначе обновление страницы во время работы над
+  // документом выбрасывало обратно на «Слайды», а вернуться приходилось руками. Заодно на
+  // конкретную вкладку теперь можно дать ссылку, и работает кнопка «назад» в браузере.
+  function openTab(name, remember) {
+    var tab = document.querySelector('.tab[data-tab="' + name + '"]');
+    if (!tab) return false;
+    document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("active"); });
+    tab.classList.add("active");
+    document.querySelectorAll(".panel").forEach(function (p) { p.classList.toggle("hidden", p.getAttribute("data-panel") !== name); });
+    if (remember !== false && location.hash !== "#" + name) {
+      // replaceState, а не запись в hash: иначе каждое переключение вкладки копилось бы в
+      // истории браузера и «назад» пришлось бы жать десять раз.
+      try { history.replaceState(null, "", "#" + name); } catch (e) { location.hash = name; }
+    }
+    loadTab(name);
+    return true;
+  }
+
+  function loadTab(name) {
+    if (name === "signatures") loadSignatures();
+    var content = document.querySelector(".content");
+    if (content) content.classList.toggle("content-wide", name === "document");
+    if (name === "devices") { loadDevices(); loadKioskControl(); loadSchedule(); }
+    if (name === "groups") loadGroups();
+    if (name === "workstations") loadWorkstations();
+    if (name === "apikeys") loadKeys();
+    if (name === "apidocs") renderApiDocs();
+    if (name === "scan") loadScans();
+    if (name === "logs") loadLogs();
+    if (name === "alerts") { loadAlerts().then(renderAlerts); loadAlertSettings(); }
+    // The log tab polls while it is open; stop polling when the operator leaves it.
+    if (name !== "logs") stopLogPolling();
+  }
+
   document.querySelectorAll(".tab").forEach(function (tab) {
-    tab.addEventListener("click", function () {
-      document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("active"); });
-      tab.classList.add("active");
-      var name = tab.getAttribute("data-tab");
-      document.querySelectorAll(".panel").forEach(function (p) { p.classList.toggle("hidden", p.getAttribute("data-panel") !== name); });
-      if (name === "signatures") loadSignatures();
-      var content = document.querySelector(".content");
-      if (content) content.classList.toggle("content-wide", name === "document");
-      if (name === "devices") { loadDevices(); loadKioskControl(); }
-      if (name === "groups") loadGroups();
-      if (name === "workstations") loadWorkstations();
-      if (name === "apikeys") loadKeys();
-      if (name === "apidocs") renderApiDocs();
-      if (name === "scan") loadScans();
-      if (name === "logs") loadLogs();
-      if (name === "alerts") { loadAlerts().then(renderAlerts); loadAlertSettings(); }
-      // The log tab polls while it is open; stop polling when the operator leaves it.
-      if (name !== "logs") stopLogPolling();
-    });
+    tab.addEventListener("click", function () { openTab(tab.getAttribute("data-tab"), true); });
   });
+  window.addEventListener("hashchange", restoreTab);
+
+  // Вкладка из адреса открывается после входа: до него панели скрыты целиком. Имя из адреса
+  // приходит закодированным, если в нём есть кириллица, поэтому его надо раскодировать.
+  // Незнакомое имя не оставляем в адресе: иначе адрес говорит одно, а на экране другое.
+  function restoreTab() {
+    var raw = (location.hash || "").replace(/^#/, "");
+    var name = "";
+    try { name = decodeURIComponent(raw); } catch (e) { name = raw; }
+    if (name && openTab(name, false)) return;
+    openTab("slides", true);
+  }
 
   // ---------------- Modal ----------------
   // A modal may hold images built from blobs (a tablet screenshot). Dropping the markup does not
@@ -155,11 +184,26 @@
   $("modal").addEventListener("click", function (e) { if (e.target === $("modal")) closeModal(); });
 
   // ---------------- Target selectors (independent: slides vs document) ----------------
-  $("slidesTarget").addEventListener("change", function () { state.slidesTarget = this.value; loadPlaylist(); });
+  var slidesPicker = null;
+  function ensureSlidesPicker() {
+    var host = $("slidesDevices");
+    if (!host) return null;
+    if (!slidesPicker) {
+      slidesPicker = devicePicker(state.slidesDeviceIds || []);
+      host.appendChild(slidesPicker);
+    }
+    host.classList.toggle("hidden", state.slidesTarget !== "devices");
+    return slidesPicker;
+  }
+  $("slidesTarget").addEventListener("change", function () {
+    state.slidesTarget = this.value;
+    ensureSlidesPicker();
+    loadPlaylist();
+  });
   $("docTarget").addEventListener("change", function () { state.docTarget = this.value; });
 
   function targetExists(t) {
-    return t === "all"
+    return t === "all" || t === "devices"
       || state.groups.some(function (g) { return "group:" + g.id === t; })
       || state.devices.some(function (d) { return "device:" + d.id === t; });
   }
@@ -177,7 +221,9 @@
       state.devices.forEach(function (d) { od.appendChild(new Option(d.name + (d.online ? "" : " (офлайн)"), "device:" + d.id)); });
       sel.appendChild(od);
     }
-    sel.value = targetExists(current) ? current : "all";
+    // Произвольный набор: последним пунктом, после всех, групп и отдельных планшетов.
+    sel.appendChild(new Option("Выбранные планшеты…", "devices"));
+    sel.value = current === "devices" || targetExists(current) ? current : "all";
     return sel.value;
   }
 
@@ -193,6 +239,9 @@
 
   function renderTargetOptions() {
     state.slidesTarget = fillTargetSelect($("slidesTarget"), state.slidesTarget);
+    // Список планшетов мог измениться: перерисовываем отметки, сохраняя выбранное.
+    if (slidesPicker) { state.slidesDeviceIds = slidesPicker.ids(); slidesPicker.refresh(); }
+    ensureSlidesPicker();
     state.docTarget = fillDeviceSelect($("docTarget"), state.docTarget);
     // Keep the scan target fresh too: it used to be refilled only when the scan tab was loaded, so
     // a deleted tablet stayed selectable and "start scanning" silently did nothing.
@@ -219,7 +268,9 @@
   // ---------------- Images / slides ----------------
   function loadImages() { return apiJson("/images").then(function (imgs) { state.images = imgs; }); }
   function loadPlaylist() {
-    return apiJson("/playlist?target=" + encodeURIComponent(state.slidesTarget)).then(function (p) {
+    var q = "/playlist?target=" + encodeURIComponent(state.slidesTarget);
+    if (state.slidesTarget === "devices" && slidesPicker) q += "&ids=" + encodeURIComponent(slidesPicker.ids().join(","));
+    return apiJson(q).then(function (p) {
       state.playlist = p.imageIds || []; state.interval = p.intervalSec || 6;
       $("intervalInput").value = state.interval; renderImages();
     });
@@ -264,12 +315,22 @@
   });
   $("saveSlides").addEventListener("click", function () {
     var interval = parseInt($("intervalInput").value, 10) || 6;
-    apiSend("/playlist", "PUT", { target: state.slidesTarget, imageIds: state.playlist, intervalSec: interval })
-      .then(function () { toast("Сохранено и отправлено (" + targetLabel(state.slidesTarget) + ")"); });
+    var ids = state.slidesTarget === "devices" && slidesPicker ? slidesPicker.ids() : null;
+    if (state.slidesTarget === "devices" && (!ids || !ids.length)) { toast("Отметьте хотя бы один планшет."); return; }
+    apiSend("/playlist", "PUT", { target: state.slidesTarget, imageIds: state.playlist, intervalSec: interval, deviceIds: ids })
+      .then(function () { toast("Сохранено и отправлено (" + targetLabel(state.slidesTarget, ids) + ")"); });
   });
 
-  function targetLabel(t) {
+  function targetLabel(t, ids) {
     if (t === "all") return "все планшеты";
+    if (t === "devices") {
+      var n = (ids || []).length;
+      if (n === 1) {
+        var one = state.devices.find(function (x) { return x.id === ids[0]; });
+        return one ? one.name : "1 планшет";
+      }
+      return "отмеченные планшеты: " + n;
+    }
     if (t.indexOf("group:") === 0) { var g = state.groups.find(function (x) { return "group:" + x.id === t; }); return "группа " + (g ? g.name : ""); }
     var d = state.devices.find(function (x) { return "device:" + x.id === t; }); return d ? d.name : "планшет";
   }
@@ -288,6 +349,10 @@
   var COND_OPS = [["eq", "равно"], ["ne", "не равно"], ["empty", "пусто"], ["notempty", "не пусто"], ["in", "одно из (через запятую)"]];
   // Tags that only ever carry a fixed set of values. Offering them as a list removes the guesswork
   // (was it "M" or "муж"? "да" or "yes"?) and the typo that silently makes a condition never match.
+  // Подписи значений для человека: на проводе пол остаётся M и F, потому что так его шлёт
+  // внешняя система и так записаны уже существующие условия, а на экране оператор видит Ж и М.
+  // Настоящие подписи приходят с сервера, здесь только запасной вариант до его ответа.
+  var FIELD_LABELS = { "Пол": { "M": "М (мужской)", "F": "Ж (женский)" } };
   var FIELD_VALUES = {
     "Пол": ["M", "F"],
     "cross-border": ["true", "false"],
@@ -321,7 +386,10 @@
       if (!s || !s.fields || !s.fields.length) return;
       KNOWN_FIELDS = s.fields.map(function (f) { return f.name; });
       FIELD_VALUES = {};
-      s.fields.forEach(function (f) { if (f.values && f.values.length) FIELD_VALUES[f.name] = f.values; });
+      s.fields.forEach(function (f) {
+        if (f.values && f.values.length) FIELD_VALUES[f.name] = f.values;
+        if (f.valueLabels) FIELD_LABELS[f.name] = f.valueLabels;
+      });
     }).catch(function (e) { console.error(e); });
   }
   var OTHER_OPTION = "\u0000other";   // cannot collide with a real tag or value
@@ -786,7 +854,7 @@
         var listable = known && op.value !== "in";
         valSel.innerHTML = "";
         if (listable) {
-          known.forEach(function (v) { valSel.appendChild(new Option(v, v)); });
+          known.forEach(function (v) { valSel.appendChild(new Option(valueLabel(f, v), v)); });
           valSel.appendChild(new Option("другое...", OTHER_OPTION));
           if (keep && known.indexOf(keep) < 0) { valSel.value = OTHER_OPTION; val.value = keep; }
           else { valSel.value = keep || known[0]; val.value = ""; }
@@ -865,7 +933,7 @@
       var opName = "";
       COND_OPS.forEach(function (o) { if (o[0] === c.op) opName = o[1]; });
       if (c.op === "empty" || c.op === "notempty") return "«" + c.field + "» " + opName;
-      return "«" + c.field + "» " + opName + " " + (c.value || "(пусто)");
+      return "«" + c.field + "» " + opName + " " + (valueLabel(c.field, c.value) || "(пусто)");
     }
     function describe() {
       var c = readCondition(box);
@@ -996,14 +1064,17 @@
       wrap.appendChild(tag);
     });
 
-    // Тег, которого нет в списке известных: почти всегда опечатка, и увидеть её надо здесь,
-    // а не когда клиент прочитает {{ФИ0}} на планшете.
-    var unknown = used.filter(function (k) { return !isKnownField(k); });
-    if (unknown.length) {
-      wrap.appendChild(el("span", "ph-label ph-label-warn", "Нет в списке, проверьте написание:"));
-      unknown.forEach(function (k) {
+    // Тег не из стандартного списка. Это не ошибка: API принимает любое имя, и такой тег
+    // заполнится, если внешняя система пришлёт ровно такое же имя. Но выглядит он точно так
+    // же, как опечатка в стандартном теге, поэтому показывается отдельно и с пояснением.
+    var custom = used.filter(function (k) { return !isKnownField(k); });
+    if (custom.length) {
+      wrap.appendChild(el("span", "ph-label ph-label-warn", "Свои теги (не из списка выше):"));
+      custom.forEach(function (k) {
         var tag = el("code", "ph-tag ph-unknown", "{{" + k + "}}");
-        tag.title = "Такого тега в API нет. На планшете он останется в тексте как есть.";
+        tag.title = "Свой тег. Он заполнится, если внешняя система пришлёт поле с точно таким же " +
+          "именем: в fields можно передать любое имя, не только из списка. Если это опечатка в " +
+          "стандартном теге, исправьте её здесь, иначе клиент увидит {{" + k + "}} прямо в тексте.";
         wrap.appendChild(tag);
       });
     }
@@ -1038,8 +1109,8 @@
     handle.title = "Перетащите, чтобы изменить порядок блоков";
     modeBar.appendChild(handle);
     var seg = el("div", "seg");
-    var btnText = el("button", "btn btn-sm", "Текст"); btnText.type = "button";
-    var btnImg = el("button", "btn btn-sm", "Картинка"); btnImg.type = "button";
+    var btnText = iconBtn("text", "Текст", "btn-sm"); btnText.type = "button";
+    var btnImg = iconBtn("image", "Картинка", "btn-sm"); btnImg.type = "button";
     seg.appendChild(btnText); seg.appendChild(btnImg);
     modeBar.appendChild(seg);
     bc.appendChild(modeBar);
@@ -1079,7 +1150,7 @@
     bc.appendChild(el("div", "sub-label", "Условие показа блока"));
     bc.appendChild(conditionEditor(b.visibleWhen, "blockcond"));
     var del = iconBtn("trash", "Удалить блок", "btn-danger btn-sm");
-    del.addEventListener("click", function () { bc.remove(); updatePlaceholders(); });
+    del.addEventListener("click", function () { removeItem(bc); });
     bc.appendChild(del);
     return bc;
   }
@@ -1209,7 +1280,7 @@
       var isTag = KNOWN_FIELDS.some(function (k) { return k.toLowerCase() === f.toLowerCase(); });
       var isKey = known.some(function (k) { return k === f; });
       if (!isTag && !isKey)
-        problems.push({ level: "warn", text: where + ": условие ссылается на «" + f + "», такого тега и такого имени в документе нет. Блок не покажется никогда." });
+        problems.push({ level: "warn", text: where + ": условие ссылается на «" + f + "». Такого имени нет ни среди стандартных тегов, ни среди чекбоксов документа. Это сработает, только если внешняя система пришлёт поле с точно таким именем; иначе блок не покажется никогда." });
       if (cond.op !== "empty" && cond.op !== "notempty" && !String(cond.value || "").trim())
         problems.push({ level: "error", text: where + ": в условии не задано значение." });
       if (isKey && keys.groups[f] && cond.op !== "empty" && cond.op !== "notempty") {
@@ -1263,10 +1334,11 @@
       checkCondition(b.visibleWhen, "Страница подписи, блок " + (i + 1));
     });
 
-    // Тег с опечаткой остаётся в тексте как {{вот так}} и виден клиенту.
+    // Свой тег это не ошибка: в fields можно прислать любое имя. Но незаполненный тег
+    // остаётся в тексте как {{вот так}} и виден клиенту, поэтому о нём стоит сказать.
     scanPlaceholders().forEach(function (t) {
       var isTag = KNOWN_FIELDS.some(function (k) { return k.toLowerCase() === t.toLowerCase(); });
-      if (!isTag) problems.push({ level: "warn", text: "Тег {{" + t + "}} не входит в список известных. Проверьте написание, иначе он останется в тексте как есть." });
+      if (!isTag) problems.push({ level: "warn", text: "Тег {{" + t + "}} не из стандартного списка. Так можно: внешняя система вправе прислать любое имя, и он заполнится. Но если это опечатка, клиент увидит {{" + t + "}} прямо в тексте." });
     });
 
     return problems;
@@ -1286,7 +1358,7 @@
     });
     c.appendChild(list);
     var row = el("div", "toolbar-actions");
-    var back = el("button", "btn btn-ghost", "Вернуться и исправить");
+    var back = iconBtn("back", "Вернуться и исправить", "btn-ghost");
     back.addEventListener("click", closeModal);
     var go = el("button", "btn btn-primary", "Всё равно продолжить");
     go.addEventListener("click", function () { closeModal(); onProceed(); });
@@ -1369,6 +1441,15 @@
 
   // После перетаскивания полосы вставки оказываются не там, где нужно: расставляем заново,
   // по одной перед списком и после каждого элемента.
+  // Удаление элемента страницы. Полосы вставки стоят между элементами, поэтому после удаления
+  // две соседние полосы оказываются подряд и выглядят как ошибка. Пересобираем их сразу.
+  function removeItem(node) {
+    var list = node.closest('[data-role="itemlist"]');
+    node.remove();
+    if (list) normalizeBars(list);
+    updatePlaceholders();
+  }
+
   function normalizeBars(list) {
     Array.prototype.slice.call(list.querySelectorAll(":scope > .insert-bar")).forEach(function (b) { b.remove(); });
     var nodes = Array.prototype.slice.call(list.children).filter(function (n) { return n.classList.contains("page-item"); });
@@ -1667,14 +1748,25 @@
     handle.title = "Перетащите, чтобы изменить порядок";
     row.appendChild(handle);
     var label = el("input"); label.type = "text"; label.placeholder = "Текст пункта"; label.value = cb.label || ""; label.setAttribute("data-role", "cblabel"); row.appendChild(label);
-    // Имя, по которому внешняя система адресует именно этот пункт. Без имени пункт остаётся
-    // обычным чекбоксом из шаблона, как раньше.
-    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = cb.key || ""; key.setAttribute("data-role", "cbkey"); row.appendChild(key);
+    // Имя, по которому внешняя система адресует именно этот пункт. Подставляется само из
+    // текста, латиницей, и остаётся на виду: его можно поправить руками. Без имени пункт
+    // остаётся обычным чекбоксом из шаблона: он работает и попадает в запись, но задать его
+    // из API и сослаться на него в условии нельзя.
+    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API";
+    key.value = cb.key || ""; key.setAttribute("data-role", "cbkey");
+    key.title = "Имя этого пункта для внешней системы. Заполняется само из текста. " +
+      "По нему API задаёт начальное состояние пункта и по нему на пункт ссылаются условия показа. " +
+      "Можно оставить пустым: тогда пункт просто нельзя будет задать из API.";
+    row.appendChild(key);
+    linkAutoKey(label, key, function () {
+      var card = box.closest('[data-role="pagecard"]');
+      return card ? Array.prototype.slice.call(card.querySelectorAll('[data-role="cbkey"]')) : [];
+    });
     var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = cb.required !== false; req.setAttribute("data-role", "cbreq");
     reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательный")); row.appendChild(reqLabel);
     var chkLabel = el("label"); var chk = el("input"); chk.type = "checkbox"; chk.checked = !!cb.checked; chk.setAttribute("data-role", "cbchecked");
     chkLabel.appendChild(chk); chkLabel.appendChild(document.createTextNode(" отмечен")); row.appendChild(chkLabel);
-    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { box.remove(); updatePlaceholders(); }); row.appendChild(del);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { removeItem(box); }); row.appendChild(del);
     box.appendChild(row);
     box.appendChild(conditionEditor(cb.visibleWhen, "cbcond"));
     return box;
@@ -1690,11 +1782,19 @@
     handle.title = "Перетащите, чтобы изменить порядок";
     head.appendChild(handle);
     var title = el("input"); title.type = "text"; title.placeholder = "Общий заголовок"; title.value = g.title || ""; title.setAttribute("data-role", "gtitle"); head.appendChild(title);
-    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = g.key || ""; key.setAttribute("data-role", "gkey"); head.appendChild(key);
+    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API";
+    key.value = g.key || ""; key.setAttribute("data-role", "gkey");
+    key.title = "Имя этой группы для внешней системы. Заполняется само из заголовка. " +
+      "По нему API присылает выбранный вариант и по нему на группу ссылаются условия показа.";
+    head.appendChild(key);
+    linkAutoKey(title, key, function () {
+      var page = card.closest('[data-role="pagecard"]');
+      return page ? Array.prototype.slice.call(page.querySelectorAll('[data-role="gkey"]')) : [];
+    });
     linkAutoKey(title, key, function () { return []; });
     var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = !!g.required; req.setAttribute("data-role", "greq");
     reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательно выбрать")); head.appendChild(reqLabel);
-    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { card.remove(); updatePlaceholders(); }); head.appendChild(del);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { removeItem(card); }); head.appendChild(del);
     card.appendChild(head);
 
     var opts = el("div", "opt-list"); opts.setAttribute("data-role", "optlist");
@@ -1810,7 +1910,7 @@
       if (known) {
         var wrap = el("label", "field", k);
         var sel = el("select");
-        known.forEach(function (v) { sel.appendChild(new Option(v, v)); });
+        known.forEach(function (v) { sel.appendChild(new Option(valueLabel(k, v), v)); });
         sel.value = known.indexOf(previewDefault(k)) >= 0 ? previewDefault(k) : known[0];
         wrap.appendChild(sel);
         c.appendChild(wrap); inputs[k] = sel;
@@ -1820,21 +1920,70 @@
       }
     });
 
-    var cbLabel = el("label", "field", "Чекбоксы из API (по одному в строке, «+» в начале - отмечен)");
+    // Внешняя система задаёт и состояние именованных чекбоксов, и выбор в двойных зависимых
+    // чекбоксах. Раньше проверить это в предпросмотре было нельзя, хотя по API оно приходит
+    // так же, как теги, и точно так же влияет на условия показа.
+    var keys = docKeys();
+    var cbState = {};
+    if (keys.checks.length) {
+      c.appendChild(sectionLabel("check", "Чекбоксы документа (что прислано отмеченным)"));
+      var cbBox = el("div", "pv-setup-list");
+      keys.checks.forEach(function (k) {
+        var lbl = el("label", "sch-dev");
+        var cb = document.createElement("input");
+        cb.type = "checkbox"; cb.setAttribute("data-check", k);
+        cb.addEventListener("change", function () { cbState[k] = cb.checked; lbl.classList.toggle("on", cb.checked); });
+        lbl.appendChild(cb); lbl.appendChild(el("span", null, k));
+        cbBox.appendChild(lbl);
+      });
+      c.appendChild(cbBox);
+    }
+
+    var groupSel = {};
+    var groupNames = Object.keys(keys.groups);
+    if (groupNames.length) {
+      c.appendChild(sectionLabel("list", "Двойные зависимые чекбоксы (что выбрано)"));
+      groupNames.forEach(function (g) {
+        var wrap = el("label", "field", g);
+        var sel = el("select"); sel.setAttribute("data-group", g);
+        sel.appendChild(new Option("не выбрано", ""));
+        (keys.groups[g] || []).forEach(function (o) { sel.appendChild(new Option(o, o)); });
+        wrap.appendChild(sel); c.appendChild(wrap); groupSel[g] = sel;
+      });
+    }
+
+    c.appendChild(sectionLabel("plus", "Чекбоксы, добавленные через API (которых нет в документе)"));
+    var cbLabel = el("label", "field", "По одному в строке, «+» в начале - отмечен");
     var cbArea = el("textarea"); cbArea.rows = 3; cbArea.placeholder = "+Согласен на рассылку\nДополнительное согласие";
     cbLabel.appendChild(cbArea); c.appendChild(cbLabel);
 
-    var go = el("button", "btn btn-primary", "Показать предпросмотр");
-    go.addEventListener("click", function () {
+    function collect() {
       var fields = {}; placeholders.forEach(function (k) { fields[k] = inputs[k].value; });
-      var checkboxes = (cbArea.value || "").split("\n").map(function (line) {
-        var t = line.trim(); if (!t) return null;
+      // Именованный чекбокс документа задаётся по имени: сервер поймёт, что это он, и поставит
+      // отметку на его месте, а не допишет новый пункт в конец страницы.
+      var checkboxes = keys.checks.map(function (k) { return { key: k, checked: !!cbState[k] }; });
+      (cbArea.value || "").split("\n").forEach(function (line) {
+        var t = line.trim(); if (!t) return;
         var checked = t.charAt(0) === "+";
-        return { label: checked ? t.slice(1).trim() : t, checked: checked, required: false };
-      }).filter(Boolean);
-      runPreview(fields, checkboxes);
+        checkboxes.push({ label: checked ? t.slice(1).trim() : t, checked: checked, required: false });
+      });
+      var groups = groupNames.map(function (g) { return { key: g, selected: groupSel[g].value }; });
+      return { fields: fields, checkboxes: checkboxes, groups: groups };
+    }
+
+    var go = iconBtn("eye", "Показать предпросмотр", "btn-primary");
+    go.addEventListener("click", function () {
+      var d = collect();
+      runPreview(d.fields, d.checkboxes, d.groups);
     });
     c.appendChild(go);
+
+    // Отправка тех же данных на настоящий планшет: то же самое, что прислала бы внешняя
+    // система. Нужно, чтобы проверить документ на живом экране, а не только в окне.
+    if (state.devices.length) {
+      c.appendChild(checkOnTabletRow(collect));
+    }
+
     openModal(c);
     if (placeholders.length && inputs[placeholders[0]]) inputs[placeholders[0]].focus();
   }
@@ -1842,6 +1991,21 @@
   // Тег в документе может быть записан в другом регистре, чем в списке известных: сервер
   // сравнивает имена без учёта регистра, и редактор обязан вести себя так же. Иначе «ПОЛ»
   // остаётся полем для ручного ввода без списка значений и без образца, хотя «Пол» их имеет.
+  // Подпись значения там, где значение на проводе и слово на экране это разные вещи.
+  function valueLabel(field, value) {
+    var k = (field || "").trim();
+    var map = FIELD_LABELS[k];
+    if (!map) {
+      var lk = k.toLowerCase();
+      for (var key in FIELD_LABELS) if (key.toLowerCase() === lk) { map = FIELD_LABELS[key]; break; }
+    }
+    if (!map) return value;
+    if (map[value]) return map[value];
+    var lv = String(value || "").toLowerCase();
+    for (var v in map) if (v.toLowerCase() === lv) return map[v];
+    return value;
+  }
+
   function fieldValues(name) {
     var k = (name || "").trim();
     if (FIELD_VALUES[k]) return FIELD_VALUES[k];
@@ -1864,10 +2028,35 @@
     return /^text\d+$/.test(lt) ? "Текст из внешней системы" : "";
   }
 
-  function runPreview(fields, checkboxes) {
-    apiSend("/document/preview", "POST", { document: state.doc, fields: fields, checkboxes: checkboxes })
+  // Строка «проверить на планшете»: те же тестовые значения уходят на выбранный планшет ровно
+  // так, как их прислала бы внешняя система. Одна и та же строка и в окне ввода значений, и в
+  // самом предпросмотре: решение «выглядит правильно, посмотрю на живом экране» приходит и там,
+  // и там.
+  function checkOnTabletRow(collect) {
+    var row = el("div", "pv-setup-send");
+    if (!state.devices.length) {
+      row.appendChild(el("span", "sig-meta", "Проверить на планшете нельзя: планшетов пока нет."));
+      return row;
+    }
+    var sel = el("select", "sch-target");
+    fillDeviceSelect(sel, state.docTarget);
+    row.appendChild(el("span", "sig-meta", "Планшет:"));
+    row.appendChild(sel);
+    var send = iconBtn("send", "Проверить на планшете", "btn-ghost");
+    send.title = "Отправить эти же тестовые значения на выбранный планшет ровно так, как их прислала бы внешняя система. Документ появится на его экране.";
+    send.addEventListener("click", function () {
+      var d = collect();
+      apiSend("/show-document", "POST", { target: sel.value, fields: d.fields, checkboxes: d.checkboxes, groups: d.groups })
+        .then(function () { closeModal(); toast("Отправлено на планшет: " + targetLabel(sel.value)); });
+    });
+    row.appendChild(send);
+    return row;
+  }
+
+  function runPreview(fields, checkboxes, groups) {
+    apiSend("/document/preview", "POST", { document: state.doc, fields: fields, checkboxes: checkboxes, groups: groups })
       .then(function (r) { return r.json(); })
-      .then(function (data) { renderPreview(data, fields, checkboxes); })
+      .then(function (data) { renderPreview(data, fields, checkboxes, groups); })
       .catch(function (e) {
         // Сетевую ошибку уже показал api(). А вот поломку самой отрисовки раньше глушил пустой
         // catch: окно просто не открывалось, и понять почему было нельзя.
@@ -1902,12 +2091,75 @@
     }
   }
 
-  function renderPreview(data, fields, checkboxes) {
+  function renderPreview(data, fields, checkboxes, groups) {
     var doc = (data && data.document) || { pages: [] };
     var pages = doc.pages || [];
     var screens = pages.map(function (_, i) { return { type: "page", index: i }; });
     screens.push({ type: "signature" });
     var idx = 0;
+
+    // Предпросмотр повторяет планшет не только видом, но и поведением: пункты отмечаются,
+    // в группах выбирается один вариант, условия на отметки пересчитываются на месте, а
+    // «Далее» не пускает дальше, пока не отмечено обязательное. Без этого блок, который
+    // появляется по отметке клиента, нельзя было проверить вообще: он не показывался никогда.
+    var checks = {};   // "p{страница}_c{номер}" -> отмечен
+    var picks = {};    // имя группы -> имя выбранного варианта ("" = ничего)
+    pages.forEach(function (p, pi) {
+      (p.checkboxes || []).forEach(function (cb, ci) { if (cb && cb.checked) checks["p" + pi + "_c" + ci] = true; });
+      (p.groups || []).forEach(function (g) { if (g && g.key) picks[g.key] = g.selected || ""; });
+    });
+
+    // Значение имени, на которое ссылается условие. Скрытый пункт считается неотмеченным:
+    // так взаимные ссылки разрешаются сами и не зацикливаются. Точно как на планшете.
+    function liveValue(key) {
+      if (Object.prototype.hasOwnProperty.call(picks, key)) return picks[key] || "";
+      var found = "";
+      pages.forEach(function (p, pi) {
+        (p.checkboxes || []).forEach(function (cb, ci) {
+          if (cb && cb.key === key) found = checks["p" + pi + "_c" + ci] ? "true" : "false";
+        });
+      });
+      return found;
+    }
+    function partHolds(c) {
+      var val = String(liveValue(c.field) || "").trim().toLowerCase();
+      var target = String(c.value || "").trim().toLowerCase();
+      switch (c.op) {
+        case "ne": return val !== target;
+        case "empty": return val.length === 0;
+        case "notempty": return val.length > 0;
+        case "in": return target.split(",").map(function (x) { return x.trim(); })
+          .filter(function (x) { return x.length; }).indexOf(val) >= 0;
+        default: return val === target;
+      }
+    }
+    function holds(cond) {
+      var parts = condParts(cond);
+      for (var i = 0; i < parts.length; i++) if (!partHolds(parts[i])) return false;
+      return true;
+    }
+    function shown(list) { return (list || []).filter(function (x) { return x && holds(x.visibleWhen); }); }
+    function screenShown(s) {
+      if (s.type !== "page") return true;
+      var p = pages[s.index];
+      return !!p && holds(p.visibleWhen);
+    }
+    function step(from, dir) {
+      for (var i = from + dir; i >= 0 && i < screens.length; i += dir) if (screenShown(screens[i])) return i;
+      return -1;
+    }
+    function requiredOk(pageIndex) {
+      var p = pages[pageIndex];
+      if (!p) return true;
+      var ok = true;
+      (p.checkboxes || []).forEach(function (cb, ci) {
+        if (cb.required && holds(cb.visibleWhen) && !checks["p" + pageIndex + "_c" + ci]) ok = false;
+      });
+      (p.groups || []).forEach(function (g) {
+        if (g.required && holds(g.visibleWhen) && !(picks[g.key] || "")) ok = false;
+      });
+      return ok;
+    }
 
     var c = el("div", "preview-wrap");
     var head = el("div", "pv-head");
@@ -1916,6 +2168,7 @@
       "Страниц показано: " + data.pagesShown + " из " + data.pagesTotal +
       (data.missingPlaceholders && data.missingPlaceholders.length ? " · Не заполнены: " + data.missingPlaceholders.join(", ") : ""));
     head.appendChild(stats);
+    head.appendChild(el("div", "pv-hint", "Пункты можно отмечать: условия показа пересчитываются так же, как на планшете."));
     c.appendChild(head);
 
     var frame = el("div", "pv-frame");
@@ -1926,15 +2179,62 @@
     c.appendChild(frame);
 
     var back = el("button", "btn btn-ghost", "Назад");
+    var note = el("div", "pv-note");
     var next = el("button", "btn btn-primary", "Далее");
-    footer.appendChild(back); footer.appendChild(next);
-    back.addEventListener("click", function () { if (idx > 0) { idx--; draw(); } });
-    next.addEventListener("click", function () { if (idx < screens.length - 1) { idx++; draw(); } });
+    footer.appendChild(back); footer.appendChild(note); footer.appendChild(next);
+    back.addEventListener("click", function () { var to = step(idx, -1); if (to >= 0) { idx = to; draw(); } });
+    next.addEventListener("click", function () {
+      var s = screens[idx];
+      if (s.type === "page" && !requiredOk(s.index)) return;
+      var to = step(idx, 1); if (to >= 0) { idx = to; draw(); }
+    });
+
+    function makeCheck(cb, pageIndex, ci) {
+      var key = "p" + pageIndex + "_c" + ci;
+      var label = el("label", "pv-check pv-live" + (checks[key] ? " on" : ""));
+      var input = document.createElement("input");
+      input.type = "checkbox"; input.checked = !!checks[key];
+      input.addEventListener("change", function () { checks[key] = input.checked; draw(); });
+      label.appendChild(input);
+      label.appendChild(el("span", null, (cb.label || "") + (cb.required ? " *" : "")));
+      return label;
+    }
+
+    // Группа: выбрать можно один вариант, повторное нажатие снимает выбор. Это чекбоксы, а не
+    // радиокнопки, потому что «не выбрано» тоже состояние. Так же устроено на планшете.
+    function makeGroup(g) {
+      var box = el("div", "pv-group");
+      if (g.title) box.appendChild(el("div", "pv-group-title", g.title + (g.required ? " *" : "")));
+      (g.options || []).forEach(function (o) {
+        var chosen = (picks[g.key] || "") === o.key;
+        var label = el("label", "pv-check pv-live" + (chosen ? " on" : ""));
+        var input = document.createElement("input");
+        input.type = "checkbox"; input.checked = chosen;
+        input.addEventListener("change", function () {
+          picks[g.key] = input.checked ? o.key : "";
+          draw();
+        });
+        label.appendChild(input);
+        label.appendChild(el("span", null, o.label || o.key || ""));
+        box.appendChild(label);
+      });
+      if (!(picks[g.key] || "")) box.appendChild(el("div", "sig-meta", "Вариант не выбран."));
+      return box;
+    }
 
     function draw() {
       var s = screens[idx];
+      if (!screenShown(s)) {
+        var to = step(idx, 1); if (to < 0) to = step(idx, -1);
+        if (to >= 0 && to !== idx) { idx = to; return draw(); }
+      }
       title.textContent = doc.title || "";
-      progress.textContent = "Шаг " + (idx + 1) + " из " + screens.length;
+      var всего = 0, текущий = 0;
+      screens.forEach(function (x, i) {
+        if (!screenShown(x)) return;
+        всего++; if (i === idx) текущий = всего;
+      });
+      progress.textContent = "Шаг " + текущий + " из " + всего;
       body.innerHTML = "";
       if (s.type === "page") {
         var p = pages[s.index];
@@ -1942,45 +2242,33 @@
         // Порядок ровно тот же, что покажет планшет: иначе предпросмотр обещал бы одно, а
         // клиент видел другое, и проверять по нему было бы нечего.
         pageOrder(p).forEach(function (it) {
+          if (!holds(it.item.visibleWhen)) return;
           if (it.kind === 0) { previewBlock(body, it.item); return; }
-          if (it.kind === 1) {
-            var cb = it.item;
-            var row = el("div", "pv-check" + (cb.checked ? " on" : ""));
-            row.appendChild(el("span", "pv-box", cb.checked ? "✓" : ""));
-            row.appendChild(el("span", null, (cb.label || "") + (cb.required ? " *" : "")));
-            body.appendChild(row);
-            return;
-          }
-          // Группы показываются целиком, вместе с невыбранными вариантами: оператор должен видеть,
-          // из чего клиент будет выбирать, а не только присланный выбор.
-          var g = it.item;
-          body.appendChild(el("div", "pv-group-title", (g.title || g.key || "") + (g.required ? " *" : "")));
-          (g.options || []).forEach(function (o) {
-            var chosen = g.selected && o.key === g.selected;
-            var orow = el("div", "pv-check" + (chosen ? " on" : ""));
-            orow.appendChild(el("span", "pv-box", chosen ? "✓" : ""));
-            orow.appendChild(el("span", null, o.label || o.key || ""));
-            body.appendChild(orow);
-          });
-          if (!g.selected) body.appendChild(el("div", "sig-meta", "Вариант не выбран."));
+          if (it.kind === 1) { body.appendChild(makeCheck(it.item, s.index, it.index)); return; }
+          body.appendChild(makeGroup(it.item));
         });
       } else {
         // Порядок ровно как на планшете: блоки над подписью, надпись, само поле, блоки под
         // подписью. Раньше здесь рисовались два поля подписи, а нижние блоки оказывались выше
         // надписи, и предпросмотр обещал не тот экран, который увидит клиент.
-        (doc.signBlocks || []).forEach(function (b) { previewBlock(body, b); });
+        shown(doc.signBlocks).forEach(function (b) { previewBlock(body, b); });
         body.appendChild(el("div", "pv-prompt", doc.signPrompt || ""));
         body.appendChild(el("div", "pv-pad", "Распишитесь здесь"));
-        (doc.signBlocksBelow || []).forEach(function (b) { previewBlock(body, b); });
+        shown(doc.signBlocksBelow).forEach(function (b) { previewBlock(body, b); });
       }
-      back.disabled = idx === 0;
-      next.disabled = idx === screens.length - 1;
+      var ok = s.type !== "page" || requiredOk(s.index);
+      back.disabled = step(idx, -1) < 0;
+      next.disabled = step(idx, 1) < 0 || !ok;
+      note.textContent = ok ? "" : "Отметьте обязательные пункты (*) для продолжения";
     }
     draw();
 
-    var again = el("button", "btn btn-ghost", "Изменить значения");
+    var again = iconBtn("back", "Изменить значения", "btn-ghost");
     again.addEventListener("click", function () { closeModal(); openPreviewSetup(previewFields()); });
     c.appendChild(again);
+    c.appendChild(checkOnTabletRow(function () {
+      return { fields: fields, checkboxes: checkboxes, groups: groups };
+    }));
     openModal(c);
   }
 
@@ -2045,13 +2333,34 @@
         var wrap = el("label", "field", k);
         var sel = el("select");
         sel.appendChild(new Option("не передавать", ""));
-        known.forEach(function (v) { sel.appendChild(new Option(v, v)); });
+        known.forEach(function (v) { sel.appendChild(new Option(valueLabel(k, v), v)); });
         wrap.appendChild(sel); c.appendChild(wrap); inputs[k] = sel;
       } else {
         var f = labeledInput(k, ""); c.appendChild(f.wrap); inputs[k] = f.input;
       }
     });
-    var btn = el("button", "btn btn-primary", "Отправить на планшет");
+
+    // Это окно отправляет документ живому человеку, поэтому вымышленные значения сами тут не
+    // подставляются: подписать чужое имя хуже, чем набрать своё. Но для проверки они нужны, и
+    // одна кнопка заполняет всё сразу.
+    var sample = iconBtn("copy", "Заполнить примером (для проверки)", "btn-ghost");
+    sample.title = "Подставить вымышленные значения во все поля. Нужно, чтобы быстро проверить документ на планшете.";
+    sample.addEventListener("click", function () {
+      placeholders.forEach(function (k) {
+        var input = inputs[k];
+        var known = fieldValues(k);
+        if (known) {
+          var want = previewDefault(k);
+          input.value = known.indexOf(want) >= 0 ? want : known[0];
+        } else {
+          input.value = previewDefault(k);
+        }
+      });
+      toast("Поля заполнены примером. Проверьте перед отправкой.");
+    });
+    c.appendChild(sample);
+
+    var btn = iconBtn("send", "Отправить на планшет", "btn-primary");
     btn.addEventListener("click", function () {
       var fields = {}; placeholders.forEach(function (k) { fields[k] = inputs[k].value; });
       closeModal(); doShowDocument(fields);
@@ -2131,7 +2440,7 @@
       c.appendChild(list);
       var img = el("img", "sig-image"); img.src = "/api/admin/signatures/" + id + "/image"; img.alt = "Подпись"; c.appendChild(img);
       var dl = document.createElement("a");
-      dl.className = "btn btn-ghost"; dl.textContent = "Скачать PDF";
+      dl.className = "btn btn-ghost"; dl.appendChild(icon("download")); dl.appendChild(el("span", null, "Скачать PDF"));
       dl.href = "/api/admin/signatures/" + id + "/pdf"; dl.target = "_blank";
       dl.style.cssText = "display:inline-block;margin-top:12px;text-decoration:none;";
       c.appendChild(dl);
@@ -2296,9 +2605,13 @@
       }
       item.appendChild(info);
 
+      // Кнопки в том же стиле, что на странице документа: значок плюс подпись, обычные
+      // действия слева, необратимые справа за разделителем. Блокировка отделена от удаления
+      // намеренно: заблокированный планшет можно вернуть, удалённый нет, и одинаково красными
+      // они выглядели одинаково опасными.
       var actions = el("div", "dev-actions");
-      var bId = el("button", "btn btn-ghost btn-sm", "Опознать");
-      bId.title = "Показать номер на экране планшета";
+      var bId = iconBtn("search", "Опознать", "btn-ghost btn-sm");
+      bId.title = "Показать номер на экране планшета, чтобы понять, который из них перед вами";
       bId.addEventListener("click", function () {
         apiSend("/devices/" + d.id + "/identify", "POST", {}).then(function (r) { return r.json(); })
           .then(function (j) { toast("На планшете «" + d.name + "» показан номер " + j.code); });
@@ -2307,23 +2620,30 @@
       // Only offered when tablet control is switched on: otherwise every button in the modal would
       // answer "управление выключено" and the operator would be left guessing where the switch is.
       if (kc.enabled) {
-        var bCtl = el("button", "btn btn-ghost btn-sm", "Управление");
+        var bCtl = iconBtn("monitor", "Управление", "btn-ghost btn-sm");
         bCtl.title = "Перезагрузка, перезапуск приложения, очистка кэша, экран, снимок экрана";
         bCtl.addEventListener("click", function () { openControl(d); });
         actions.appendChild(bCtl);
       }
-      var bEdit = el("button", "btn btn-ghost btn-sm", "Изменить"); bEdit.addEventListener("click", function () { editDevice(d); }); actions.appendChild(bEdit);
+      var bEdit = iconBtn("settings", "Изменить", "btn-ghost btn-sm");
+      bEdit.title = "Имя, рабочее место и группы планшета";
+      bEdit.addEventListener("click", function () { editDevice(d); });
+      actions.appendChild(bEdit);
+      actions.appendChild(el("span", "tb-sep"));
       if (d.status === "revoked") {
-        var bUn = el("button", "btn btn-ghost btn-sm", "Разблокировать");
+        var bUn = iconBtn("tick", "Разблокировать", "btn-ghost btn-sm");
+        bUn.title = "Вернуть планшету доступ";
         bUn.addEventListener("click", function () { apiSend("/devices/" + d.id + "/unrevoke", "POST", {}).then(loadDevices).then(function () { toast("Разблокирован"); }); });
         actions.appendChild(bUn);
       } else {
-        var bRev = el("button", "btn btn-danger btn-sm", "Заблокировать");
-        bRev.addEventListener("click", function () { if (confirm("Заблокировать планшет «" + d.name + "»? Он потеряет доступ.")) apiSend("/devices/" + d.id + "/revoke", "POST", {}).then(loadDevices).then(function () { toast("Заблокирован"); }); });
+        var bRev = iconBtn("shield", "Заблокировать", "btn-warn btn-sm");
+        bRev.title = "Планшет потеряет доступ. Действие обратимо: его можно разблокировать";
+        bRev.addEventListener("click", function () { if (confirm("Заблокировать планшет «" + d.name + "»? Он потеряет доступ. Разблокировать можно в любой момент.")) apiSend("/devices/" + d.id + "/revoke", "POST", {}).then(loadDevices).then(function () { toast("Заблокирован"); }); });
         actions.appendChild(bRev);
       }
-      var bDel = el("button", "btn btn-danger btn-sm", "Удалить");
-      bDel.addEventListener("click", function () { if (confirm("Удалить планшет «" + d.name + "» полностью?")) api("/devices/" + d.id, { method: "DELETE" }).then(loadDevices).then(function () { toast("Удалён"); }); });
+      var bDel = iconBtn("trash", "Удалить", "btn-danger btn-sm");
+      bDel.title = "Запись планшета удаляется навсегда. Планшет придётся активировать заново";
+      bDel.addEventListener("click", function () { if (confirm("Удалить планшет «" + d.name + "» полностью?\n\nЭто необратимо: планшет потеряет привязку, и его придётся активировать новым кодом. Если нужно временно закрыть доступ, используйте «Заблокировать».")) api("/devices/" + d.id, { method: "DELETE" }).then(loadDevices).then(function () { toast("Удалён"); }); });
       actions.appendChild(bDel);
       item.appendChild(actions);
       wrap.appendChild(item);
@@ -2359,7 +2679,7 @@
     groupsBox.appendChild(gWrap); form.appendChild(groupsBox);
     var ttl = labeledInput("Код действителен, минут", "60"); ttl.input.type = "number";
     form.appendChild(ttl.wrap);
-    var btn = el("button", "btn btn-primary", "Сгенерировать код");
+    var btn = iconBtn("plus", "Сгенерировать код", "btn-primary");
     btn.addEventListener("click", function () {
       var groupIds = Array.prototype.slice.call(gWrap.querySelectorAll("input:checked")).map(function (c) { return c.value; });
       apiSend("/devices/enroll", "POST", {
@@ -2396,7 +2716,7 @@
     });
     if (!state.groups.length) gWrap.appendChild(el("span", "sig-meta", "нет групп"));
     groupsBox.appendChild(gWrap); form.appendChild(groupsBox);
-    var save = el("button", "btn btn-primary", "Сохранить");
+    var save = iconBtn("save", "Сохранить", "btn-primary");
     save.addEventListener("click", function () {
       var groupIds = Array.prototype.slice.call(gWrap.querySelectorAll("input:checked")).map(function (c) { return c.value; });
       apiSend("/devices/" + d.id, "PUT", { name: name.input.value, workstationId: wsSel.select.value || "", groupIds: groupIds })
@@ -2404,6 +2724,257 @@
     });
     form.appendChild(save);
     openModal(form);
+  }
+
+  // Набор планшетов: отметки вместо одного выпадающего списка. Один и тот же вид везде, где
+  // можно выбрать несколько планшетов, чтобы оператору не приходилось привыкать заново.
+  // Возвращает элемент с методами: ids() отдаёт отмеченные, refresh() перерисовывает список.
+  function devicePicker(selected, onChange) {
+    var picked = {};
+    (selected || []).forEach(function (id) { picked[id] = true; });
+    var box = el("div", "sch-devices"); box.setAttribute("data-role", "devpicker");
+    var count = el("span", "sch-devices-count");
+
+    function syncCount() {
+      var n = box.querySelectorAll('input[data-device]:checked').length;
+      count.textContent = n ? "Отмечено планшетов: " + n
+        : "Ни один планшет не отмечен: сейчас это ничего не сделает.";
+      count.classList.toggle("bad", !n);
+      if (onChange) onChange(n);
+    }
+
+    function render() {
+      box.innerHTML = "";
+      if (!state.devices.length) {
+        box.appendChild(el("span", "sch-devices-empty", "Планшетов пока нет."));
+        box.appendChild(count);
+        syncCount();
+        return;
+      }
+      var all = el("button", "sch-dev sch-dev-all", "Отметить все");
+      all.type = "button";
+      all.addEventListener("click", function () {
+        var boxes = box.querySelectorAll('input[data-device]');
+        var everyOn = Array.prototype.every.call(boxes, function (c) { return c.checked; });
+        Array.prototype.forEach.call(boxes, function (c) {
+          c.checked = !everyOn;
+          picked[c.getAttribute("data-device")] = c.checked;
+          c.parentNode.classList.toggle("on", c.checked);
+        });
+        all.textContent = everyOn ? "Отметить все" : "Снять все";
+        syncCount();
+      });
+      box.appendChild(all);
+
+      state.devices.forEach(function (d) {
+        var lbl = el("label", "sch-dev" + (picked[d.id] ? " on" : ""));
+        var cb = document.createElement("input");
+        cb.type = "checkbox"; cb.checked = !!picked[d.id]; cb.setAttribute("data-device", d.id);
+        cb.addEventListener("change", function () {
+          picked[d.id] = cb.checked;
+          lbl.classList.toggle("on", cb.checked);
+          syncCount();
+        });
+        lbl.appendChild(cb);
+        lbl.appendChild(el("span", null, d.name + (d.online ? "" : " (офлайн)")));
+        box.appendChild(lbl);
+      });
+      box.appendChild(count);
+      syncCount();
+    }
+
+    box.ids = function () {
+      return Array.prototype.slice.call(box.querySelectorAll('input[data-device]:checked'))
+        .map(function (c) { return c.getAttribute("data-device"); });
+    };
+    box.refresh = render;
+    render();
+    return box;
+  }
+
+  // ---------------- Расписание управления планшетами ----------------
+  var SCH_DAYS = [["Пн", 1], ["Вт", 2], ["Ср", 3], ["Чт", 4], ["Пт", 5], ["Сб", 6], ["Вс", 7]];
+  var schActions = [];
+
+  function loadSchedule() {
+    return apiJson("/schedule/actions").then(function (list) { schActions = list || []; })
+      .then(function () { return apiJson("/schedule"); })
+      .then(function (data) {
+        var t = $("schServerTime");
+        if (t) t.textContent = "сейчас " + (data.serverTime || "-");
+        renderSchedule((data && data.rules) || []);
+      });
+  }
+
+  function renderSchedule(rules) {
+    var wrap = $("scheduleList"); if (!wrap) return;
+    wrap.innerHTML = "";
+    // Почти всё в расписании идёт по локальной сети. Если управление выключено, правила
+    // сохранятся и будут выглядеть рабочими, но команда до планшета не дойдёт. Сказать об
+    // этом надо здесь, а не оставлять оператора выяснять это по итогам следующего утра.
+    var kc = state.kioskControl || {};
+    if (!kc.enabled && rules.length) {
+      wrap.appendChild(el("div", "note-box note-warn",
+        "Управление планшетами по локальной сети выключено (переключатель выше). Правила сохранятся, " +
+        "но команды экрана, яркости и перезагрузки до планшетов не дойдут. Без локальной сети работает " +
+        "только «Вернуть рекламу»: она идёт через уже открытое соединение."));
+    }
+    if (!rules.length) {
+      wrap.appendChild(el("div", "empty-note", "Правил пока нет. Например: «в 06:50 по будням включить экраны на всех планшетах»."));
+      return;
+    }
+    rules.forEach(function (r) { wrap.appendChild(scheduleRow(r)); });
+  }
+
+  function scheduleRow(r) {
+    r = r || {};
+    var row = el("div", "sch-rule" + (r.enabled === false ? " off" : ""));
+    row.setAttribute("data-role", "schrule");
+    row.setAttribute("data-id", r.id || "");
+
+    var on = document.createElement("input");
+    on.type = "checkbox"; on.checked = r.enabled !== false;
+    on.setAttribute("data-role", "schon");
+    on.title = "Правило включено";
+    on.addEventListener("change", function () { row.classList.toggle("off", !on.checked); });
+    row.appendChild(on);
+
+    var time = document.createElement("input");
+    time.type = "time"; time.value = r.time || "07:00"; time.setAttribute("data-role", "schtime");
+    // Браузер показывает время по своим настройкам, где-то с AM/PM. В подсказке всегда
+    // 24-часовой вид, чтобы «девять вечера» нельзя было прочитать как «девять утра».
+    function syncTimeTitle() { time.title = "Время по часам сервера: " + (time.value || "-") + " (24 часа)"; }
+    time.addEventListener("change", syncTimeTitle);
+    syncTimeTitle();
+    row.appendChild(time);
+
+    // Дни недели: семь переключателей вместо списка с галочками, иначе строка не читается.
+    var days = el("div", "sch-days");
+    var chosen = {}; (r.days || []).forEach(function (d) { chosen[d] = true; });
+    SCH_DAYS.forEach(function (d) {
+      var b = el("button", "sch-day" + (chosen[d[1]] ? " on" : ""), d[0]);
+      b.type = "button"; b.setAttribute("data-day", d[1]);
+      b.title = "Нажмите, чтобы включить или выключить этот день. Ни одного дня означает каждый день.";
+      b.addEventListener("click", function () { b.classList.toggle("on"); });
+      days.appendChild(b);
+    });
+    row.appendChild(days);
+
+    var act = el("select", "sch-action"); act.setAttribute("data-role", "schaction");
+    schActions.forEach(function (a) { act.appendChild(new Option(a.title, a.key)); });
+    act.value = r.action || "screen-on";
+    row.appendChild(act);
+
+    var value = document.createElement("input");
+    value.type = "number"; value.min = 0; value.max = 100; value.className = "sch-value";
+    value.value = r.value != null ? r.value : 100; value.setAttribute("data-role", "schvalue");
+    value.title = "Значение в процентах";
+    row.appendChild(value);
+
+    var text = document.createElement("input");
+    text.type = "text"; text.className = "sch-note"; text.placeholder = "текст сообщения";
+    text.value = r.text || ""; text.setAttribute("data-role", "schtext");
+    row.appendChild(text);
+
+    var target = el("select", "sch-target"); target.setAttribute("data-role", "schtarget");
+    fillTargetSelect(target, r.target || "all");
+    row.appendChild(target);
+
+    // Список отметок появляется только при выборе набора: постоянно висящий список планшетов
+    // сделал бы строку правила нечитаемой.
+    var devBox = devicePicker(r.deviceIds || []);
+    devBox.setAttribute("data-role", "schdevices");
+    row.appendChild(devBox);
+
+    var flags = el("label", "sch-flags");
+    var busy = document.createElement("input");
+    busy.type = "checkbox"; busy.checked = r.skipBusy !== false; busy.setAttribute("data-role", "schbusy");
+    flags.appendChild(busy);
+    flags.appendChild(el("span", null, "не трогать планшет, где идёт подписание"));
+    flags.title = "Погасить экран или перезагрузить планшет под рукой у подписывающего человека значит потерять его подпись.";
+    row.appendChild(flags);
+
+    var note = document.createElement("input");
+    note.type = "text"; note.className = "sch-note"; note.placeholder = "заметка (необязательно)";
+    note.value = r.note || ""; note.setAttribute("data-role", "schnote");
+    row.appendChild(note);
+
+    var run = iconBtn("send", "Запустить", "btn-ghost btn-sm");
+    run.title = "Выполнить правило прямо сейчас, чтобы проверить его";
+    run.addEventListener("click", function () {
+      if (!r.id) { toast("Сначала сохраните расписание, потом можно будет проверить правило."); return; }
+      saveSchedule().then(function () {
+        return apiSend("/schedule/" + r.id + "/run", "POST", {}).then(function (x) { return x.json(); });
+      }).then(function (j) { toast("Правило выполнено: " + (j && j.result)); return loadSchedule(); })
+        .catch(function () { /* об ошибке уже сообщили */ });
+    });
+    row.appendChild(run);
+
+    var del = iconBtn("trash", "Удалить", "btn-danger btn-sm");
+    del.addEventListener("click", function () { row.remove(); });
+    row.appendChild(del);
+
+    if (r.lastRunUtc) {
+      var bad = /не ответил|выключено|нет/.test(r.lastResult || "");
+      row.appendChild(el("div", "sch-last" + (bad ? " bad" : ""),
+        "Последний запуск: " + new Date(r.lastRunUtc).toLocaleString("ru-RU") + " — " + (r.lastResult || "")));
+    }
+
+    // Поля значения и текста нужны не всякому действию: лишние поля в строке только мешают.
+    function syncFields() {
+      var a = null;
+      schActions.forEach(function (x) { if (x.key === act.value) a = x; });
+      value.style.display = a && a.needsValue ? "" : "none";
+      text.style.display = a && a.needsText ? "" : "none";
+      devBox.style.display = target.value === "devices" ? "" : "none";
+    }
+    act.addEventListener("change", syncFields);
+    target.addEventListener("change", syncFields);
+    syncFields();
+    return row;
+  }
+
+  function collectSchedule() {
+    var rules = [];
+    document.querySelectorAll('[data-role="schrule"]').forEach(function (row) {
+      var days = [];
+      row.querySelectorAll(".sch-day.on").forEach(function (b) { days.push(parseInt(b.getAttribute("data-day"), 10)); });
+      var q = function (role) { return row.querySelector('[data-role="' + role + '"]'); };
+      rules.push({
+        id: row.getAttribute("data-id") || "",
+        enabled: q("schon").checked,
+        time: q("schtime").value || "07:00",
+        days: days,
+        action: q("schaction").value,
+        value: parseInt(q("schvalue").value, 10) || 0,
+        text: q("schtext").value,
+        target: q("schtarget").value,
+        deviceIds: Array.prototype.slice.call(row.querySelectorAll('input[data-device]:checked'))
+          .map(function (c) { return c.getAttribute("data-device"); }),
+        skipBusy: q("schbusy").checked,
+        note: q("schnote").value
+      });
+    });
+    return rules;
+  }
+
+  function saveSchedule() {
+    return apiSend("/schedule", "PUT", collectSchedule()).then(function (r) { return r.json(); })
+      .then(function (j) { renderSchedule((j && j.rules) || []); return j; });
+  }
+
+  if ($("addSchedule")) {
+    $("addSchedule").addEventListener("click", function () {
+      var wrap = $("scheduleList");
+      var note = wrap.querySelector(".empty-note");
+      if (note) note.remove();
+      wrap.appendChild(scheduleRow({ enabled: true, time: "07:00", days: [1, 2, 3, 4, 5], action: "screen-on", target: "all", skipBusy: true }));
+    });
+  }
+  if ($("saveSchedule")) {
+    $("saveSchedule").addEventListener("click", function () {
+      saveSchedule().then(function () { toast("Расписание сохранено"); });
+    });
   }
 
   // ---------------- Groups ----------------
@@ -2414,10 +2985,10 @@
     state.groups.forEach(function (g) {
       var row = el("div", "simple-row");
       var inp = el("input"); inp.value = g.name; inp.className = "grow"; row.appendChild(inp);
-      var save = el("button", "btn btn-ghost btn-sm", "Переименовать");
+      var save = iconBtn("save", "Переименовать", "btn-ghost btn-sm");
       save.addEventListener("click", function () { apiSend("/groups/" + g.id, "PUT", { name: inp.value }).then(loadGroups).then(function () { toast("Сохранено"); }); });
       row.appendChild(save);
-      var del = el("button", "btn btn-danger btn-sm", "Удалить");
+      var del = iconBtn("trash", "Удалить", "btn-danger btn-sm");
       del.addEventListener("click", function () { if (confirm("Удалить группу «" + g.name + "»?")) api("/groups/" + g.id, { method: "DELETE" }).then(loadGroups).then(loadDevices); });
       row.appendChild(del);
       wrap.appendChild(row);
@@ -2446,10 +3017,10 @@
       var locF = wsCol("Описание", w.location, "напр. Главный холл", true);
       var ext = extF.input, name = nameF.input, loc = locF.input;
       row.appendChild(extF.col); row.appendChild(nameF.col); row.appendChild(locF.col);
-      var save = el("button", "btn btn-ghost btn-sm", "Сохранить");
+      var save = iconBtn("save", "Сохранить", "btn-ghost btn-sm");
       save.addEventListener("click", function () { apiSend("/workstations/" + w.id, "PUT", { externalId: ext.value, name: name.value, location: loc.value }).then(loadWorkstations).then(function () { toast("Сохранено"); }); });
       row.appendChild(save);
-      var del = el("button", "btn btn-danger btn-sm", "Удалить");
+      var del = iconBtn("trash", "Удалить", "btn-danger btn-sm");
       del.addEventListener("click", function () { if (confirm("Удалить место «" + w.name + "»?")) api("/workstations/" + w.id, { method: "DELETE" }).then(loadWorkstations).then(loadDevices); });
       row.appendChild(del);
       wrap.appendChild(row);
@@ -2468,7 +3039,7 @@
       var row = el("div", "simple-row");
       row.appendChild(el("strong", "grow", k.label));
       row.appendChild(el("span", "sig-meta", new Date(k.createdUtc).toLocaleString("ru-RU")));
-      var del = el("button", "btn btn-danger btn-sm", "Удалить");
+      var del = iconBtn("trash", "Удалить", "btn-danger btn-sm");
       del.addEventListener("click", function () { if (confirm("Удалить ключ «" + k.label + "»?")) api("/apikeys/" + k.id, { method: "DELETE" }).then(loadKeys); });
       row.appendChild(del); wrap.appendChild(row);
     });
@@ -2949,10 +3520,10 @@
       col.appendChild(el("div", "sig-meta", new Date(s.createdUtc).toLocaleString("ru-RU") + (where.length ? " · " + where.join(" · ") : "")));
       row.appendChild(col);
       var actions = el("div", "dev-actions");
-      var copy = el("button", "btn btn-ghost btn-sm", "Копировать");
+      var copy = iconBtn("copy", "Копировать", "btn-ghost btn-sm");
       copy.addEventListener("click", function () { copyText(s.code || ""); });
       actions.appendChild(copy);
-      var del = el("button", "btn btn-danger btn-sm", "Удалить");
+      var del = iconBtn("trash", "Удалить", "btn-danger btn-sm");
       del.addEventListener("click", function () { api("/scans/" + s.id, { method: "DELETE" }).then(loadScans).then(function () { toast("Удалено"); }); });
       actions.appendChild(del);
       row.appendChild(actions);
@@ -3066,7 +3637,7 @@
       var m = ep.method.toLowerCase();
       head.appendChild(el("span", "api-method api-" + m, ep.method));
       head.appendChild(el("span", "api-path", ep.path));
-      var copy = el("button", "btn btn-ghost btn-sm api-copy", "Копировать");
+      var copy = iconBtn("copy", "Копировать", "btn-ghost btn-sm api-copy");
       var sample = ep.sample.replace(/\{BASE\}/g, base);
       copy.addEventListener("click", function () { copyText(sample); });
       head.appendChild(copy);
@@ -3175,6 +3746,9 @@
       .then(function () { renderTargetOptions(); return safe(loadPlaylist)(); })
       .then(safe(loadSignatures))
       .catch(function (e) { console.error(e); });
+    // Вкладку восстанавливаем сразу, не дожидаясь загрузок: иначе оператор пару мгновений
+    // видит «Слайды», а потом его перебрасывает, и это выглядит как сбой.
+    restoreTab();
   }
 
   checkAuth();
