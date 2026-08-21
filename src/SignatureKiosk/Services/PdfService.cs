@@ -42,15 +42,72 @@ public class PdfService
         }
     }
 
-    public string Generate(SignatureRecord rec, DocumentConfig doc, byte[] signaturePng)
+    public string Generate(SignatureRecord rec, DocumentConfig doc, byte[] signaturePng,
+        Func<string, byte[]?>? extraSignature = null)
     {
         var path = Path.Combine(_storage.PdfDir, rec.Id + ".pdf");
-
         var pdf = new PdfDocument();
+        Built? built = null;
+        try
+        {
+            built = Build(pdf, rec, doc, signaturePng, extraSignature, null);
+            // Картинки должны дожить до Save: PDFsharp читает их байты лениво именно там.
+            pdf.Save(path);
+            return path;
+        }
+        finally { built?.Dispose(); pdf.Dispose(); }
+    }
+
+    /// <summary>
+    /// Раскладка документа: где именно окажется каждая строка и каждая картинка, в точках PDF.
+    /// Считается той же самой сборкой, что и настоящий PDF, поэтому предпросмотр в админке
+    /// показывает не похожее на PDF, а его самого. Рисовать PDF в браузере для этого не нужно.
+    /// </summary>
+    public PdfLayout Layout(DocumentConfig doc, SignatureRecord? rec = null)
+    {
+        var capture = new List<PdfLayoutItem>();
+        var pdf = new PdfDocument();
+        var record = rec ?? new SignatureRecord { Id = "preview", CreatedUtc = DateTime.UtcNow, DocumentTitle = doc.Title };
+        Built? built = null;
+        try
+        {
+            built = Build(pdf, record, doc, null, null, capture);
+            return new PdfLayout(built.Flow.PageWidth, built.Flow.PageHeight, built.Flow.PageCount, capture);
+        }
+        finally { built?.Dispose(); pdf.Dispose(); }
+    }
+
+    /// <summary>Собранный документ вместе с картинками, которые нельзя освободить до сохранения.</summary>
+    private sealed class Built : IDisposable
+    {
+        public required Flow Flow { get; init; }
+        public XImage? Signature { get; init; }
+        public required Dictionary<string, XImage> Images { get; init; }
+        public MemoryStream? Stream { get; init; }
+        public void Dispose()
+        {
+            Flow.Finish();
+            Signature?.Dispose();
+            foreach (var xi in Images.Values) xi.Dispose();
+            Stream?.Dispose();
+        }
+    }
+
+    private Built Build(PdfDocument pdf, SignatureRecord rec, DocumentConfig doc, byte[]? signaturePng,
+        Func<string, byte[]?>? extraSignature, List<PdfLayoutItem>? capture)
+    {
         pdf.Info.Title = doc.Title;
         pdf.Info.Author = "HELIX SignTablet";
 
-        var w = new Flow(pdf);
+        var w = new Flow(pdf,
+            Math.Clamp(doc.PdfFontScale <= 0 ? 100 : doc.PdfFontScale, 50, 100) / 100.0,
+            Math.Clamp(doc.PdfSignatureScale <= 0 ? 100 : doc.PdfSignatureScale, 40, 100) / 100.0) { Capture = capture };
+
+        // Подписи, которым оператор задал место на листе, в поток текста не попадают: они
+        // печатаются последними, поверх готовой страницы, ровно там, где он их поставил.
+        var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pl in doc.SignaturePlacements ?? new List<SignaturePlacement>())
+            placed.Add((pl.Key ?? "").Trim());
 
         w.Line(doc.Title, w.H1);
         w.Gap(6);
@@ -93,9 +150,9 @@ public class PdfService
                         keepImages[file] = xi;
                     }
                     imageBlocks++;
-                    w.BlockImage(xi, block.ImageWidth);
+                    w.BlockImage(xi, block.ImageWidth, DocumentTemplating.CleanImageUrl(block.ImageUrl) ?? "", block.Align);
                 }
-                else if (block.Runs is { Count: > 0 }) { w.Rich(block.Runs, isHeading: false); w.Gap(8); }
+                else if (block.Runs is { Count: > 0 }) { w.Rich(block.Runs, isHeading: false, block.Align); w.Gap(8); }
             }
         }
 
@@ -111,6 +168,27 @@ public class PdfService
         var groupsByKey = new Dictionary<string, SubmittedGroup>(StringComparer.OrdinalIgnoreCase);
         foreach (var g in rec.Groups ?? new List<SubmittedGroup>())
             if (g is not null && !string.IsNullOrEmpty(g.Key)) groupsByKey[g.Key] = g;
+        // Подпись из поля страницы. Расшифровывается один раз: одна и та же подпись может
+        // печататься и в потоке, и по заданному месту.
+        XImage? PageSignature(string? key)
+        {
+            if (capture is not null) return null;   // в раскладке настоящих подписей нет
+            var name = (key ?? "").Trim();
+            if (keepImages.TryGetValue("sig:" + name, out var have)) return have;
+            var stored = (rec.Signatures ?? new List<SignedSignature>()).FirstOrDefault(x => x is not null &&
+                string.Equals(x.Key, name, StringComparison.OrdinalIgnoreCase));
+            var bytes = stored is null ? null : extraSignature?.Invoke(stored.File);
+            if (bytes is null) return null;
+            try
+            {
+                using var sms = new MemoryStream(bytes, 0, bytes.Length, writable: false, publiclyVisible: true);
+                var xi = XImage.FromStream(sms);
+                keepImages["sig:" + name] = xi;
+                return xi;
+            }
+            catch (Exception ex) { _log?.LogWarning(ex, "Page signature {Key} could not be decoded", name); return null; }
+        }
+
         var printedItems = new HashSet<SubmittedItem>();
         var printedGroups = new HashSet<SubmittedGroup>();
 
@@ -129,10 +207,12 @@ public class PdfService
             return cb.Checked;   // запись не совпала с документом: печатаем то, что знаем
         }
 
-        void RenderGroup(string? title, bool required, string? selected, List<DocGroupOption> options, string? selectedLabel)
+        void RenderGroup(string? title, bool required, string? selected, List<DocGroupOption> options,
+            string? selectedLabel, List<TextRun>? titleRuns = null)
         {
             w.Gap(6);
-            if (!string.IsNullOrWhiteSpace(title)) w.Line(title! + (required ? " *" : ""), w.H2);
+            var head = DocumentTemplating.LabelRuns(titleRuns, title);
+            if (head.Count > 0) w.Rich(MarkedRuns("", head, required), isHeading: true);
             w.Gap(3);
             if (options.Count == 0 && !string.IsNullOrWhiteSpace(selectedLabel))
                 w.Paragraph("[X]  " + selectedLabel, w.Body);
@@ -141,7 +221,8 @@ public class PdfService
                 if (o is null) continue;
                 var chosen = !string.IsNullOrEmpty(selected) &&
                              string.Equals(o.Key, selected, StringComparison.OrdinalIgnoreCase);
-                w.Paragraph((chosen ? "[X]  " : "[  ]  ") + (o.Label ?? o.Key ?? ""), w.Body);
+                w.Rich(MarkedRuns(chosen ? "[X]  " : "[  ]  ",
+                    DocumentTemplating.LabelRuns(o.LabelRuns, o.Label ?? o.Key), false), isHeading: false);
             }
             if (string.IsNullOrEmpty(selected)) w.Paragraph("Вариант не выбран.", w.Body);
             w.Gap(4);
@@ -150,7 +231,7 @@ public class PdfService
         foreach (var page in doc.Pages ?? new List<DocPage>())
         {
             var heading = DocumentTemplating.HeadingRuns(page);
-            if (heading.Count > 0) { w.Rich(heading, isHeading: true); w.Gap(2); }
+            if (heading.Count > 0) { w.Rich(heading, isHeading: true, page.HeadingAlign); w.Gap(2); }
 
             foreach (var (kind, index) in DocumentTemplating.PageOrder(page, DocumentTemplating.Blocks(page)))
             {
@@ -158,9 +239,27 @@ public class PdfService
                 if (kind == 1)
                 {
                     var cb = page.Checkboxes[index];
-                    w.Paragraph((StateOf(cb) ? "[X]  " : "[  ]  ") + (cb.Label ?? "") + (cb.Required ? " *" : ""), w.Body);
+                    // Оформление подписи пункта попадает и в PDF: пункт, выделенный на планшете,
+                    // должен так же выделяться и на бумаге, иначе документ на экране и документ
+                    // в руках у человека выглядят по-разному.
+                    w.Rich(MarkedRuns(StateOf(cb) ? "[X]  " : "[  ]  ",
+                        DocumentTemplating.LabelRuns(cb.LabelRuns, cb.Label), cb.Required), isHeading: false);
                     continue;
                 }
+                if (kind == 3)
+                {
+                    // Подпись, поставленная внутри страницы, печатается там же, где стояла на
+                    // экране: иначе по документу нельзя понять, что именно ею подтверждено.
+                    var sig = page.Signatures[index];
+                    if (placed.Contains((sig.Key ?? "").Trim())) continue;
+                    w.Gap(6);
+                    w.SignatureBlock(sig.Label, PageSignature(sig.Key), "Подпись в этом поле не поставлена.", sig.Key ?? "");
+                    continue;
+                }
+                // Отсканированный код в PDF не печатается: это служебные данные заказа, а не то,
+                // что человек подписывает. В записи подписи он есть, и внешняя система его видит.
+                if (kind == 4) continue;
+
                 var g = page.Groups[index];
                 SubmittedGroup? sg = null;
                 if (!string.IsNullOrEmpty(g.Key) && groupsByKey.TryGetValue(g.Key, out var foundGroup))
@@ -169,7 +268,7 @@ public class PdfService
                     printedGroups.Add(sg);
                 }
                 RenderGroup(g.Title, g.Required, sg?.Selected ?? g.Selected,
-                    sg?.Options is { Count: > 0 } ? sg.Options : g.Options, sg?.SelectedLabel);
+                    sg?.Options is { Count: > 0 } ? sg.Options : g.Options, sg?.SelectedLabel, g.TitleRuns);
             }
         }
 
@@ -191,42 +290,66 @@ public class PdfService
         // Custom signature-page content authored in the admin, above the signature.
         if (doc.SignBlocks is { Count: > 0 }) { w.Gap(6); RenderBlocks(doc.SignBlocks); }
 
-        w.Gap(26);
         // PDFsharp calls MemoryStream.GetBuffer(), which requires a publicly-visible buffer.
-        using var ms = new MemoryStream(signaturePng, 0, signaturePng.Length, writable: false, publiclyVisible: true);
+        // Поток нельзя закрывать здесь: PDFsharp читает из него уже во время сохранения, поэтому
+        // он живёт вместе с собранным документом и закрывается вместе с ним.
         // If the signature image cannot be decoded, still produce the PDF (with the document text,
         // signer data and checked items) and say so in it: losing the whole record would be worse.
         // The PNG itself is always kept alongside the record either way.
+        MemoryStream? ms = null;
         XImage? img = null;
-        try { img = XImage.FromStream(ms); }
-        catch (Exception ex) { _log?.LogWarning(ex, "Signature image could not be decoded for {Id}", rec.Id); }
-
-        if (img is not null) w.Signature("Подпись клиента:", img);
-        else
+        if (signaturePng is not null)
         {
-            w.Line("Подпись клиента:", w.H2);
-            w.Gap(3);
-            w.Paragraph("Изображение подписи не удалось встроить в PDF. Оригинал подписи сохранён в записи и доступен в админке.", w.Body);
+            ms = new MemoryStream(signaturePng, 0, signaturePng.Length, writable: false, publiclyVisible: true);
+            try { img = XImage.FromStream(ms); }
+            catch (Exception ex) { _log?.LogWarning(ex, "Signature image could not be decoded for {Id}", rec.Id); }
+        }
+
+        // Итоговая подпись под документом. Если оператор задал ей место на листе, здесь её нет:
+        // ниже она напечатается поверх страницы. В раскладке настоящей подписи ещё нет, но место
+        // под неё занять надо, иначе предпросмотр покажет документ короче, чем он окажется.
+        // Подпись, которую не удалось расшифровать, нельзя просто не напечатать: документ
+        // выглядел бы неподписанным. Поэтому сообщение печатается и тогда, когда подписи задано
+        // своё место на листе.
+        var брак = signaturePng is not null && img is null;
+        if (!placed.Contains("") || брак)
+        {
+            w.Gap(26);
+            if (брак)
+            {
+                w.Line("Подпись клиента:", w.H2);
+                w.Gap(3);
+                w.Paragraph("Изображение подписи не удалось встроить в PDF. Оригинал подписи сохранён в записи и доступен в админке.", w.Body);
+            }
+            else w.SignatureBlock("Подпись клиента:", img, null, "");
         }
 
         // Content the admin placed under the signature (company details, a stamp, a note).
         if (doc.SignBlocksBelow is { Count: > 0 }) { w.Gap(10); RenderBlocks(doc.SignBlocksBelow); }
 
-        try
-        {
-            // ms and images must stay alive across Save: PDFsharp reads the image bytes lazily there.
-            pdf.Save(path);
-            return path;
-        }
-        finally
-        {
-            // Release everything even if Save throws (disk full, unwritable path): otherwise a
-            // failing generation stranded every decoded image until the next collection.
-            w.Finish();
-            img?.Dispose();
-            foreach (var xi in keepImages.Values) xi.Dispose();
-            pdf.Dispose();
-        }
+        // Размещённые подписи печатаются в самом конце: страницы к этому моменту свёрстаны, и
+        // номер страницы, на который указывает раскладка, уже что-то значит.
+        if (capture is null)
+            foreach (var pl in doc.SignaturePlacements ?? new List<SignaturePlacement>())
+            {
+                var key = (pl.Key ?? "").Trim();
+                var stamp = key.Length == 0 ? img : PageSignature(key);
+                if (stamp is not null) w.StampSignature(pl.Page, pl.X, pl.Y, pl.W, pl.H, stamp);
+            }
+
+        return new Built { Flow = w, Signature = img, Images = keepImages, Stream = ms };
+    }
+
+    /// <summary>
+    /// Строка пункта: отметка, оформленный текст и звёздочка обязательного. Отметка идёт своим
+    /// куском без оформления, иначе крупный или цветной текст пункта утащил бы за собой и скобки.
+    /// </summary>
+    private static List<TextRun> MarkedRuns(string mark, List<TextRun> label, bool required)
+    {
+        var runs = new List<TextRun> { new() { Text = mark } };
+        foreach (var r in label) if (r is not null) runs.Add(r);
+        if (required) runs.Add(new TextRun { Text = " *" });
+        return runs;
     }
 
     /// <summary>Map a block's "/media/{file}" reference to a real file under the image store, or null.</summary>
@@ -246,13 +369,53 @@ public class PdfService
         private readonly PdfDocument _doc;
         private XGraphics _gfx = null!;
         private double _y, _pageH, _contentW;
+        private double _pageW;
+        private int _pageIndex = -1;
 
-        public readonly XFont H1 = new("DejaVu", 18, XFontStyleEx.Bold);
-        public readonly XFont H2 = new("DejaVu", 13, XFontStyleEx.Bold);
-        public readonly XFont Body = new("DejaVu", 11, XFontStyleEx.Regular);
-        public readonly XFont Small = new("DejaVu", 9, XFontStyleEx.Regular);
+        /// <summary>Размер места под подпись на листе, в точках, при обычном размере.</summary>
+        private const double BaseSignW = 280, BaseSignH = 100;
+        /// <summary>Размер места под подпись с учётом настройки документа.</summary>
+        private double SignW => BaseSignW * _signScale;
+        private double SignH => BaseSignH * _signScale;
+        private readonly double _signScale;
 
-        public Flow(PdfDocument doc) { _doc = doc; NewPage(); }
+        /// <summary>Куда записывать раскладку. null означает обычную сборку PDF без записи.</summary>
+        public List<PdfLayoutItem>? Capture;
+
+        public double PageWidth => _pageW;
+        public double PageHeight => _pageH;
+        public int PageCount => _pageIndex + 1;
+
+        private void Note(string kind, double x, double y, double w, double h,
+            string text = "", double size = 0, bool bold = false, bool italic = false, string color = "")
+        {
+            Capture?.Add(new PdfLayoutItem(_pageIndex, kind, x, y, w, h, text, size, bold, italic, color));
+        }
+
+        public readonly XFont H1;
+        public readonly XFont H2;
+        public readonly XFont Body;
+        public readonly XFont Small;
+
+        /// <summary>
+        /// Во сколько раз шрифт в PDF мельче, чем на планшете. Экран и бумага это разные
+        /// носители: на планшете крупный шрифт нужен, чтобы читалось с расстояния, а на бумаге
+        /// тот же размер раздувает документ на лишние страницы. Поля и место под подпись не
+        /// меняются: они заданы форматом листа, а не размером букв.
+        /// </summary>
+        private readonly double _scale;
+
+        public Flow(PdfDocument doc, double scale = 1, double signScale = 1)
+        {
+            _doc = doc;
+            _scale = Math.Clamp(scale <= 0 ? 1 : scale, 0.5, 1);
+            _signScale = Math.Clamp(signScale <= 0 ? 1 : signScale, 0.4, 1);
+            H1 = new XFont("DejaVu", 18 * _scale, XFontStyleEx.Bold);
+            H2 = new XFont("DejaVu", 13 * _scale, XFontStyleEx.Bold);
+            Body = new XFont("DejaVu", 11 * _scale, XFontStyleEx.Regular);
+            Small = new XFont("DejaVu", 9 * _scale, XFontStyleEx.Regular);
+            NewPage();
+        }
 
         private void NewPage()
         {
@@ -263,8 +426,10 @@ public class PdfService
             page.Size = PageSize.A4;
             _gfx = XGraphics.FromPdfPage(page);
             _pageH = page.Height.Point;
+            _pageW = page.Width.Point;
             _contentW = page.Width.Point - 2 * Margin;
             _y = Margin;
+            _pageIndex++;
         }
 
         /// <summary>Release the last page's graphics (call after the document has been saved).</summary>
@@ -279,6 +444,7 @@ public class PdfService
             var lineH = font.GetHeight() * 1.15;
             Ensure(lineH);
             _gfx.DrawString(text, font, XBrushes.Black, new XPoint(Margin, _y + font.GetHeight()));
+            Note("text", Margin, _y, _gfx.MeasureString(text, font).Width, lineH, text, font.Size, font.Bold);
             _y += lineH;
         }
 
@@ -349,12 +515,12 @@ public class PdfService
             return f;
         }
 
-        private static double SizePt(string? size, bool heading) => size switch
+        private double SizePt(string? size, bool heading) => _scale * (size switch
         {
             "l" => heading ? 18 : 15,
             "h" => heading ? 24 : 20,
             _ => heading ? 14 : 11
-        };
+        });
 
         private static XBrush BrushFor(string? color)
         {
@@ -368,18 +534,44 @@ public class PdfService
 
         /// <summary>Render a list of styled runs with word-wrap and pagination. Italic is simulated with
         /// a shear, since no proportional italic face is embedded, so this stays a single-font document.</summary>
-        public void Rich(List<TextRun> runs, bool isHeading)
+        public void Rich(List<TextRun> runs, bool isHeading, string? align = null)
         {
-            var pending = new List<(string text, XFont font, XBrush brush, bool italic, double x, double w)>();
+            // gap: перед словом стоит пробел. По этим пробелам растягивается строка при
+            // выравнивании по обоим краям, поэтому куски разорванного слова, склеенные без
+            // пробела, растягиванием не разъезжаются.
+            var pending = new List<(string text, XFont font, XBrush brush, bool italic, double x, double w, bool gap)>();
             double x = Margin, lineH = 0;
+            var mode = (align ?? "").Trim().ToLowerInvariant();
 
-            void Flush()
+            // lastLine: последняя строка абзаца. По обоим краям она не растягивается, иначе
+            // одно слово в конце абзаца растянулось бы во всю ширину листа.
+            void Flush(bool lastLine)
             {
                 if (pending.Count == 0) return;
                 double h = lineH * 1.2;
                 Ensure(h);
                 double baseline = _y + lineH;
-                foreach (var t in pending) DrawWord(t.text, t.font, t.brush, t.italic, t.x, baseline);
+                var last = pending[^1];
+                double lineW = last.x + last.w - Margin;
+                double free = _contentW - lineW;
+                double shift = 0, stretch = 0;
+                if (free > 0)
+                {
+                    if (mode == "center") shift = free / 2;
+                    else if (mode == "right") shift = free;
+                    else if (mode == "justify" && !lastLine)
+                    {
+                        var gaps = 0;
+                        foreach (var t in pending) if (t.gap) gaps++;
+                        if (gaps > 0) stretch = free / gaps;
+                    }
+                }
+                var passed = 0;
+                foreach (var t in pending)
+                {
+                    if (t.gap) passed++;
+                    DrawWord(t.text, t.font, t.brush, t.italic, t.x + shift + stretch * passed, baseline);
+                }
                 _y += h;
                 pending.Clear(); x = Margin; lineH = 0;
             }
@@ -392,7 +584,9 @@ public class PdfService
                 var segments = (run.Text ?? "").Replace("\r", "").Split('\n');
                 for (int si = 0; si < segments.Length; si++)
                 {
-                    if (si > 0) Flush(); // an explicit newline inside the run ends the line
+                    // Явный перенос строки заканчивает абзац: строка перед ним последняя и по
+                    // обоим краям не растягивается.
+                    if (si > 0) Flush(true);
                     foreach (var raw in segments[si].Split(' '))
                     {
                         if (raw.Length == 0) continue;
@@ -407,9 +601,9 @@ public class PdfService
                             // разорванного слова склеиваются без пробела, иначе разрыв читался бы
                             // как два разных слова.
                             double sp = pending.Count > 0 && first ? space : 0;
-                            if (pending.Count > 0 && x + sp + ww > Margin + _contentW) { Flush(); sp = 0; }
+                            if (pending.Count > 0 && x + sp + ww > Margin + _contentW) { Flush(false); sp = 0; }
                             x += sp;
-                            pending.Add((word, font, brush, run.Italic, x, ww));
+                            pending.Add((word, font, brush, run.Italic, x, ww, sp > 0));
                             x += ww;
                             lineH = Math.Max(lineH, font.GetHeight());
                             first = false;
@@ -417,11 +611,24 @@ public class PdfService
                     }
                 }
             }
-            Flush();
+            Flush(true);
+        }
+
+        /// <summary>Цвет кисти в виде #rrggbb, чтобы предпросмотр совпадал с PDF по цвету тоже.</summary>
+        private static string ColorName(XBrush brush)
+        {
+            if (brush is XSolidBrush sb)
+            {
+                var c = sb.Color;
+                return "#" + c.R.ToString("x2") + c.G.ToString("x2") + c.B.ToString("x2");
+            }
+            return "#000000";
         }
 
         private void DrawWord(string text, XFont font, XBrush brush, bool italic, double x, double baseline)
         {
+            Note("text", x, baseline - font.GetHeight(), _gfx.MeasureString(text, font).Width,
+                font.GetHeight() * 1.15, text, font.Size, font.Bold, italic, ColorName(brush));
             if (!italic) { _gfx.DrawString(text, font, brush, new XPoint(x, baseline)); return; }
             var state = _gfx.Save();
             _gfx.TranslateTransform(x, baseline);
@@ -431,7 +638,7 @@ public class PdfService
         }
 
         /// <summary>Draw a block image scaled to a percent of the content width, capped to the page.</summary>
-        public void BlockImage(XImage img, int widthPct)
+        public void BlockImage(XImage img, int widthPct, string url = "", string? align = null)
         {
             if (img.PixelWidth <= 0 || img.PixelHeight <= 0) return;
             double pct = Math.Clamp(widthPct <= 0 ? 100 : widthPct, 10, 100) / 100.0;
@@ -440,24 +647,77 @@ public class PdfService
             double maxH = _pageH - 2 * Margin;
             if (dh > maxH) { double k = maxH / dh; dh *= k; dw *= k; }
             Ensure(dh + 8);
-            _gfx.DrawImage(img, Margin, _y, dw, dh);
+            // Печать или герб обычно стоят по центру или у правого края, поэтому картинка
+            // подчиняется тому же выравниванию, что и текст. По обоим краям для картинки
+            // означает по левому: растягивать её было бы искажением.
+            var mode = (align ?? "").Trim().ToLowerInvariant();
+            double free = _contentW - dw;
+            double dx = free <= 0 ? 0 : mode == "center" ? free / 2 : mode == "right" ? free : 0;
+            _gfx.DrawImage(img, Margin + dx, _y, dw, dh);
+            Note("image", Margin + dx, _y, dw, dh, url);
             _y += dh + 8;
         }
 
-        public void Signature(string label, XImage img)
+        /// <summary>
+        /// Блок подписи: заголовок, место под саму подпись и черта под ней. Высота места
+        /// постоянная, а не по размеру картинки. Иначе длина документа зависела бы от того,
+        /// насколько размашисто расписался человек, и раскладка в админке не совпадала бы с
+        /// готовым PDF, а от неё оператор и отсчитывает координаты.
+        /// </summary>
+        /// <param name="label">Надпись над местом подписи, может отсутствовать.</param>
+        /// <param name="img">Сама подпись. Пусто, если её ещё нет или встроить не удалось.</param>
+        /// <param name="note">Что написать вместо подписи, когда её нет.</param>
+        /// <param name="key">Имя поля подписи, попадает в раскладку.</param>
+        public void SignatureBlock(string? label, XImage? img, string? note, string key)
         {
-            const double boxW = 280, boxH = 100;
-            Ensure(H2.GetHeight() * 1.5 + boxH + 12);
-            _gfx.DrawString(label, H2, XBrushes.Black, new XPoint(Margin, _y + H2.GetHeight()));
-            _y += H2.GetHeight() * 1.5;
+            double head = string.IsNullOrEmpty(label) ? 0 : H2.GetHeight() * 1.5;
+            Ensure(head + SignH + 12);
+            if (!string.IsNullOrEmpty(label))
+            {
+                _gfx.DrawString(label, H2, XBrushes.Black, new XPoint(Margin, _y + H2.GetHeight()));
+                Note("text", Margin, _y, _gfx.MeasureString(label, H2).Width, head, label, H2.Size, true);
+                _y += head;
+            }
+            Note("sign", Margin, _y, SignW, SignH, key);
+            if (img is not null)
+            {
+                var (dw, dh) = FitInto(img, SignW, SignH);
+                _gfx.DrawImage(img, Margin, _y + (SignH - dh) / 2, dw, dh);
+            }
+            else if (!string.IsNullOrEmpty(note))
+            {
+                _gfx.DrawString(note, Body, XBrushes.Gray, new XPoint(Margin, _y + Body.GetHeight()));
+            }
+            _y += SignH + 4;
+            _gfx.DrawLine(new XPen(XColors.Gray, 0.75), Margin, _y, Margin + SignW, _y);
+            _y += 6;
+        }
 
+        private static (double W, double H) FitInto(XImage img, double boxW, double boxH)
+        {
             double scale = img.PixelWidth > 0 && img.PixelHeight > 0
                 ? Math.Min(boxW / img.PixelWidth, boxH / img.PixelHeight)
                 : 1;
-            double dw = img.PixelWidth * scale, dh = img.PixelHeight * scale;
-            _gfx.DrawImage(img, Margin, _y, dw, dh);
-            _y += Math.Max(dh, 40) + 4;
-            _gfx.DrawLine(new XPen(XColors.Gray, 0.75), Margin, _y, Margin + boxW, _y);
+            return (img.PixelWidth * scale, img.PixelHeight * scale);
+        }
+
+        /// <summary>
+        /// Печатает подпись поверх уже свёрстанной страницы, там, где её поставил оператор.
+        /// Координаты приходят в долях листа, поэтому не зависят от того, в каком масштабе он
+        /// смотрел макет. Вызывается последним: после этого поток дальше не пишется.
+        /// </summary>
+        public void StampSignature(int pageIndex, double fx, double fy, double fw, double fh, XImage img)
+        {
+            if (_doc.PageCount == 0) return;
+            // Документ мог стать короче с тех пор, как оператор расставлял подписи. Терять
+            // подпись из-за этого нельзя, поэтому она садится на последнюю страницу.
+            var page = _doc.Pages[Math.Clamp(pageIndex, 0, _doc.PageCount - 1)];
+            _gfx?.Dispose();
+            _gfx = null!;
+            using var g = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Append);
+            double bw = page.Width.Point * fw, bh = page.Height.Point * fh;
+            var (dw, dh) = FitInto(img, bw, bh);
+            g.DrawImage(img, page.Width.Point * fx + (bw - dw) / 2, page.Height.Point * fy + (bh - dh) / 2, dw, dh);
         }
     }
 }

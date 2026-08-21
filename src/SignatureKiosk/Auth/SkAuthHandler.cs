@@ -27,18 +27,11 @@ public class SkAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions>
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        // 1) Admin via login cookie.
-        if (Request.Cookies.TryGetValue(TokenAuthService.AdminCookieName, out var cookie) && _auth.IsValidAdminCookie(cookie))
-        {
-            var admin = new ClaimsIdentity(new[]
-            {
-                new Claim("role", "admin"),
-                new Claim(ClaimTypes.Role, "admin")
-            }, SchemeName);
-            return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(admin), SchemeName)));
-        }
-
-        // 2) Device via token.
+        // 1) Планшет по токену. Токен проверяется раньше куки админки: страницу планшета могут
+        // открыть в том же браузере, где открыта админка, и тогда подключение опознавалось как
+        // админ, а планшет оставался без своих каналов. Прав это не расширяет: токен даёт только
+        // личность планшета, которая строго меньше прав администратора, а админка Bearer-токен
+        // не посылает вовсе, поэтому на её работу порядок не влияет.
         string? token = null;
         var authz = Request.Headers.Authorization.ToString();
         if (authz.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
@@ -68,6 +61,17 @@ public class SkAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions>
                 var id = new ClaimsIdentity(claims, SchemeName);
                 return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(id), SchemeName)));
             }
+        }
+
+        // 2) Администратор по куке входа.
+        if (Request.Cookies.TryGetValue(TokenAuthService.AdminCookieName, out var cookie) && _auth.IsValidAdminCookie(cookie))
+        {
+            var admin = new ClaimsIdentity(new[]
+            {
+                new Claim("role", "admin"),
+                new Claim(ClaimTypes.Role, "admin")
+            }, SchemeName);
+            return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(admin), SchemeName)));
         }
 
         return Task.FromResult(AuthenticateResult.NoResult());

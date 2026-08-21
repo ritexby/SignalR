@@ -82,6 +82,55 @@ html, body {
 .sign-custom .doc-image { margin-bottom: 12px; }
 
 .checks { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+/* ---- Поле подписи и сканирование внутри страницы ----
+   Выглядят как отдельные карточки, а не как продолжение текста: клиент должен понять, что здесь
+   от него ждут действия, а не чтения. */
+.page-sign, .page-scan {
+  background: #fff; border: 2px solid #e5e7eb; border-radius: 14px;
+  padding: 16px; margin: 18px 0; display: flex; flex-direction: column; gap: 12px;
+}
+.page-sign-title, .page-scan-title {
+  font-size: var(--doc-text); line-height: var(--doc-line); font-weight: 700; color: var(--text);
+}
+.page-sign-wrap { position: relative; height: 190px; margin: 0; }
+.page-sign-wrap.has-ink .sign-hint { display: none; }
+.page-sign-clear { align-self: flex-start; }
+.page-scan-btn { align-self: flex-start; }
+/* Считанный код показывается крупно и моноширинно: его сверяют символ в символ. */
+.page-scan-value {
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: calc(var(--doc-text) * 1.05);
+  font-weight: 700; color: #15803d; background: #e7f7ee; border: 2px solid #86efac;
+  border-radius: 10px; padding: 10px 14px; word-break: break-all;
+}
+.page-scan.scanned { border-color: #86efac; }
+
+/* ---- Пропущенный обязательный пункт ----
+   Красная рамка, светлый фон и подпись словами: одного цвета мало, его не различит человек с
+   нарушением цветовосприятия и не заметит тот, кто смотрит на планшет под углом. Короткое
+   покачивание один раз привлекает взгляд, но не превращается в дрожь. */
+.miss { border-color: #dc2626 !important; background: #fef2f2 !important;
+  box-shadow: 0 0 0 3px rgba(220,38,38,.12); animation: miss-nudge .28s ease-out 1;
+  /* Подпись уходит на свою строку, а не теснит текст пункта: текст согласия важнее. */
+  flex-wrap: wrap; }
+.miss .req { color: #dc2626; }
+.miss-note { flex-basis: 100%; margin-top: 8px; color: #b91c1c; font-weight: 700;
+  font-size: calc(var(--doc-text) * .86); display: flex; align-items: center; gap: 8px; }
+.miss-note::before { content: "!"; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; flex: 0 0 auto; border-radius: 50%; background: #dc2626; color: #fff; font-size: .8em; }
+.group.miss { padding: 12px; border: 2px solid #dc2626; border-radius: 14px; }
+.sign-wrap.miss { border-color: #dc2626 !important; }
+
+@keyframes miss-nudge {
+  0% { transform: translateX(0); } 25% { transform: translateX(-5px); }
+  60% { transform: translateX(4px); } 100% { transform: translateX(0); }
+}
+/* Кому анимация мешает, тому её не показываем: подсветки и подписи достаточно. */
+@media (prefers-reduced-motion: reduce) { .miss { animation: none; } }
+
+/* Кнопка, которой ещё рано срабатывать. Не выключена: по нажатию она объясняет, чего не
+   хватает. Приглушена ровно настолько, чтобы не выглядеть главным действием. */
+.btn-wait { opacity: .72; }
+
 .check {
   display: flex; align-items: flex-start; gap: 16px;
   background: #fff; border: 2px solid #e5e7eb; border-radius: 14px;
@@ -183,3 +232,23 @@ html, body {
    её от обычных пунктов согласия, чтобы клиент видел, что здесь выбор, а не набор галочек. */
 .group { margin: 18px 0 6px; }
 .group-title { font-weight: 700; margin-bottom: 8px; color: var(--text); }
+
+/* Подпись и сканирование это отдельные экраны, а не элементы среди текста: место под подпись
+   занимает столько, сколько есть, иначе расписываться приходится в узкой полоске. */
+.screen-sign .page-sign-wrap { height: min(52vh, 460px); }
+.screen-sign .page-sign-title { font-size: 1.15rem; }
+.screen-scan .scan-inline { min-height: min(52vh, 460px); }
+
+/* Двойные зависимые чекбоксы: варианты в одну строку под вопросом. Их два или три и они
+   короткие, поэтому столбик отрывал ответ от вопроса и занимал пол-экрана впустую.
+   Длинные варианты и длинный список переносятся сами. */
+.group-options { flex-direction: row; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+.group-options .check {
+  flex: 1 1 140px;
+  border: 2px solid var(--line, #d7dae1);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #fff;
+}
+.group-options .check.checked { border-color: var(--accent); background: rgba(37, 99, 235, .06); }
+.group-options .check .label { font-weight: 600; }

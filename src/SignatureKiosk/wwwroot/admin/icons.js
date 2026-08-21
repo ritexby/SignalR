@@ -9,6 +9,10 @@
 (function () {
   "use strict";
   window.SK_ICONS = {
+    "align-center": '<line x1="21" x2="3" y1="6" y2="6" /> <line x1="17" x2="7" y1="12" y2="12" /> <line x1="19" x2="5" y1="18" y2="18" />',
+    "align-justify": '<line x1="3" x2="21" y1="6" y2="6" /> <line x1="3" x2="21" y1="12" y2="12" /> <line x1="3" x2="21" y1="18" y2="18" />',
+    "align-left": '<line x1="21" x2="3" y1="6" y2="6" /> <line x1="15" x2="3" y1="12" y2="12" /> <line x1="17" x2="3" y1="18" y2="18" />',
+    "align-right": '<line x1="21" x2="3" y1="6" y2="6" /> <line x1="21" x2="9" y1="12" y2="12" /> <line x1="21" x2="7" y1="18" y2="18" />',
     "alert": '<circle cx="12" cy="12" r="10" /> <line x1="12" x2="12" y1="8" y2="12" /> <line x1="12" x2="12.01" y1="16" y2="16" />',
     "back": '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /> <path d="M3 3v5h5" />',
     "check": '<path d="M21 10.656V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.344" /> <path d="m9 11 3 3L22 4" />',

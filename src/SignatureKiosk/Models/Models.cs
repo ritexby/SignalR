@@ -1,3 +1,5 @@
+using System.Linq;
+
 namespace SignatureKiosk.Models;
 
 // ---------- Kiosk / slideshow state ----------
@@ -15,6 +17,19 @@ public class KioskState
     // после переподключения он получил ровно то же самое.
     public Dictionary<string, bool> CheckboxStates { get; set; } = new();
     public Dictionary<string, string> GroupSelections { get; set; } = new();
+    /// <summary>
+    /// Тексты, присланные внешней системой для того, что уже стоит в документе: подпись
+    /// чекбокса, заголовок двойных зависимых чекбоксов и подписи их вариантов. Нужны, когда
+    /// формулировка зависит от заказа, а место в документе всегда одно и то же.
+    /// Ключ это имя чекбокса или группы, а для варианта - «группа/вариант». Имена не могут
+    /// содержать косую черту, поэтому разночтения быть не может.
+    /// </summary>
+    public Dictionary<string, string> Texts { get; set; } = new();
+    /// <summary>
+    /// Варианты двойных зависимых чекбоксов, присланные внешней системой. Заказ может приходить
+    /// со своим списком ответов, и тогда он заменяет тот, что стоит в документе.
+    /// </summary>
+    public Dictionary<string, List<DocGroupOption>> GroupOptions { get; set; } = new();
     public DateTime? DocumentSetUtc { get; set; }                          // when the document was put on this device
 
     public KioskState Clone() => new()
@@ -26,6 +41,9 @@ public class KioskState
         DynamicCheckboxes = DynamicCheckboxes.Select(c => new DocCheckbox { Key = c.Key, Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList(),
         CheckboxStates = new Dictionary<string, bool>(CheckboxStates),
         GroupSelections = new Dictionary<string, string>(GroupSelections),
+        Texts = new Dictionary<string, string>(Texts),
+        GroupOptions = GroupOptions.ToDictionary(kv => kv.Key,
+            kv => kv.Value.Select(o => new DocGroupOption { Key = o.Key, Label = o.Label }).ToList()),
         DocumentSetUtc = DocumentSetUtc
     };
 }
@@ -111,6 +129,19 @@ public class DocCheckbox
     // in their own namespace, separate from the {{tags}}: one name must never mean two things.
     public string Key { get; set; } = "";
     public string Label { get; set; } = "";
+    /// <summary>
+    /// Оформленный текст пункта: жирный, курсив, цвет, размер, как у обычного абзаца. Когда он
+    /// задан, Label хранит то же самое простым текстом: по нему пункт узнают в записи подписи,
+    /// в API и в списке недостающего, и там оформление ни к чему.
+    /// </summary>
+    public List<TextRun> LabelRuns { get; set; } = new();
+    /// <summary>
+    /// Что дописать к тексту, который уже стоит в документе. Имеет смысл только в запросе по
+    /// API и в самом документе никогда не хранится: Label заменяет текст целиком, LabelAppend
+    /// добавляет к нему. Нужно, когда внешняя система не знает формулировку в документе, но
+    /// должна уточнить её под конкретный заказ.
+    /// </summary>
+    public string? LabelAppend { get; set; }
     public bool Required { get; set; } = true;
     public bool Checked { get; set; } = false; // initial state (used by API-supplied checkboxes)
     // Shown only while its condition holds. A condition on another checkbox is evaluated on the
@@ -127,6 +158,10 @@ public class DocGroupOption
 {
     public string Key { get; set; } = "";
     public string Label { get; set; } = "";
+    /// <summary>Оформленный текст варианта, см. DocCheckbox.LabelRuns.</summary>
+    public List<TextRun> LabelRuns { get; set; } = new();
+    /// <summary>Что дописать к тексту варианта. Только для запроса по API, см. DocCheckbox.LabelAppend.</summary>
+    public string? LabelAppend { get; set; }
 }
 
 /// <summary>
@@ -138,6 +173,8 @@ public class DocGroup
 {
     public string Key { get; set; } = "";
     public string Title { get; set; } = "";
+    /// <summary>Оформленный заголовок группы, см. DocCheckbox.LabelRuns.</summary>
+    public List<TextRun> TitleRuns { get; set; } = new();
     public List<DocGroupOption> Options { get; set; } = new();
     public bool Required { get; set; } = false;   // true: nothing chosen blocks the signer
     public string? Selected { get; set; }         // option key, or null for nothing chosen
@@ -180,6 +217,11 @@ public class VisibleWhen
 public class DocBlock
 {
     public List<TextRun> Runs { get; set; } = new();
+    /// <summary>
+    /// Выравнивание абзаца: left, center, right, justify. Свойство абзаца, а не куска текста:
+    /// выровнять половину строки нельзя. Пусто означает по левому краю.
+    /// </summary>
+    public string? Align { get; set; }
     public string? ImageUrl { get; set; }        // "/media/{file}" when this block is an image
     public int ImageWidth { get; set; } = 100;   // image width as a percent of the content width (10..100)
     public VisibleWhen? VisibleWhen { get; set; }
@@ -191,6 +233,18 @@ public class DocBlock
 
 public class DocPage
 {
+    /// <summary>
+    /// Что это за экран: пусто это обычная страница текста, "signature" это экран подписи,
+    /// "scan" это экран сканирования кода. Подпись и сканирование это отдельные экраны, а не
+    /// элементы посреди текста: клиент на них занят одним делом и ничем больше.
+    /// Само поле по-прежнему лежит в Signatures или Scans, поэтому в записи подписи, в PDF и в
+    /// раскладке ничего не меняется.
+    /// </summary>
+    public string? Kind { get; set; }
+
+    /// <summary>Выравнивание заголовка страницы: left, center, right, justify.</summary>
+    public string? HeadingAlign { get; set; }
+
     public string Heading { get; set; } = "";                  // legacy plain heading (fallback)
     public List<TextRun> HeadingRuns { get; set; } = new();    // rich heading
     public string Body { get; set; } = "";                     // legacy plain body (fallback)
@@ -198,6 +252,10 @@ public class DocPage
     public VisibleWhen? VisibleWhen { get; set; }              // page-level condition
     public List<DocCheckbox> Checkboxes { get; set; } = new();
     public List<DocGroup> Groups { get; set; } = new();
+    /// <summary>Поля подписи внутри страницы: документ может требовать несколько подписей.</summary>
+    public List<DocSignature> Signatures { get; set; } = new();
+    /// <summary>Сканирование кода внутри страницы: штрихкод пробирки, QR из направления.</summary>
+    public List<DocScan> Scans { get; set; } = new();
     public bool IncludeDynamic { get; set; } = false; // anchor: API-supplied checkboxes render here
 }
 
@@ -212,6 +270,26 @@ public class DocumentConfig
     public List<DocBlock> SignBlocksBelow { get; set; } = new();
     public string ThankYouText { get; set; } = "Спасибо! Ваша подпись принята.";
     public int IdleReturnSec { get; set; } = 180; // auto-return to ads after this idle time (0 = off)
+
+    /// <summary>
+    /// Раскладка подписей на листах PDF, если оператор расставил их вручную на вкладке «PDF».
+    /// Подпись, для которой раскладки нет, печатается там же, где стоит её поле в документе.
+    /// </summary>
+    public List<SignaturePlacement> SignaturePlacements { get; set; } = new();
+
+    /// <summary>
+    /// Размер шрифта в PDF, в процентах от того, что видит клиент на планшете. Экран и бумага
+    /// это разные носители: на планшете крупный шрифт нужен, чтобы читалось с расстояния, а в
+    /// PDF тот же размер раздувает документ на лишние страницы. 100 означает как на планшете.
+    /// </summary>
+    public int PdfFontScale { get; set; } = 100;
+
+    /// <summary>
+    /// Размер места под подпись в PDF, в процентах от обычного (280 x 100 точек). Отдельно от
+    /// шрифта: подпись может занимать на бумаге слишком много, даже когда текст уже мелкий.
+    /// На подпись, которой задано своё место на листе, не влияет: у неё свой прямоугольник.
+    /// </summary>
+    public int PdfSignatureScale { get; set; } = 100;
 }
 
 /// <summary>
@@ -315,9 +393,25 @@ public class DocumentBackup
 {
     public const string KindValue = "helix-signtablet-document";
     public string Kind { get; set; } = KindValue;
-    public int Version { get; set; } = 1;
+    /// <summary>
+    /// 1 это файл без картинок: в нём только ссылки вида /media/имя. 2 добавляет сами картинки,
+    /// поэтому шаблон переносится на другой сервер целиком. Файл версии 1 по-прежнему читается,
+    /// просто картинок в нём нет.
+    /// </summary>
+    public int Version { get; set; } = 2;
     public DateTime ExportedUtc { get; set; }
     public DocumentConfig? Document { get; set; }
+    /// <summary>Картинки, на которые ссылается документ. Без них шаблон на другом сервере
+    /// оказался бы с пустыми рамками вместо печатей и гербов.</summary>
+    public List<BackupImage>? Images { get; set; }
+}
+
+/// <summary>Одна картинка внутри файла шаблона: имя файла в медиатеке и его содержимое.</summary>
+public class BackupImage
+{
+    public string File { get; set; } = "";
+    /// <summary>Содержимое файла в base64, без префикса data:.</summary>
+    public string Data { get; set; } = "";
 }
 
 // ---------- Signature submission / record ----------
@@ -339,10 +433,40 @@ public class SubmittedGroup
     public List<DocGroupOption> Options { get; set; } = new();
 }
 
+/// <summary>Одна из подписей внутри документа: имя поля, надпись и сама картинка.</summary>
+public class SubmittedSignature
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    public string Image { get; set; } = "";   // data URL (image/png)
+}
+
+/// <summary>Код, отсканированный внутри документа.</summary>
+public class SubmittedScan
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    public string Code { get; set; } = "";
+    public string Format { get; set; } = "";
+}
+
+/// <summary>Подпись внутри страницы в сохранённой записи: картинка лежит отдельным файлом.</summary>
+public class SignedSignature
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    /// <summary>Имя файла рядом с записью, например signature-guardian.png.</summary>
+    public string File { get; set; } = "";
+}
+
 public class SignatureSubmission
 {
     public List<SubmittedItem> Items { get; set; } = new();
     public List<SubmittedGroup> Groups { get; set; } = new();
+    /// <summary>Подписи, поставленные внутри страниц. Итоговая подпись приходит в Signature.</summary>
+    public List<SubmittedSignature> Signatures { get; set; } = new();
+    /// <summary>Коды, отсканированные внутри страниц.</summary>
+    public List<SubmittedScan> Scans { get; set; } = new();
     public string Signature { get; set; } = ""; // data URL (image/png)
     // Identifies one signing session. If the response is lost and the tablet retries, the server
     // returns the record it already stored instead of creating a second, data-less duplicate.
@@ -360,9 +484,73 @@ public class SignatureRecord
     public string? WorkstationName { get; set; }
     public List<SubmittedItem> Items { get; set; } = new();
     public List<SubmittedGroup> Groups { get; set; } = new();
+    /// <summary>Подписи внутри страниц. Картинки лежат рядом с записью отдельными файлами.</summary>
+    public List<SignedSignature> Signatures { get; set; } = new();
+    /// <summary>Коды, отсканированные внутри документа.</summary>
+    public List<SubmittedScan> Scans { get; set; } = new();
     public Dictionary<string, string>? Fields { get; set; } // signer data used to fill {{tags}}
     public string? SubmissionId { get; set; }               // dedupes a retried submit
 }
+
+/// <summary>
+/// Поле подписи внутри страницы. Документ может требовать несколько подписей: согласие на
+/// обработку данных, отдельное согласие законного представителя, подтверждение отказа. Раньше
+/// подпись была одна и только в самом конце.
+/// </summary>
+public class DocSignature
+{
+    /// <summary>Имя для API и для записи подписи. Пустое имя получает номер при сохранении.</summary>
+    public string Key { get; set; } = "";
+    /// <summary>Надпись над полем: что именно человек подписывает.</summary>
+    public string Label { get; set; } = "";
+    public bool Required { get; set; } = true;
+    public int Ord { get; set; } = -1;
+    public VisibleWhen? VisibleWhen { get; set; }
+}
+
+/// <summary>
+/// Сканирование кода внутри страницы: клиент подносит к камере штрихкод пробирки или QR из
+/// направления, и код попадает в запись подписи рядом с тем, что он подписал.
+/// </summary>
+public class DocScan
+{
+    public string Key { get; set; } = "";
+    /// <summary>Что просить отсканировать.</summary>
+    public string Label { get; set; } = "";
+    public bool Required { get; set; } = true;
+    public int Ord { get; set; } = -1;
+    public VisibleWhen? VisibleWhen { get; set; }
+}
+
+/// <summary>
+/// Куда поставить подпись на листе PDF. Координаты в долях страницы, а не в точках: так они
+/// переживают смену размера листа и не зависят от того, в каком масштабе оператор смотрел макет.
+/// Key совпадает с именем поля подписи; пустое имя означает итоговую подпись под документом.
+/// </summary>
+public class SignaturePlacement
+{
+    public string Key { get; set; } = "";
+    /// <summary>Страница PDF, считая с нуля.</summary>
+    public int Page { get; set; }
+    /// <summary>Доли ширины и высоты листа: 0 это левый верхний угол, 1 это правый нижний.</summary>
+    public double X { get; set; }
+    public double Y { get; set; }
+    public double W { get; set; } = 0.35;
+    public double H { get; set; } = 0.08;
+}
+
+// ---------- Раскладка PDF ----------
+
+/// <summary>
+/// Один нарисованный элемент PDF со своим местом в точках. Координаты те же, что использует
+/// генератор, поэтому предпросмотр в админке показывает не похожее на PDF, а его самого.
+/// Page считается с нуля, Y отсчитывается от верха листа.
+/// </summary>
+public record PdfLayoutItem(int Page, string Kind, double X, double Y, double W, double H,
+    string Text, double Size, bool Bold, bool Italic, string Color);
+
+/// <summary>Размер листа и всё, что на нём нарисовано.</summary>
+public record PdfLayout(double PageWidth, double PageHeight, int PageCount, List<PdfLayoutItem> Items);
 
 // ---------- Расписание управления планшетами ----------
 
@@ -462,7 +650,12 @@ public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId
 public record ExtScanRequestDto(string? DeviceId, string? WorkstationExternalId, int? TimeoutSec);
 public record AckDto(string? Id);
 /// <summary>Выбор варианта в группе, присланный внешней системой.</summary>
-public record GroupSelectionDto(string? Key, string? Selected, string? Title);
+/// <summary>
+/// Выбор в двойных зависимых чекбоксах, присланный по API. Title и Options позволяют заодно
+/// прислать и текст: заголовок группы и подписи вариантов, если формулировка зависит от заказа.
+/// </summary>
+public record GroupSelectionDto(string? Key, string? Selected, string? Title, string? TitleAppend,
+    List<DocGroupOption>? Options);
 
 public record ControlAddressDto(string? Ip, int? Port);
 /// <summary>What the admin panel sends when saving tablet control settings. The API key is

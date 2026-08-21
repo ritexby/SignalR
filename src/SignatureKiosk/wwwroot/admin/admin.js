@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "5.2";
+  var APP_VERSION = "6.0";
 
   var state = {
     slidesTarget: "all",   // кому идёт реклама: all / group:{id} / device:{id} / devices
@@ -166,6 +166,20 @@
     var raw = (location.hash || "").replace(/^#/, "");
     var name = "";
     try { name = decodeURIComponent(raw); } catch (e) { name = raw; }
+    // Ссылка вида #watch=WS-204 открывает наблюдение за нужным планшетом сразу. Вкладка при
+    // этом остаётся списком планшетов: закрыв окно, оператор видит, за чем смотрел.
+    var m = /^watch=(.+)$/.exec(name);
+    if (m) {
+      openTab("devices", false);
+      // Ждём и список планшетов, и живое соединение: без него наблюдение не начнётся.
+      var ждём = setInterval(function () {
+        if (!hub || hub.state !== "Connected") return;
+        clearInterval(ждём);
+        watchByName(m[1]);
+      }, 200);
+      setTimeout(function () { clearInterval(ждём); }, 15000);
+      return;
+    }
     if (name && openTab(name, false)) return;
     openTab("slides", true);
   }
@@ -179,8 +193,21 @@
       delete img.dataset.url;
     });
   }
-  function openModal(node) { var c = $("modalContent"); releaseModalUrls(); c.innerHTML = ""; c.appendChild(node); $("modal").classList.remove("hidden"); }
-  function closeModal() { releaseModalUrls(); $("modalContent").innerHTML = ""; $("modal").classList.add("hidden"); }
+  // wide: окно во всю ширину экрана. Нужно там, где показывается лист документа: в обычной
+  // колонке на 680 пикселей лист A4 читался бы только под лупой.
+  function openModal(node, wide) {
+    var c = $("modalContent"); releaseModalUrls(); c.innerHTML = ""; c.appendChild(node);
+    document.querySelector("#modal .modal-box").classList.toggle("wide", !!wide);
+    $("modal").classList.remove("hidden");
+  }
+  function closeModal() {
+    // Окно наблюдения закрыли: планшет должен перестать рассказывать о себе, иначе он говорил
+    // бы в пустоту и тратил батарею.
+    if (watch && watch.deviceId) watchStop();
+    releaseModalUrls(); $("modalContent").innerHTML = "";
+    document.querySelector("#modal .modal-box").classList.remove("wide");
+    $("modal").classList.add("hidden");
+  }
   $("modalClose").addEventListener("click", closeModal);
   $("modal").addEventListener("click", function (e) { if (e.target === $("modal")) closeModal(); });
 
@@ -351,9 +378,29 @@
   // знать, младше ли человек четырнадцати, чтобы показать блок для законных представителей.
   // Две операции, а не четыре: «младше N» и «N и старше» делят людей ровно надвое.
   var COND_OPS = [["eq", "равно"], ["ne", "не равно"], ["empty", "пусто"], ["notempty", "не пусто"],
-    ["in", "одно из (через запятую)"], ["agelt", "возраст меньше, лет"], ["agege", "возраст от, лет"]];
+    ["in", "одно из (через запятую)"], ["agelt", "возраст меньше, лет"], ["agege", "возраст от, лет"],
+    ["datewithin", "до даты осталось не больше, дней"], ["annivwithin", "до годовщины не больше, дней"]];
   var AGE_OPS = ["agelt", "agege"];
+  // Условия по сроку: сколько дней между сегодняшним днём и датой из тега. «До даты» считает
+  // полную дату с годом (приём назначен на такое-то число), «до годовщины» только день и месяц:
+  // это случай дня рождения, где полная дата в прошлом на десятки лет и сравнивать её незачем.
+  // Считается по модулю, поэтому «за неделю до» и «неделю спустя» одинаково укладываются в семь.
+  var DAYS_OPS = ["datewithin", "annivwithin"];
   function isAgeOp(op) { return AGE_OPS.indexOf(op) >= 0; }
+  function isDaysOp(op) { return DAYS_OPS.indexOf(op) >= 0; }
+  function isDateOp(op) { return isAgeOp(op) || isDaysOp(op); }
+  // Возраст считается из даты рождения, поэтому тег в таком условии может быть только один:
+  // тот, в котором эта дата приходит по API. Оператору его выбирать незачем, а раньше без него
+  // условие просто пропадало при сохранении.
+  var BIRTH_TAGS = ["др", "датарождения", "дата рождения", "birth", "birthday", "birthdate", "dob"];
+  function isBirthTag(name) {
+    var n = String(name || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+    return BIRTH_TAGS.some(function (h) { return n === h.replace(/[\s_-]+/g, ""); });
+  }
+  function birthTagName() {
+    for (var i = 0; i < KNOWN_FIELDS.length; i++) if (isBirthTag(KNOWN_FIELDS[i])) return KNOWN_FIELDS[i];
+    return "";
+  }
   // Tags that only ever carry a fixed set of values. Offering them as a list removes the guesswork
   // (was it "M" or "муж"? "да" or "yes"?) and the typo that silently makes a condition never match.
   // Подписи значений для человека: на проводе пол остаётся M и F, потому что так его шлёт
@@ -419,6 +466,7 @@
     offerDraft();
   }
   function renderDoc() {
+    mountRtBar();
     $("docTitle").value = state.doc.title || ""; $("signPrompt").value = state.doc.signPrompt || ""; $("thankYou").value = state.doc.thankYouText || "";
     $("idleReturn").value = state.doc.idleReturnSec != null ? state.doc.idleReturnSec : 180;
     ensureFieldsDatalist();
@@ -771,6 +819,19 @@
   var rtBar = null;      // сама панель
   var rtTarget = null;   // поле, к которому она сейчас относится
 
+  // Выравнивание это свойство всего абзаца, а не выделенного куска: выровнять половину строки
+  // нельзя. Поэтому оно хранится на самом поле, а не в разметке текста, и одинаково доходит и
+  // до планшета, и до PDF.
+  var ALIGNS = [["", "align-left", "По левому краю"], ["center", "align-center", "По центру"],
+    ["right", "align-right", "По правому краю"], ["justify", "align-justify", "По обоим краям"]];
+  function setAlign(ed, align) {
+    var a = (align || "").toLowerCase();
+    if (a !== "center" && a !== "right" && a !== "justify") a = "";
+    if (a) ed.setAttribute("data-align", a); else ed.removeAttribute("data-align");
+    ed.style.textAlign = a || "";
+  }
+  function alignOf(ed) { return ed ? (ed.getAttribute("data-align") || "") : ""; }
+
   function rtCommand(fn) {
     return function () { if (rtTarget) fn(rtTarget); };
   }
@@ -796,6 +857,19 @@
       bar.appendChild(sw);
     });
     bar.appendChild(tbBtn("○", "Цвет по умолчанию", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.style.color = "inherit"; }, "color"); })));
+    ALIGNS.forEach(function (a) {
+      var b = iconBtn(a[1], "", "rt-btn"); b.type = "button"; b.title = a[2];
+      b.setAttribute("data-align-btn", a[0]);
+      b.addEventListener("mousedown", function (e) { e.preventDefault(); });
+      b.addEventListener("click", function (e) {
+        e.preventDefault();
+        if (!rtTarget) return;
+        setAlign(rtTarget, a[0]);
+        rtTarget.dispatchEvent(new Event("input", { bubbles: true }));
+        syncRtBar();
+      });
+      bar.appendChild(b);
+    });
     bar.appendChild(tbBtn("¶", "Склеить перенесённые строки: абзацы останутся абзацами, а разрывы посреди предложения уйдут. Нужно после копирования из PDF, где каждая строка приходит отдельной.",
       rtCommand(function (ed) { unwrapLines(ed); })));
     var tsel = el("select", "rt-tag"); tsel.appendChild(new Option("+ тег", ""));
@@ -807,52 +881,63 @@
       tsel.value = "";
     });
     bar.appendChild(tsel);
-    document.body.appendChild(bar);
+    bar.appendChild(el("span", "rt-hint"));
     return bar;
   }
 
-  function placeRtBar() {
-    if (!rtBar || !rtTarget || rtBar.classList.contains("hidden")) return;
-    var r = rtTarget.getBoundingClientRect();
-    var barH = rtBar.offsetHeight || 40;
-    var top = document.querySelector(".topbar");
-    var minTop = (top ? top.offsetHeight : 0) + 6;
-    // Панель стоит над полем. Если поле уехало под шапку, панель остаётся у шапки, чтобы не
-    // исчезнуть вместе с началом длинного блока.
-    var y = r.top - barH - 6;
-    if (y < minTop) y = Math.min(minTop, Math.max(minTop, r.bottom - barH - 6));
-    if (r.bottom < minTop || r.top > window.innerHeight - 20) { rtBar.classList.add("hidden"); return; }
-    var x = Math.max(8, Math.min(r.left, window.innerWidth - rtBar.offsetWidth - 8));
-    rtBar.style.top = Math.round(y) + "px";
-    rtBar.style.left = Math.round(x) + "px";
+  /// Панель встаёт над редактором документа и остаётся там всё время.
+  function mountRtBar() {
+    if (rtBar) return;
+    var host = document.getElementById("rtBarHost");
+    if (!host) return;
+    rtBar = buildRtBar();
+    host.appendChild(rtBar);
+    syncTopbarHeight();
+    syncRtBar();
   }
 
-  function showRtBar(ed) {
-    if (!rtBar) rtBar = buildRtBar();
-    rtTarget = ed;
-    rtBar.classList.remove("hidden");
-    placeRtBar();
+  // Панель стоит на своём месте всегда: одной строкой под шапкой, прилипая при прокрутке.
+  // Всплывающая над полем панель закрывала собой то, что было выше: кнопку условия показа,
+  // подпись «Заголовок», переключатель «Текст / Картинка» и часть текста. Постоянное место
+  // не закрывает ничего и не прыгает: пока поле не выбрано, кнопки просто неактивны.
+  function syncRtBar() {
+    if (!rtBar) return;
+    rtBar.classList.toggle("rt-idle", !rtTarget);
+    var hint = rtBar.querySelector(".rt-hint");
+    if (hint) hint.textContent = rtTarget ? "" : "Поставьте курсор в текст, чтобы оформить его";
+    var now = alignOf(rtTarget);
+    rtBar.querySelectorAll("[data-align-btn]").forEach(function (b) {
+      b.classList.toggle("on", !!rtTarget && b.getAttribute("data-align-btn") === now);
+    });
+    Array.prototype.forEach.call(rtBar.querySelectorAll("button, select"), function (c) {
+      c.disabled = !rtTarget;
+    });
   }
 
-  function hideRtBar() {
-    if (rtBar) rtBar.classList.add("hidden");
-    rtTarget = null;
-  }
+  function showRtBar(ed) { rtTarget = ed; syncRtBar(); }
+  function hideRtBar() { rtTarget = null; syncRtBar(); }
 
-  // Панель показывается по фокусу в поле и прячется, когда фокус ушёл и из поля, и из неё.
+  // Панель показывается по фокусу в поле и гаснет, когда фокус ушёл и из поля, и из неё.
   document.addEventListener("focusin", function (e) {
     var ed = e.target.closest ? e.target.closest(".rt-editor") : null;
     if (ed) { showRtBar(ed); return; }
     if (rtBar && rtBar.contains(e.target)) return;
     hideRtBar();
   });
-  window.addEventListener("scroll", function () { placeRtBar(); }, true);
-  window.addEventListener("resize", function () { placeRtBar(); });
 
-  function richEditor(labelText, runs, role) {
+  // Высота шапки нужна панели, чтобы прилипать точно под ней. При узком окне вкладки
+  // переносятся на вторую строку, и высота меняется.
+  function syncTopbarHeight() {
+    var bar = document.querySelector(".topbar");
+    document.documentElement.style.setProperty("--topbar-h", ((bar ? bar.offsetHeight : 0)) + "px");
+  }
+  window.addEventListener("resize", syncTopbarHeight);
+
+  function richEditor(labelText, runs, role, align) {
     var wrap = el("div", "rt-field");
     if (labelText) wrap.appendChild(el("div", "rt-label", labelText));
     var ed = el("div", "rt-editor"); ed.contentEditable = "true"; ed.setAttribute("data-role", role); ed.innerHTML = runsToHtml(runs);
+    setAlign(ed, align);
     attachPasteGuard(ed);
     wrap.appendChild(ed);
     return wrap;
@@ -918,9 +1003,21 @@
       // Значение выбирается списком, если у тега фиксированный набор, иначе вводится текстом.
       var valSel = el("select", "cond-val-sel"); valSel.setAttribute("data-role", "cvalsel");
       var val = el("input", "cond-val"); val.type = "text"; val.placeholder = "значение"; val.setAttribute("data-role", "cval");
+      // Второе число для условий по сроку: сколько дней после даты. Отдельным полем, а не
+      // записью «14/3» в одном: оператор не должен знать, как это хранится.
+      var valTo = el("span", "cond-window");
+      var valAfter = el("input", "cond-val cond-age"); valAfter.type = "number"; valAfter.min = "0"; valAfter.max = "3650";
+      valAfter.placeholder = "после"; valAfter.setAttribute("data-role", "cvalafter");
+      valTo.appendChild(el("span", "cond-window-sep", "до и"));
+      valTo.appendChild(valAfter);
+      valTo.appendChild(el("span", "cond-window-sep", "после"));
 
       row.appendChild(fld); row.appendChild(fldOther); row.appendChild(op);
-      row.appendChild(valSel); row.appendChild(val);
+      row.appendChild(valSel); row.appendChild(val); row.appendChild(valTo);
+
+      var подсказка = el("span", "cond-hint");
+      подсказка.style.display = "none";
+      row.appendChild(подсказка);
 
       var drop = el("button", "btn btn-danger btn-sm cond-drop", "×");
       drop.type = "button"; drop.title = "Убрать это условие";
@@ -941,7 +1038,7 @@
         if (dk.checks.indexOf(f) >= 0) known = ["true", "false"];
         else if (Object.prototype.hasOwnProperty.call(dk.groups, f)) known = dk.groups[f].slice();
         // У возраста значение это число лет: список значений тега тут ни при чём.
-        if (isAgeOp(op.value)) known = null;
+        if (isDateOp(op.value)) known = null;
         // «одно из» принимает список через запятую, одним выбором его не выразить.
         var listable = known && op.value !== "in";
         valSel.innerHTML = "";
@@ -951,7 +1048,14 @@
           if (keep && known.indexOf(keep) < 0) { valSel.value = OTHER_OPTION; val.value = keep; }
           else { valSel.value = keep || known[0]; val.value = ""; }
         } else if (keep != null) {
-          val.value = keep;
+          // Сохранённое окно «14/3» раскладывается обратно в два поля.
+          if (isDaysOp(op.value)) {
+            var parts = String(keep).split("/");
+            val.value = (parts[0] || "").trim();
+            valAfter.value = (parts.length > 1 ? parts[1] : parts[0] || "").trim();
+          } else {
+            val.value = keep;
+          }
         }
         valSel.style.display = listable ? "" : "none";
         val.style.display = (!listable || valSel.value === OTHER_OPTION) ? "" : "none";
@@ -959,9 +1063,23 @@
 
       function syncRow() {
         fldOther.style.display = fld.value === OTHER_OPTION ? "" : "none";
+        // Пока тег не выбран, условие никуда не сохранится. Молчать об этом нельзя: оператор
+        // задаёт значение, нажимает «Сохранить» и не понимает, почему условия нет.
+        var пусто = !currentField();
+        row.classList.toggle("cond-bad", пусто);
+        fld.options[0].textContent = isAgeOp(op.value) ? "выберите тег с датой рождения"
+          : isDaysOp(op.value) ? "выберите тег с датой" : "выберите тег";
+        подсказка.textContent = пусто
+          ? "выберите тег, иначе условие не сохранится"
+          : isAgeOp(op.value) ? "возраст считается из даты рождения на сервере"
+            : op.value === "annivwithin" ? "считается день и месяц, год не важен: это случай дня рождения"
+              : isDaysOp(op.value) ? "считается полная дата с годом, в обе стороны от сегодняшнего дня" : "";
+        подсказка.style.display = подсказка.textContent ? "" : "none";
         // Возраст вводится числом, а не текстом: так в поле не окажется «четырнадцать».
-        if (isAgeOp(op.value)) {
-          val.type = "number"; val.min = "0"; val.max = "130"; val.placeholder = "лет";
+        if (isDateOp(op.value)) {
+          val.type = "number"; val.min = "0";
+          val.max = isDaysOp(op.value) ? "3650" : "130";
+          val.placeholder = isDaysOp(op.value) ? "дней" : "лет";
           val.classList.add("cond-age");
         } else {
           val.type = "text"; val.removeAttribute("min"); val.removeAttribute("max");
@@ -970,11 +1088,21 @@
         var needsValue = op.value !== "empty" && op.value !== "notempty";
         valSel.style.display = needsValue && valSel.options.length ? "" : "none";
         val.style.display = needsValue && (!valSel.options.length || valSel.value === OTHER_OPTION) ? "" : "none";
+        valTo.style.display = isDaysOp(op.value) ? "" : "none";
+        if (isDaysOp(op.value)) val.placeholder = "до";
       }
 
       fld.addEventListener("change", function () { syncValues(null); syncRow(); });
       fldOther.addEventListener("input", function () { syncValues(val.value); syncRow(); });
-      op.addEventListener("change", function () { syncValues(readRowValue(row)); syncRow(); });
+      op.addEventListener("change", function () {
+        // Выбрали условие по возрасту - тег с датой рождения подставляется сам. Другого тега
+        // здесь быть и не может: возраст берётся только из даты рождения.
+        if (isDateOp(op.value) && !currentField()) {
+          var b = birthTagName();
+          if (b) fld.value = b;
+        }
+        syncValues(readRowValue(row)); syncRow();
+      });
       valSel.addEventListener("change", syncRow);
 
       if (part && part.field) {
@@ -1035,6 +1163,14 @@
       if (c.op === "empty" || c.op === "notempty") return "«" + c.field + "» " + opName;
       if (c.op === "agelt") return "возраст по «" + c.field + "» меньше " + (c.value || "?") + " лет";
       if (c.op === "agege") return "возраст по «" + c.field + "» от " + (c.value || "?") + " лет";
+      if (c.op === "datewithin" || c.op === "annivwithin") {
+        var что = c.op === "datewithin" ? "даты" : "годовщины";
+        var p = String(c.value || "").split("/");
+        var до = (p[0] || "?").trim(), после = (p.length > 1 ? p[1] : p[0] || "?").trim();
+        return до === после
+          ? ("до " + что + " «" + c.field + "» не больше " + до + " дней в обе стороны")
+          : ("«" + c.field + "»: " + до + " дней до " + что + " и " + после + " после");
+      }
       return "«" + c.field + "» " + opName + " " + (valueLabel(c.field, c.value) || "(пусто)");
     }
     function describe() {
@@ -1081,8 +1217,20 @@
   }
 
   function readRowValue(row) {
-    var valSel = row.querySelector('[data-role="cvalsel"]');
+    var op = row.querySelector('[data-role="cop"]');
     var valInput = row.querySelector('[data-role="cval"]');
+    // Условие по сроку хранит окно одной строкой: «7» это семь дней в обе стороны, «14/3» это
+    // четырнадцать до и три после. Оператор при этом видит два обычных поля.
+    if (op && isDaysOp(op.value)) {
+      var after = row.querySelector('[data-role="cvalafter"]');
+      var b = (valInput ? valInput.value : "").trim();
+      var a = (after ? after.value : "").trim();
+      if (!b && !a) return "";
+      if (b === "" ) b = "0";
+      if (a === "" || a === b) return b;
+      return b + "/" + a;
+    }
+    var valSel = row.querySelector('[data-role="cvalsel"]');
     return (valSel && valSel.options.length && valSel.value !== OTHER_OPTION)
       ? valSel.value
       : (valInput ? valInput.value : "");
@@ -1127,6 +1275,8 @@
     add(blocks || page.blocks, 0);
     add(page.checkboxes, 1);
     add(page.groups, 2);
+    add(page.signatures, 3);
+    add(page.scans, 4);
     items.sort(function (a, b) { return (a.ord - b.ord) || (a.kind - b.kind) || (a.index - b.index); });
     return items;
   }
@@ -1253,7 +1403,7 @@
     modeBar.appendChild(seg);
     bc.appendChild(modeBar);
 
-    var textWrap = richEditor("", b.runs || [], "blockbody");
+    var textWrap = richEditor("", b.runs || [], "blockbody", b.align);
     bc.appendChild(textWrap);
 
     var imgWrap = el("div", "block-image");
@@ -1305,21 +1455,31 @@
       var url = bc.getAttribute("data-imgurl");
       if (!url) return null;
       var w = parseInt((bc.querySelector('[data-role="blockimgw"]') || {}).value, 10) || 100;
-      var blk = { imageUrl: url, imageWidth: w }; if (cond) blk.visibleWhen = cond; return blk;
+      var blk = { imageUrl: url, imageWidth: w };
+      // Картинку тоже можно выровнять: печать или герб обычно стоят по центру или у правого
+      // края. Выравнивание берётся из того же поля, что и у текста этого блока.
+      var ia = alignOf(bc.querySelector('[data-role="blockbody"]'));
+      if (ia) blk.align = ia;
+      if (cond) blk.visibleWhen = cond; return blk;
     }
     var ed = bc.querySelector('[data-role="blockbody"]');
     var runs = ed ? editorToRuns(ed) : [];
     var hasText = runs.some(function (r) { return (r.text || "").trim().length; });
     if (!hasText && !cond) return null;
-    var blk2 = { runs: runs }; if (cond) blk2.visibleWhen = cond; return blk2;
+    var blk2 = { runs: runs };
+    var al = alignOf(ed); if (al) blk2.align = al;
+    if (cond) blk2.visibleWhen = cond; return blk2;
   }
 
   function readCheckboxRow(r) {
-    var lab = r.querySelector('[data-role="cblabel"]').value;
+    var ed = r.querySelector('[data-role="cblabel"]');
+    var runs = ed ? editorToRuns(ed) : [];
+    var lab = runsText(runs);
     if (!lab.trim()) return null;
     var item = {
       key: ((r.querySelector('[data-role="cbkey"]') || {}).value || "").trim(),
       label: lab,
+      labelRuns: runs,
       required: r.querySelector('[data-role="cbreq"]').checked,
       checked: !!(r.querySelector('[data-role="cbchecked"]') || {}).checked
     };
@@ -1329,25 +1489,31 @@
   }
 
   function readGroupRow(r) {
-    var options = [], used = [];
+    var options = [], used = [], выбран = "";
     r.querySelectorAll('[data-role="optrow"]').forEach(function (o, i) {
       var okey = (o.querySelector('[data-role="okey"]').value || "").trim();
-      var olabel = o.querySelector('[data-role="olabel"]').value || "";
+      var oruns = editorToRuns(o.querySelector('[data-role="olabel"]'));
+      var olabel = runsText(oruns);
       // Вариант с текстом, но без имени, раньше молча пропадал, и проверка потом сообщала, что
       // вариантов нет, хотя оператор видел их на экране. Теперь имя достраивается здесь же.
       if (!okey && olabel.trim()) okey = uniqueKey(slugKey(olabel) || ("opt" + (i + 1)), used);
       if (!okey) return;
       used.push(okey);
-      options.push({ key: okey, label: olabel });
+      options.push({ key: okey, label: olabel, labelRuns: oruns });
+      var def = o.querySelector('[data-role="odefault"]');
+      if (def && def.checked) выбран = okey;
     });
     var gkey = (r.querySelector('[data-role="gkey"]').value || "").trim();
-    var gtitle = r.querySelector('[data-role="gtitle"]').value || "";
+    var truns = editorToRuns(r.querySelector('[data-role="gtitle"]'));
+    var gtitle = runsText(truns);
     // То же самое для имени самой группы: заголовок есть, значит группа нужна.
     if (!gkey && gtitle.trim()) gkey = slugKey(gtitle);
     // Совсем пустую заготовку выбрасываем, а недоделанную оставляем: молча стирать работу
     // оператора нельзя, о недостающем имени и вариантах ему скажет проверка документа.
     if (!gkey && !options.length && !gtitle.trim()) return null;
-    var grp = { key: gkey, title: gtitle, required: r.querySelector('[data-role="greq"]').checked, options: options };
+    var grp = { key: gkey, title: gtitle, titleRuns: truns,
+      required: r.querySelector('[data-role="greq"]').checked, options: options };
+    if (выбран) grp.selected = выбран;
     var gcond = readCondition(r.querySelector('[data-role="gcond"]'));
     if (gcond) grp.visibleWhen = gcond;
     return grp;
@@ -1358,7 +1524,9 @@
     if (!container) return out;
     container.querySelectorAll('[data-role="blockcard"]').forEach(function (bc) {
       var blk = readBlockCard(bc);
-      if (blk) out.push(blk);
+      // Номер по месту в списке: без него блок уходил без порядка, и выгруженный файл не
+      // совпадал с сохранённым документом.
+      if (blk) { blk.ord = out.length; out.push(blk); }
     });
     return out;
   }
@@ -1426,6 +1594,17 @@
         problems.push({ level: "warn", text: where + ": условие ссылается на «" + f + "». Такого имени нет ни среди стандартных тегов, ни среди чекбоксов документа. Это сработает, только если внешняя система пришлёт поле с точно таким именем; иначе блок не покажется никогда." });
       if (cond.op !== "empty" && cond.op !== "notempty" && !String(cond.value || "").trim())
         problems.push({ level: "error", text: where + ": в условии не задано значение." });
+      if (isDaysOp(cond.op)) {
+        var окно = String(cond.value || "").split("/");
+        var плохо = окно.length > 2 || окно.some(function (x) {
+          var n = parseInt(x, 10);
+          return !(n >= 0 && n <= 3650);
+        });
+        if (плохо)
+          problems.push({ level: "error", text: where + ": в условии по сроку нужно число дней, а стоит «" + cond.value + "»." });
+        if (isKey)
+          problems.push({ level: "error", text: where + ": срок считается по дате, а «" + f + "» это чекбокс документа, а не дата." });
+      }
       if (isAgeOp(cond.op)) {
         var лет = parseInt(cond.value, 10);
         if (!(лет >= 0 && лет <= 130))
@@ -1519,9 +1698,30 @@
     openModal(c);
   }
 
+  // Строки условий, где тег не выбран. Их не видно в собранном документе: readRow такую строку
+  // выбрасывает, поэтому искать их надо в самом редакторе.
+  function незаполненныеУсловия() {
+    var n = 0;
+    document.querySelectorAll('[data-panel="document"] [data-role="crow"]').forEach(function (row) {
+      // Строки выключенного условия остаются в разметке, но в документ не идут и потеряться
+      // не могут: считать надо только те, где показ действительно задан условием.
+      var box = row.closest(".cond-box") || row.parentNode;
+      var mode = box && box.querySelector ? box.querySelector(".cond-mode") : null;
+      if (!mode || mode.value !== "cond") return;
+      var sel = row.querySelector('[data-role="cfieldsel"]');
+      var other = row.querySelector('[data-role="cfield"]');
+      var field = (sel && sel.value && sel.value !== OTHER_OPTION ? sel.value : (other ? other.value : "")).trim();
+      if (!field) n++;
+    });
+    return n;
+  }
+
   $("checkDoc").addEventListener("click", function () {
     collectDoc();
     var problems = validateDoc();
+    var пустых = незаполненныеУсловия();
+    if (пустых) problems.unshift({ level: "error", text: "Условий без выбранного тега: " + пустых +
+      ". Такое условие не сохраняется: блок будет показан всем. Выберите тег или уберите условие." });
     if (!problems.length) { toast("Замечаний нет."); return; }
     showProblems(problems, function () { /* просто закрыть */ });
   });
@@ -1545,11 +1745,31 @@
     // Список, над которым сейчас курсор. Для элементов страницы это может быть другая страница:
     // перенести пункт со страницы 4 на страницу 2 иначе можно было только удалив и набрав
     // заново. Для самих страниц список всегда один.
-    function listUnder(e) {
+    function listUnder(x, y) {
       if (list.getAttribute("data-role") !== "itemlist") return list;
-      var under = document.elementFromPoint(e.clientX, e.clientY);
+      var under = document.elementFromPoint(x, y);
       var other = under && under.closest ? under.closest('[data-role="itemlist"]') : null;
       return other || list;
+    }
+
+    // Положение элемента по координатам курсора. Вынесено отдельно, потому что пересчитывать
+    // его надо и при движении мыши, и при автопрокрутке: когда страница едет сама, курсор стоит
+    // на месте, событий движения нет, и без пересчёта элемент оставался бы там, где был.
+    var lastX = 0, lastY = 0;
+    function placeAt(x, y) {
+      if (!item) return;
+      var target = listUnder(x, y);
+      var others = Array.prototype.slice.call(target.children).filter(function (n) {
+        return n !== item && n.matches && n.matches(itemSelector);
+      });
+      var before = null;
+      // Первый сосед, чья середина ниже курсора: перед ним и встаём.
+      for (var i = 0; i < others.length; i++) {
+        var r = others[i].getBoundingClientRect();
+        if (y < r.top + r.height / 2) { before = others[i]; break; }
+      }
+      if (before) { if (item.nextSibling !== before) target.insertBefore(item, before); }
+      else if (target.lastElementChild !== item) target.appendChild(item);
     }
 
     // Автопрокрутка у края окна. Без неё перенести пункт со страницы 1 на страницу 4 нельзя
@@ -1563,7 +1783,10 @@
       if (edgeTimer) return;
       edgeTimer = setInterval(function () {
         if (!item) { stopEdge(); return; }
+        var было = window.scrollY;
         window.scrollBy(0, шаг);
+        if (window.scrollY === было) { stopEdge(); return; }   // дальше ехать некуда
+        placeAt(lastX, lastY);
       }, 16);
     }
     function stopEdge() { if (edgeTimer) { clearInterval(edgeTimer); edgeTimer = null; } }
@@ -1571,20 +1794,9 @@
     function onMove(e) {
       if (!item) return;
       moved = true;
-      var y = e.clientY;
-      edgeScroll(y);
-      var target = listUnder(e);
-      var others = Array.prototype.slice.call(target.children).filter(function (n) {
-        return n !== item && n.matches && n.matches(itemSelector);
-      });
-      var before = null;
-      // Первый сосед, чья середина ниже курсора: перед ним и встаём.
-      for (var i = 0; i < others.length; i++) {
-        var r = others[i].getBoundingClientRect();
-        if (y < r.top + r.height / 2) { before = others[i]; break; }
-      }
-      if (before) { if (item.nextSibling !== before) target.insertBefore(item, before); }
-      else if (target.lastElementChild !== item) target.appendChild(item);
+      lastX = e.clientX; lastY = e.clientY;
+      edgeScroll(lastY);
+      placeAt(lastX, lastY);
       e.preventDefault();
     }
 
@@ -1661,7 +1873,7 @@
   // Полоса вставки между элементами страницы. Нужна потому, что дотащить новый пункт из конца
   // длинной страницы на нужное место мышью тяжело: проще поставить его сразу туда, где он нужен.
   // Полоса видна всегда, а не только при наведении: иначе о ней просто не догадаться.
-  function insertBar(list, afterNode) {
+  function insertBar(list, afterNode, pageKind) {
     var bar = el("div", "insert-bar");
     var chip = el("button", "insert-chip"); chip.type = "button";
     chip.appendChild(icon("plus"));
@@ -1680,11 +1892,16 @@
 
     chip.addEventListener("click", function () {
       bar.innerHTML = ""; bar.classList.add("open");
-      var opts = [
-        ["Блок текста", function () { place(blockCard({ runs: [] })); }],
+      // На обычной странице подпись и сканирование можно поставить блоком, рядом с тем текстом,
+      // к которому они относятся. На экране подписи или сканирования своё поле уже есть, и
+      // добавлять туда второе незачем: там клиент занят одним делом.
+      var opts = [["Блок текста", function () { place(blockCard({ runs: [] })); }]];
+      if (!pageKind) opts = opts.concat([
         ["Чекбокс", function () { place(checkboxRow({ label: "", required: true })); }],
-        ["Двойные зависимые чекбоксы", function () { place(groupCard({ options: [{ key: "", label: "" }, { key: "", label: "" }] })); }]
-      ];
+        ["Двойные зависимые чекбоксы", function () { place(groupCard({ options: [{ key: "", label: "" }, { key: "", label: "" }] })); }],
+        ["Поле подписи", function () { place(signatureRow({ label: "", required: true })); }],
+        ["Сканирование кода", function () { place(scanRow({ label: "", required: true })); }]
+      ]);
       opts.forEach(function (o) {
         var b = iconBtn("plus", o[0], "btn-sm");
         b.addEventListener("click", o[1]);
@@ -1730,7 +1947,7 @@
     // Добавить страницу можно прямо отсюда: оглавление всегда на виду, а единственная кнопка
     // внизу списка означала бы прокрутку через весь документ каждый раз.
     var addTop = iconBtn("plus", "Добавить страницу", "btn-primary btn-sm toc-add");
-    addTop.addEventListener("click", function () { addPage(); });
+    addTop.addEventListener("click", function () { openPageKinds(addTop); });
     toc.appendChild(addTop);
 
     var list = el("div", "toc-list");
@@ -1780,7 +1997,13 @@
   function renderPages() {
     var wrap = $("pagesEditor"); wrap.innerHTML = "";
     (state.doc.pages || []).forEach(function (page, pi) {
-      var card = el("div", "page-card"); card.setAttribute("data-role", "pagecard");
+      // Подпись и сканирование это отдельные экраны, а не элементы среди текста: клиент на них
+      // занят одним делом. У такого экрана свой заголовок, свой текст над полем и само поле.
+      var kind = (page.kind || "").toLowerCase();
+      if (kind !== "signature" && kind !== "scan") kind = "";
+      var card = el("div", "page-card" + (kind ? " page-" + kind : ""));
+      card.setAttribute("data-role", "pagecard");
+      card.setAttribute("data-page-kind", kind);
       var title = el("div", "page-title");
 
       // За эту ручку страницу перетаскивают. Само перетаскивание включается только по ней,
@@ -1794,7 +2017,8 @@
       toggle.type = "button";
       title.appendChild(toggle);
 
-      var name = el("span", "page-name", "Страница " + (pi + 1));
+      var name = el("span", "page-name", (kind === "signature" ? "Экран подписи "
+        : kind === "scan" ? "Экран сканирования " : "Страница ") + (pi + 1));
       title.appendChild(name);
 
       // Сводка занимает всё свободное место, поэтому кнопка удаления всегда у правого края,
@@ -1833,7 +2057,7 @@
       body.appendChild(sectionLabel("filter", "Условие показа страницы"));
       body.appendChild(conditionEditor(page.visibleWhen, "pagecond"));
 
-      body.appendChild(richEditor("Заголовок", headingRunsOf(page), "heading"));
+      body.appendChild(richEditor("Заголовок", headingRunsOf(page), "heading", page.headingAlign));
 
       // Один список на всю страницу: текст, чекбоксы и выбор одного варианта стоят вперемешку,
       // в том порядке, в каком их читает клиент. Пункт должен идти сразу за своим абзацем, а не
@@ -1842,20 +2066,36 @@
       var items = el("div", "item-list"); items.setAttribute("data-role", "itemlist");
       var blocks = blocksOf(page);
       if (!blocks.length && !(page.checkboxes || []).length && !(page.groups || []).length) blocks = [{ runs: [] }];
-      var built = pageOrder(page, blocks).map(function (it) {
-        return it.kind === 0 ? blockCard(it.item)
-          : it.kind === 1 ? checkboxRow(it.item)
-            : groupCard(it.item);
-      });
-      items.appendChild(insertBar(items, null));
-      built.forEach(function (node) { items.appendChild(node); items.appendChild(insertBar(items, node)); });
+      var built = pageOrder(page, blocks)
+        .filter(function (it) { return kind ? it.kind === 0 : true; })
+        .map(function (it) {
+          return it.kind === 0 ? blockCard(it.item)
+            : it.kind === 1 ? checkboxRow(it.item)
+              : it.kind === 2 ? groupCard(it.item)
+                : it.kind === 3 ? signatureRow(it.item)
+                  : scanRow(it.item);
+        });
+      items.appendChild(insertBar(items, null, kind));
+      built.forEach(function (node) { items.appendChild(node); items.appendChild(insertBar(items, node, kind)); });
       makeSortable(items, ".page-item");
       body.appendChild(items);
 
-      var dyn = el("label", "check-inline dyn-anchor");
-      var dynCb = el("input"); dynCb.type = "checkbox"; dynCb.checked = !!page.includeDynamic; dynCb.setAttribute("data-role", "includedynamic");
-      dyn.appendChild(dynCb); dyn.appendChild(document.createTextNode(" Показывать здесь чекбоксы, присланные по API"));
-      body.appendChild(dyn);
+      // Само поле экрана стоит отдельно и в общий список не попадает: переставлять его местами
+      // не с чем, а удалять надо вместе с экраном.
+      if (kind === "signature") {
+        body.appendChild(sectionLabel("pen", "Поле подписи на этом экране"));
+        body.appendChild(signatureRow((page.signatures || [])[0] || { label: "", required: true }));
+      } else if (kind === "scan") {
+        body.appendChild(sectionLabel("search", "Сканирование на этом экране"));
+        body.appendChild(scanRow((page.scans || [])[0] || { label: "", required: true }));
+      }
+
+      if (!kind) {
+        var dyn = el("label", "check-inline dyn-anchor");
+        var dynCb = el("input"); dynCb.type = "checkbox"; dynCb.checked = !!page.includeDynamic; dynCb.setAttribute("data-role", "includedynamic");
+        dyn.appendChild(dynCb); dyn.appendChild(document.createTextNode(" Показывать здесь чекбоксы, присланные по API"));
+        body.appendChild(dyn);
+      }
 
       applyCollapsed();
       wrap.appendChild(card);
@@ -1923,9 +2163,107 @@
       if (!keyInput.hasAttribute("data-auto")) return;
       var taken = (siblingsOf() || []).filter(function (i) { return i !== keyInput; })
         .map(function (i) { return (i.value || "").trim(); });
-      var base = slugKey(source.value);
+      // Источником может быть и обычное поле, и поле с оформлением: у второго значение это
+      // его текст, а не value.
+      var текст = source.value != null ? source.value : (source.textContent || "");
+      var base = slugKey(текст);
       keyInput.value = base ? uniqueKey(base, taken) : "";
     });
+  }
+
+  // Поле подписи внутри страницы. Документ может требовать несколько подписей, и каждая
+  // хранится отдельно под своим именем, поэтому в записи и в PDF видно, что именно подписано.
+  function signatureRow(sig) {
+    sig = sig || {};
+    var box = el("div", "sign-item page-item"); box.setAttribute("data-role", "signrow");
+    box.setAttribute("data-kind", "signature");
+    var row = el("div", "cb-row");
+    var handle = el("span", "drag-handle");
+    handle.appendChild(icon("grip"));
+    handle.title = "Перетащите, чтобы изменить порядок";
+    row.appendChild(handle);
+    row.appendChild(icon("pen", "item-icon"));
+    var label = el("input"); label.type = "text"; label.placeholder = "Что подписывают, например: Подпись пациента";
+    label.value = sig.label || ""; label.setAttribute("data-role", "siglabel"); row.appendChild(label);
+    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API";
+    key.value = sig.key || ""; key.setAttribute("data-role", "sigkey");
+    key.title = "Имя этого поля подписи. По нему подпись различается в записи и в PDF.";
+    row.appendChild(key);
+    linkAutoKey(label, key, function () {
+      var card = box.closest('[data-role="pagecard"]');
+      return card ? Array.prototype.slice.call(card.querySelectorAll('[data-role="sigkey"]')) : [];
+    });
+    var reqLabel = el("label"); var req = el("input"); req.type = "checkbox";
+    req.checked = sig.required !== false; req.setAttribute("data-role", "sigreq");
+    reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательная")); row.appendChild(reqLabel);
+    var cond = conditionEditor(sig.visibleWhen, "sigcond"); cond.classList.add("cond-inline"); row.appendChild(cond);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { removeItem(box); }); row.appendChild(del);
+    box.appendChild(row);
+    return box;
+  }
+
+  // Сканирование кода внутри страницы: клиент подносит штрихкод пробирки или QR из направления.
+  // Код попадает в запись подписи, но не в PDF: это служебные данные заказа, а не то, что
+  // человек подписывает.
+  function scanRow(sc) {
+    sc = sc || {};
+    var box = el("div", "scan-item page-item"); box.setAttribute("data-role", "scanrow");
+    box.setAttribute("data-kind", "scan");
+    var row = el("div", "cb-row");
+    var handle = el("span", "drag-handle");
+    handle.appendChild(icon("grip"));
+    handle.title = "Перетащите, чтобы изменить порядок";
+    row.appendChild(handle);
+    row.appendChild(icon("search", "item-icon"));
+    var label = el("input"); label.type = "text"; label.placeholder = "Что сканировать, например: штрихкод пробирки";
+    label.value = sc.label || ""; label.setAttribute("data-role", "scanlabel"); row.appendChild(label);
+    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API";
+    key.value = sc.key || ""; key.setAttribute("data-role", "scankey");
+    key.title = "Имя этого поля. По нему считанный код различается в записи подписи.";
+    row.appendChild(key);
+    linkAutoKey(label, key, function () {
+      var card = box.closest('[data-role="pagecard"]');
+      return card ? Array.prototype.slice.call(card.querySelectorAll('[data-role="scankey"]')) : [];
+    });
+    var reqLabel = el("label"); var req = el("input"); req.type = "checkbox";
+    req.checked = sc.required !== false; req.setAttribute("data-role", "scanreq");
+    reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательно")); row.appendChild(reqLabel);
+    var cond = conditionEditor(sc.visibleWhen, "scancond"); cond.classList.add("cond-inline"); row.appendChild(cond);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { removeItem(box); }); row.appendChild(del);
+    box.appendChild(row);
+    return box;
+  }
+
+  function readSignatureRow(box) {
+    var label = (box.querySelector('[data-role="siglabel"]') || {}).value || "";
+    var key = (box.querySelector('[data-role="sigkey"]') || {}).value || "";
+    if (!label.trim() && !key.trim()) return null;
+    var out = { key: key.trim(), label: label, required: (box.querySelector('[data-role="sigreq"]') || {}).checked !== false };
+    var cond = readCondition(box.querySelector('[data-role="sigcond"]'));
+    if (cond) out.visibleWhen = cond;
+    return out;
+  }
+
+  function readScanRow(box) {
+    var label = (box.querySelector('[data-role="scanlabel"]') || {}).value || "";
+    var key = (box.querySelector('[data-role="scankey"]') || {}).value || "";
+    if (!label.trim() && !key.trim()) return null;
+    var out = { key: key.trim(), label: label, required: (box.querySelector('[data-role="scanreq"]') || {}).checked !== false };
+    var cond = readCondition(box.querySelector('[data-role="scancond"]'));
+    if (cond) out.visibleWhen = cond;
+    return out;
+  }
+
+  // Однострочное поле с оформлением: то же, что редактор абзаца, но в одну строку и с подсказкой
+  // на пустом месте. Панель оформления цепляется к нему сама, как к любому .rt-editor.
+  function labelEditor(runs, plain, role, placeholder) {
+    var ed = el("div", "rt-editor rt-inline");
+    ed.contentEditable = "true";
+    ed.setAttribute("data-role", role);
+    ed.setAttribute("data-placeholder", placeholder || "");
+    ed.innerHTML = runsToHtml(labelRuns(runs, plain));
+    attachPasteGuard(ed);
+    return ed;
   }
 
   function checkboxRow(cb) {
@@ -1936,7 +2274,10 @@
     handle.appendChild(icon("grip"));
     handle.title = "Перетащите, чтобы изменить порядок";
     row.appendChild(handle);
-    var label = el("input"); label.type = "text"; label.placeholder = "Текст пункта"; label.value = cb.label || ""; label.setAttribute("data-role", "cblabel"); row.appendChild(label);
+    // Текст пункта оформляется той же панелью, что и абзацы: жирный, курсив, цвет, размер.
+    // Раньше это было обычное поле ввода, и выделить в пункте ничего было нельзя.
+    var label = labelEditor(cb.labelRuns, cb.label, "cblabel", "Текст пункта");
+    row.appendChild(label);
     // Имя, по которому внешняя система адресует именно этот пункт. Подставляется само из
     // текста, латиницей, и остаётся на виду: его можно поправить руками. Без имени пункт
     // остаётся обычным чекбоксом из шаблона: он работает и попадает в запись, но задать его
@@ -1975,7 +2316,8 @@
     handle.appendChild(icon("grip"));
     handle.title = "Перетащите, чтобы изменить порядок";
     head.appendChild(handle);
-    var title = el("input"); title.type = "text"; title.placeholder = "Общий заголовок"; title.value = g.title || ""; title.setAttribute("data-role", "gtitle"); head.appendChild(title);
+    var title = labelEditor(g.titleRuns, g.title, "gtitle", "Общий заголовок");
+    head.appendChild(title);
     var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API";
     key.value = g.key || ""; key.setAttribute("data-role", "gkey");
     key.title = "Имя этой группы для внешней системы. Заполняется само из заголовка. " +
@@ -1999,7 +2341,7 @@
     card.appendChild(head);
 
     var opts = el("div", "opt-list"); opts.setAttribute("data-role", "optlist");
-    (g.options || []).forEach(function (o) { opts.appendChild(optionRow(o)); });
+    (g.options || []).forEach(function (o) { opts.appendChild(optionRow(o, g.selected)); });
     card.appendChild(opts);
     var addOpt = iconBtn("plus", "Вариант", "btn-ghost btn-sm");
     addOpt.addEventListener("click", function () { opts.appendChild(optionRow({ key: "", label: "" })); });
@@ -2008,14 +2350,31 @@
     return card;
   }
 
-  function optionRow(o) {
+  function optionRow(o, selected) {
     var row = el("div", "cb-row"); row.setAttribute("data-role", "optrow");
-    var label = el("input"); label.type = "text"; label.placeholder = "Текст варианта"; label.value = o.label || ""; label.setAttribute("data-role", "olabel"); row.appendChild(label);
+    var label = labelEditor(o.labelRuns, o.label, "olabel", "Текст варианта");
+    row.appendChild(label);
     var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API"; key.value = o.key || ""; key.setAttribute("data-role", "okey"); row.appendChild(key);
     linkAutoKey(label, key, function () {
       var list = row.closest('[data-role="optlist"]');
       return list ? Array.prototype.slice.call(list.querySelectorAll('[data-role="okey"]')) : [];
     });
+    // Вариант, отмеченный заранее. У чекбокса такая пометка есть давно, а у группы её не было:
+    // выбор по умолчанию задавался только по API, а при сохранении из редактора молча пропадал,
+    // хотя планшет его использует.
+    var defLabel = el("label", "opt-default");
+    var def = el("input"); def.type = "checkbox";
+    def.setAttribute("data-role", "odefault");
+    def.checked = !!(o.key && selected && String(selected).toLowerCase() === String(o.key).toLowerCase());
+    def.title = "Этот вариант отмечен заранее. Отмеченным может быть только один.";
+    def.addEventListener("change", function () {
+      if (!def.checked) return;
+      // Отмеченным может быть только один: выбор одного снимает остальные.
+      var list = row.closest('[data-role="optlist"]');
+      if (list) list.querySelectorAll('[data-role="odefault"]').forEach(function (x) { if (x !== def) x.checked = false; });
+    });
+    defLabel.appendChild(def); defLabel.appendChild(el("span", null, "отмечен"));
+    row.appendChild(defLabel);
     var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { row.remove(); updatePlaceholders(); }); row.appendChild(del);
     return row;
   }
@@ -2032,19 +2391,40 @@
       // Блоки текста, чекбоксы и группы лежат в одном списке в том порядке, в каком их
       // расставил оператор. Номер берётся прямо из положения в списке, поэтому на планшете
       // страница выглядит ровно так, как в редакторе.
-      var blocks = [], checkboxes = [], groups = [], ord = 0;
+      var blocks = [], checkboxes = [], groups = [], signatures = [], scans = [], ord = 0;
       card.querySelectorAll('[data-role="itemlist"] > .page-item').forEach(function (node) {
         var kind = node.getAttribute("data-kind");
         var got = kind === "block" ? readBlockCard(node)
           : kind === "checkbox" ? readCheckboxRow(node)
-            : kind === "group" ? readGroupRow(node) : null;
+            : kind === "group" ? readGroupRow(node)
+              : kind === "signature" ? readSignatureRow(node)
+                : kind === "scan" ? readScanRow(node) : null;
         if (!got) return;
         got.ord = ord++;
         if (kind === "block") blocks.push(got);
         else if (kind === "checkbox") checkboxes.push(got);
-        else groups.push(got);
+        else if (kind === "group") groups.push(got);
+        else if (kind === "signature") signatures.push(got);
+        else scans.push(got);
       });
-      var page = { heading: "", body: "", headingRuns: headingRuns, blocks: blocks, checkboxes: checkboxes, groups: groups, includeDynamic: includeDynamic };
+      var headingAlign = alignOf(hEd);
+      // Поле экрана подписи или сканирования стоит вне общего списка: там переставлять его не
+      // с чем. Читается оно отдельно и кладётся в тот же массив, что и блоки внутри страницы,
+      // поэтому в записи подписи, в PDF и в раскладке ничего не меняется.
+      var pageKind = card.getAttribute("data-page-kind") || "";
+      if (pageKind === "signature") {
+        // Поле экрана остаётся, даже если оператор ещё не вписал подпись под ним: иначе
+        // добавленный экран молча исчезал бы при сохранении. Имя подставит сервер.
+        var sigOwn = readSignatureRow(card.querySelector('[data-role="signrow"]'))
+          || { key: "", label: "", required: true };
+        sigOwn.ord = 0; signatures = [sigOwn]; scans = [];
+      } else if (pageKind === "scan") {
+        var scanOwn = readScanRow(card.querySelector('[data-role="scanrow"]'))
+          || { key: "", label: "", required: true };
+        scanOwn.ord = 0; scans = [scanOwn]; signatures = [];
+      }
+      var page = { heading: "", body: "", kind: pageKind || null, headingRuns: headingRuns, headingAlign: headingAlign, blocks: blocks, checkboxes: checkboxes,
+        groups: groups, signatures: signatures, scans: scans, includeDynamic: includeDynamic };
       if (pageCond) page.visibleWhen = pageCond;
       pages.push(page);
     });
@@ -2054,14 +2434,45 @@
   }
   // Новая страница встаёт в конец и сразу показывается: иначе после нажатия непонятно,
   // добавилось ли что-нибудь, особенно если кнопку нажали из оглавления.
-  function addPage() {
+  // Страница бывает трёх видов. Обычная это текст, пункты и выбор вариантов. Экран подписи и
+  // экран сканирования это отдельные шаги, где клиент занят только одним делом: расписаться или
+  // поднести код. То же самое можно поставить и блоком внутри обычной страницы, если подпись
+  // относится к конкретному абзацу, а не ко всему документу.
+  function addPage(kind) {
     collectDoc();
-    state.doc.pages.push({ headingRuns: [{ text: "Новая страница" }], blocks: [], checkboxes: [], groups: [], includeDynamic: false });
+    var page = { headingRuns: [{ text: "Новая страница" }], blocks: [], checkboxes: [], groups: [], includeDynamic: false };
+    if (kind === "signature") {
+      page.kind = "signature";
+      page.headingRuns = [{ text: "Подпись" }];
+      page.signatures = [{ label: "", required: true, ord: 0 }];
+    } else if (kind === "scan") {
+      page.kind = "scan";
+      page.headingRuns = [{ text: "Сканирование кода" }];
+      page.scans = [{ label: "", required: true, ord: 0 }];
+    }
+    state.doc.pages.push(page);
     renderPages();
+    markDirty();
     var cards = document.querySelectorAll('#pagesEditor [data-role="pagecard"]');
     scrollToCard(cards[cards.length - 1]);
   }
-  $("addPage").addEventListener("click", addPage);
+
+  // Меню видов раскрывается прямо под кнопкой: три отдельные кнопки в панели страниц заняли бы
+  // столько места, что список страниц уехал бы вниз.
+  function openPageKinds(anchor) {
+    var host = anchor.parentNode;
+    var open = host.querySelector('[data-role="pagekinds"]');
+    if (open) { open.remove(); return; }
+    var menu = el("div", "page-kinds"); menu.setAttribute("data-role", "pagekinds");
+    [["Обычная страница", ""], ["Экран подписи", "signature"], ["Экран сканирования кода", "scan"]]
+      .forEach(function (o) {
+        var b = el("button", "btn btn-ghost btn-sm", o[0]); b.type = "button";
+        b.addEventListener("click", function () { menu.remove(); addPage(o[1]); });
+        menu.appendChild(b);
+      });
+    host.insertBefore(menu, anchor.nextSibling);
+  }
+  $("addPage").addEventListener("click", function () { openPageKinds($("addPage")); });
   $("saveDocument").addEventListener("click", function () { saveDoc().then(function () { toast("Документ сохранён"); }); });
 
   // ---- Защита несохранённого ----
@@ -2103,8 +2514,12 @@
 
   function saveDoc() {
     collectDoc();
+    // Условие без выбранного тега в документ не попадает. Сохранить документ всё равно надо,
+    // но сказать об этом обязательно: иначе блок молча покажется всем.
+    var пустых = незаполненныеУсловия();
     return apiSend("/document", "PUT", state.doc).then(function (r) {
       dirty = false; syncDirty(); dropDraft();
+      if (пустых) toast("Условий без выбранного тега: " + пустых + ". Они не сохранены, блок будет показан всем.", true);
       return r;
     });
   }
@@ -2193,6 +2608,338 @@
     return out.filter(function (name) { return !isDocKey(name); });
   }
 
+  // ---- Раскладка подписей на листе PDF ----
+  // Лист строится по координатам, которые прислал сервер: их считает тот же генератор, что
+  // потом соберёт готовый файл. Поэтому здесь не «похоже на PDF», а тот самый PDF, только без
+  // самих подписей: их оператор и расставляет.
+  $("pdfLayout").addEventListener("click", function () {
+    collectDoc();
+    var btn = $("pdfLayout");
+    btn.classList.add("btn-wait");
+    // Тестовые значения тегов берутся те же, что и в предпросмотре: длина подставленного
+    // текста влияет на то, где закончится страница, а значит и на место подписи.
+    var fields = {};
+    previewFields().forEach(function (k) { fields[k] = previewDefault(k); });
+    pdfLayoutOf(state.doc.signaturePlacements || [], fields, state.doc.pdfFontScale,
+      state.doc.pdfSignatureScale).then(function (data) {
+      openPdfLayout(data, fields);
+    }).catch(function (e) {
+      toast(e && e.message ? e.message : "Не удалось построить макет PDF", true);
+    }).then(function () { btn.classList.remove("btn-wait"); });
+  });
+
+  // Макет считает сервер, и пересчитывать его надо при каждом изменении раскладки: подпись,
+  // снятая с потока, укорачивает документ, а возвращённая в поток удлиняет, и разбивка на
+  // страницы вместе с ней меняется.
+  function pdfLayoutOf(places, fields, fontScale, signScale) {
+    var doc = {};
+    for (var k in state.doc) if (Object.prototype.hasOwnProperty.call(state.doc, k)) doc[k] = state.doc[k];
+    doc.signaturePlacements = places;
+    if (fontScale) doc.pdfFontScale = fontScale;
+    if (signScale) doc.pdfSignatureScale = signScale;
+    return apiJson("/document/pdf-layout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document: doc, fields: fields })
+    });
+  }
+
+  function openPdfLayout(data, previewValues) {
+    var PW = data.pageWidth || 595, PH = data.pageHeight || 842;
+    var pageCount = Math.max(1, data.pageCount || 1);
+    previewValues = previewValues || {};
+    // Копия, а не исходный массив: пока оператор не нажал «Применить», документ не меняется.
+    var places = (data.placements || []).map(function (p) {
+      return { key: p.key || "", page: p.page || 0, x: p.x || 0, y: p.y || 0, w: p.w || 0.35, h: p.h || 0.08 };
+    });
+    var fields = data.fields || [];
+    var scale = 1, sheets = null, side = null, zoomLabel = null;
+
+    var root = el("div", "pdfl");
+    var head = el("div", "pdfl-head");
+    head.appendChild(el("h3", null, "Листы PDF и раскладка подписей"));
+    // Размер шрифта в PDF. Экран и бумага это разные носители: на планшете крупный шрифт нужен,
+    // чтобы читалось с расстояния, а на бумаге тот же размер раздувает документ на лишние
+    // страницы. Пересчёт идёт сразу, поэтому видно, во сколько листов документ уложится.
+    var scaleWrap = el("label", "pdfl-scale");
+    scaleWrap.appendChild(el("span", null, "Шрифт в PDF"));
+    var scaleSel = el("select");
+    [100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50].forEach(function (v) {
+      scaleSel.appendChild(new Option(v + "%", String(v)));
+    });
+    scaleSel.value = String(state.doc.pdfFontScale || 100);
+    scaleSel.title = "100% это тот же размер, что видит клиент на планшете";
+    scaleSel.addEventListener("change", function () { reflow(); });
+    scaleWrap.appendChild(scaleSel);
+    head.appendChild(scaleWrap);
+
+    // Размер места под подпись задаётся отдельно от шрифта: подпись может занимать на бумаге
+    // слишком много, даже когда текст уже мелкий. На подпись со своим местом это не влияет.
+    var signWrap = el("label", "pdfl-scale");
+    signWrap.appendChild(el("span", null, "Подпись в PDF"));
+    var signSel = el("select");
+    [100, 90, 80, 70, 60, 50, 40].forEach(function (v) { signSel.appendChild(new Option(v + "%", String(v))); });
+    signSel.value = String(state.doc.pdfSignatureScale || 100);
+    signSel.title = "Размер места под подпись в потоке документа. Подпись, которой задано своё место на листе, меняется перетаскиванием.";
+    signSel.addEventListener("change", function () { reflow(); });
+    signWrap.appendChild(signSel);
+    head.appendChild(signWrap);
+
+    var zoom = el("div", "pdfl-zoom");
+    var less = el("button", "btn btn-ghost", "−"); less.title = "Мельче";
+    zoomLabel = el("span", null, "100%");
+    var more = el("button", "btn btn-ghost", "+"); more.title = "Крупнее";
+    less.addEventListener("click", function () { setScale(scale - 0.15); });
+    more.addEventListener("click", function () { setScale(scale + 0.15); });
+    zoom.appendChild(less); zoom.appendChild(zoomLabel); zoom.appendChild(more);
+    head.appendChild(zoom);
+    root.appendChild(head);
+    root.appendChild(el("p", "sig-meta", "Так документ будет напечатан. Подпись, которой не задано место, печатается там же, где стоит её поле в документе, и показана серой рамкой. Перетащите синий прямоугольник туда, где подпись должна оказаться на листе."));
+
+    var body = el("div", "pdfl-body");
+    side = el("div", "pdfl-side");
+    sheets = el("div", "pdfl-sheets");
+    var inner = el("div", "pdfl-sheets-inner");
+    sheets.appendChild(inner);
+    body.appendChild(side); body.appendChild(sheets);
+    root.appendChild(body);
+
+    var actions = el("div", "modal-actions");
+    var cancel = el("button", "btn btn-ghost", "Отмена");
+    cancel.addEventListener("click", closeModal);
+    var apply = el("button", "btn btn-primary", "Применить");
+    apply.addEventListener("click", function () {
+      state.doc.signaturePlacements = places.map(function (p) {
+        return { key: p.key, page: p.page, x: round4(p.x), y: round4(p.y), w: round4(p.w), h: round4(p.h) };
+      });
+      state.doc.pdfFontScale = parseInt(scaleSel.value, 10) || 100;
+      state.doc.pdfSignatureScale = parseInt(signSel.value, 10) || 100;
+      markDirty();
+      closeModal();
+      toast(places.length ? "Раскладка подписей применена, не забудьте сохранить документ"
+        : "Все подписи печатаются в потоке документа");
+    });
+    actions.appendChild(cancel); actions.appendChild(apply);
+    root.appendChild(actions);
+    openModal(root, true);
+
+    // Пересчитать макет на сервере и перерисовать. Пока считает, лист остаётся на экране:
+    // мигание пустотой на каждое движение оператора выглядело бы сломанным.
+    function reflow(after) {
+      pdfLayoutOf(places, previewValues, parseInt(scaleSel.value, 10) || 100,
+        parseInt(signSel.value, 10) || 100).then(function (fresh) {
+        data = fresh;
+        pageCount = Math.max(1, fresh.pageCount || 1);
+        PW = fresh.pageWidth || PW; PH = fresh.pageHeight || PH;
+        draw();
+        if (after) after();
+      }).catch(function (e) {
+        toast(e && e.message ? e.message : "Не удалось пересчитать макет PDF", true);
+        draw();
+      });
+    }
+
+    function round4(v) { return Math.round(v * 10000) / 10000; }
+    // Имя поля задаёт оператор, в нём может оказаться кавычка: в селектор её пускать нельзя.
+    function cssKey(k) { return String(k).replace(/["\\]/g, "\\$&"); }
+    // Имена полей сервер сравнивает без учёта регистра, здесь должно быть так же: иначе одна
+    // и та же подпись показалась бы и рамкой в потоке, и прямоугольником.
+    function same(a, b) { return String(a || "").toLowerCase() === String(b || "").toLowerCase(); }
+    function placeOf(key) {
+      for (var i = 0; i < places.length; i++) if (same(places[i].key, key)) return places[i];
+      return null;
+    }
+    function labelOf(key) {
+      for (var i = 0; i < fields.length; i++) if (same(fields[i].key, key)) return fields[i].label || fields[i].key;
+      return key;
+    }
+
+    // При открытии лист показывается целиком: подпись ставят относительно всей страницы, и
+    // видеть надо весь лист, а не его верхнюю треть. Дальше масштаб меняет оператор.
+    var availW = Math.max(240, sheets.clientWidth - 40);
+    var availH = Math.max(240, sheets.clientHeight - 40);
+    setScale(Math.min(1.4, Math.min(availW / PW, availH / PH)));
+
+    function setScale(v) {
+      scale = Math.min(2, Math.max(0.3, Math.round(v * 100) / 100));
+      zoomLabel.textContent = Math.round(scale * 100) + "%";
+      draw();
+    }
+
+    function draw() {
+      inner.innerHTML = "";
+      var pages = [];
+      for (var i = 0; i < pageCount; i++) {
+        var pg = el("div", "pdf-page");
+        pg.style.width = (PW * scale) + "px";
+        pg.style.height = (PH * scale) + "px";
+        pg.setAttribute("data-page", String(i));
+        var no = el("div", "pdf-page-no", "страница " + (i + 1) + " из " + pageCount);
+        pg.appendChild(no);
+        inner.appendChild(pg);
+        pages.push(pg);
+      }
+      (data.items || []).forEach(function (it) {
+        var pg = pages[it.page]; if (!pg) return;
+        if (it.kind === "text") {
+          var t = el("span", "pdf-t");
+          t.textContent = it.text || "";
+          t.style.left = (it.x * scale) + "px";
+          t.style.top = (it.y * scale) + "px";
+          t.style.fontSize = ((it.size || 11) * scale) + "px";
+          if (it.bold) t.style.fontWeight = "700";
+          if (it.italic) t.style.fontStyle = "italic";
+          if (it.color) t.style.color = it.color;
+          pg.appendChild(t);
+        } else if (it.kind === "image") {
+          var im = el(it.text ? "img" : "div", "pdf-img");
+          if (it.text) im.src = it.text;
+          im.style.left = (it.x * scale) + "px"; im.style.top = (it.y * scale) + "px";
+          im.style.width = (it.w * scale) + "px"; im.style.height = (it.h * scale) + "px";
+          pg.appendChild(im);
+        } else if (it.kind === "sign" && !placeOf(it.text || "")) {
+          // Подпись без заданного места печатается в потоке: показываем, где именно.
+          var fl = el("div", "pdf-flow");
+          fl.style.left = (it.x * scale) + "px"; fl.style.top = (it.y * scale) + "px";
+          fl.style.width = (it.w * scale) + "px"; fl.style.height = (it.h * scale) + "px";
+          fl.appendChild(el("b", null, "в потоке: " + labelOf(it.text || "")));
+          pg.appendChild(fl);
+        }
+      });
+      places.forEach(function (p) {
+        var pg = pages[Math.min(p.page, pages.length - 1)];
+        if (!pg) return;
+        pg.appendChild(rect(p, pages));
+      });
+      renderSide(pages);
+    }
+
+    function rect(p, pages) {
+      var box = el("div", "pdf-place");
+      box.setAttribute("data-key", p.key);
+      box.style.left = (p.x * PW * scale) + "px";
+      box.style.top = (p.y * PH * scale) + "px";
+      box.style.width = (p.w * PW * scale) + "px";
+      box.style.height = (p.h * PH * scale) + "px";
+      box.appendChild(el("b", null, labelOf(p.key)));
+      var grip = el("i");
+      box.appendChild(grip);
+
+      // Тянуть можно и сам прямоугольник, и его угол. Указатель ловится захватом, иначе
+      // при быстром движении курсор уходит с элемента и перетаскивание обрывается.
+      function start(ev, resizing) {
+        if (ev.button != null && ev.button !== 0) return;
+        ev.preventDefault(); ev.stopPropagation();
+        var startX = ev.clientX, startY = ev.clientY;
+        var x0 = p.x, y0 = p.y, w0 = p.w, h0 = p.h;
+        box.classList.add("drag");
+        var target = resizing ? grip : box;
+        target.setPointerCapture(ev.pointerId);
+        function move(e) {
+          var dx = (e.clientX - startX) / (PW * scale), dy = (e.clientY - startY) / (PH * scale);
+          if (resizing) {
+            p.w = Math.min(1 - p.x, Math.max(0.05, w0 + dx));
+            p.h = Math.min(1 - p.y, Math.max(0.02, h0 + dy));
+            box.style.width = (p.w * PW * scale) + "px";
+            box.style.height = (p.h * PH * scale) + "px";
+            return;
+          }
+          p.x = Math.min(1 - p.w, Math.max(0, x0 + dx));
+          p.y = Math.min(1 - p.h, Math.max(0, y0 + dy));
+          box.style.left = (p.x * PW * scale) + "px";
+          box.style.top = (p.y * PH * scale) + "px";
+          // Прямоугольник, вытащенный на соседний лист, переезжает на него: иначе подпись
+          // на многостраничном документе пришлось бы ставить вслепую.
+          var over = pageUnder(e.clientX, e.clientY, pages);
+          if (over >= 0 && over !== p.page) {
+            p.page = over;
+            pages[over].appendChild(box);
+            var r = pages[over].getBoundingClientRect();
+            p.x = Math.min(1 - p.w, Math.max(0, (e.clientX - r.left) / (PW * scale) - p.w / 2));
+            p.y = Math.min(1 - p.h, Math.max(0, (e.clientY - r.top) / (PH * scale) - p.h / 2));
+            box.style.left = (p.x * PW * scale) + "px";
+            box.style.top = (p.y * PH * scale) + "px";
+            startX = e.clientX; startY = e.clientY; x0 = p.x; y0 = p.y;
+            renderSide(pages);
+          }
+        }
+        function up(e) {
+          box.classList.remove("drag");
+          target.removeEventListener("pointermove", move);
+          target.removeEventListener("pointerup", up);
+          target.removeEventListener("pointercancel", up);
+          try { target.releasePointerCapture(e.pointerId); } catch (err) { /* указатель уже отпущен */ }
+          renderSide(pages);
+        }
+        target.addEventListener("pointermove", move);
+        target.addEventListener("pointerup", up);
+        target.addEventListener("pointercancel", up);
+      }
+      box.addEventListener("pointerdown", function (ev) { start(ev, false); });
+      grip.addEventListener("pointerdown", function (ev) { start(ev, true); });
+      return box;
+    }
+
+    function pageUnder(cx, cy, pages) {
+      for (var i = 0; i < pages.length; i++) {
+        var r = pages[i].getBoundingClientRect();
+        if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) return i;
+      }
+      return -1;
+    }
+
+    function renderSide(pages) {
+      side.innerHTML = "";
+      side.appendChild(sectionLabel("pen", "Поля подписи"));
+      // Документ мог стать короче с тех пор, как подписи расставляли. Молча переносить их на
+      // последний лист нельзя: оператор должен об этом узнать и поправить.
+      var съехали = places.filter(function (x) { return x.page >= pageCount; });
+      if (съехали.length) {
+        съехали.forEach(function (x) { x.page = pageCount - 1; });
+        side.appendChild(el("p", "sig-meta", "Документ стал короче: " + съехали.length +
+          " подпись перенесена на последний лист. Проверьте место."));
+      }
+      if (!fields.length) { side.appendChild(el("p", "sig-meta", "В документе нет полей подписи.")); return; }
+      fields.forEach(function (f) {
+        var p = placeOf(f.key);
+        var card = el("div", "pdfl-field" + (p ? " on" : ""));
+        card.appendChild(el("div", "nm", f.label || f.key));
+        card.appendChild(el("div", "st", p ? "лист " + (p.page + 1) + ", своё место" : "печатается в потоке документа"));
+        var row = el("div", "row");
+        if (p) {
+          var back = el("button", "btn btn-ghost", "Вернуть в поток");
+          back.addEventListener("click", function () {
+            places = places.filter(function (x) { return x !== p; });
+            reflow();
+          });
+          row.appendChild(back);
+        } else {
+          var put = el("button", "btn btn-ghost", "Разместить");
+          put.addEventListener("click", function () {
+            // Прямоугольник появляется на том листе, который сейчас перед глазами, и сразу
+            // показывается: иначе при мелком масштабе непонятно, добавилось ли что-нибудь.
+            var добавлен = { key: f.key, page: visiblePage(pages), x: 0.08, y: 0.75, w: 0.35, h: 0.08 };
+            places.push(добавлен);
+            reflow(function () {
+              var box = sheets.querySelector('.pdf-place[data-key="' + cssKey(добавлен.key) + '"]');
+              if (box && box.scrollIntoView) box.scrollIntoView({ block: "center", inline: "nearest" });
+            });
+          });
+          row.appendChild(put);
+        }
+        card.appendChild(row);
+        side.appendChild(card);
+      });
+    }
+
+    function visiblePage(pages) {
+      var top = sheets.getBoundingClientRect().top;
+      for (var i = pages.length - 1; i >= 0; i--)
+        if (pages[i].getBoundingClientRect().top <= top + 60) return i;
+      return 0;
+    }
+  }
+
   function openPreviewSetup(placeholders) {
     var c = el("div", "preview-setup");
     c.appendChild(el("h3", null, "Предпросмотр документа"));
@@ -2254,6 +3001,31 @@
     var cbArea = el("textarea"); cbArea.rows = 3; cbArea.placeholder = "+Согласен на рассылку\nДополнительное согласие";
     cbLabel.appendChild(cbArea); c.appendChild(cbLabel);
 
+    // Здесь набирают текст построчно, а внешняя система шлёт JSON. Показываем, во что именно
+    // превращается набранное: иначе непонятно, что должен прислать тот, кто пишет интеграцию.
+    var пример = el("details", "pv-json");
+    пример.appendChild(el("summary", null, "Как это выглядит в запросе POST /api/ext/show-document"));
+    пример.appendChild(el("p", "sig-meta",
+      "Чекбокс, который есть в документе, задаётся по key и отмечается на своём месте. " +
+      "Чекбокса, которого в документе нет, задаётся по label и дописывается в конец страницы, помеченной приёмником. " +
+      "Двойные зависимые чекбоксы это groups: key это имя группы, selected это имя выбранного варианта, пустая строка означает, что не выбрано ничего."));
+    var код = el("pre", "api-code");
+    пример.appendChild(код);
+    c.appendChild(пример);
+    function обновитьПример() {
+      var d = collect();
+      // Адресуется рабочее место, а не планшет: код места задаёт сам интегратор, он не меняется
+      // при замене планшета, и внутренний dev-... наружу не отдаётся. deviceId нужен только
+      // тогда, когда на одном месте стоит несколько планшетов.
+      var тело = { workstationExternalId: "WS-204", fields: d.fields };
+      // Массивы показываются всегда, даже пустыми: иначе по примеру не видно, как выглядят
+      // чекбоксы и двойные зависимые чекбоксы, пока их не набрали.
+      тело.checkboxes = d.checkboxes;
+      тело.groups = d.groups;
+      код.textContent = JSON.stringify(тело, null, 2);
+    }
+    cbArea.addEventListener("input", обновитьПример);
+
     function collect() {
       var fields = {}; placeholders.forEach(function (k) { fields[k] = inputs[k].value; });
       // Именованный чекбокс документа задаётся по имени: сервер поймёт, что это он, и поставит
@@ -2267,6 +3039,11 @@
       var groups = groupNames.map(function (g) { return { key: g, selected: groupSel[g].value }; });
       return { fields: fields, checkboxes: checkboxes, groups: groups };
     }
+
+    // Пример собирается после collect(), потому что берёт из него готовое тело запроса.
+    обновитьПример();
+    c.addEventListener("change", обновитьПример);
+    c.addEventListener("input", обновитьПример);
 
     var go = iconBtn("eye", "Показать предпросмотр", "btn-primary");
     go.addEventListener("click", function () {
@@ -2362,6 +3139,21 @@
   }
 
   // Mirrors the tablet renderer (kiosk.js): styled runs, images, checkboxes, page steps.
+  // Оформленный текст подписи пункта: когда оформления нет, из простого текста делается один
+  // кусок, и дальше всё рисуется одинаково.
+  function labelRuns(runs, plain) {
+    if (runs && runs.length) return runs;
+    return plain ? [{ text: plain }] : [];
+  }
+
+  // Подпись с оформлением плюс звёздочка обязательного одним куском разметки.
+  function labelNode(cls, runs, plain, required) {
+    var n = el("span", cls);
+    previewRuns(n, labelRuns(runs, plain));
+    if (required) n.appendChild(el("span", "req", " *"));
+    return n;
+  }
+
   function previewRuns(parent, runs) {
     (runs || []).forEach(function (r) {
       String(r && r.text != null ? r.text : "").split("\n").forEach(function (seg, i) {
@@ -2378,11 +3170,16 @@
   function previewBlock(parent, b) {
     if (b && b.imageUrl && /^\/media\/[^/\\]+$/.test(b.imageUrl)) {
       var fig = el("div", "pv-image");
+      var ia = (b && b.align || "").toLowerCase();
+      if (ia === "center" || ia === "right" || ia === "justify") fig.style.textAlign = ia === "justify" ? "left" : ia;
+      else fig.style.textAlign = "left";
       var im = el("img"); im.src = b.imageUrl;
       im.style.width = Math.min(Math.max(parseInt(b.imageWidth, 10) || 100, 10), 100) + "%";
       fig.appendChild(im); parent.appendChild(fig);
     } else {
       var t = el("div", "pv-text");
+      var al = (b && b.align || "").toLowerCase();
+      if (al === "center" || al === "right" || al === "justify") t.style.textAlign = al;
       previewRuns(t, (b && b.runs) || []);
       parent.appendChild(t);
     }
@@ -2493,7 +3290,7 @@
       input.type = "checkbox"; input.checked = !!checks[key];
       input.addEventListener("change", function () { checks[key] = input.checked; draw(); });
       label.appendChild(input);
-      label.appendChild(el("span", null, (cb.label || "") + (cb.required ? " *" : "")));
+      label.appendChild(labelNode(null, cb.labelRuns, cb.label, cb.required));
       return label;
     }
 
@@ -2501,7 +3298,12 @@
     // радиокнопки, потому что «не выбрано» тоже состояние. Так же устроено на планшете.
     function makeGroup(g) {
       var box = el("div", "pv-group");
-      if (g.title) box.appendChild(el("div", "pv-group-title", g.title + (g.required ? " *" : "")));
+      if (g.title || (g.titleRuns || []).length) {
+        var gt = el("div", "pv-group-title");
+        previewRuns(gt, labelRuns(g.titleRuns, g.title));
+        if (g.required) gt.appendChild(el("span", "req", " *"));
+        box.appendChild(gt);
+      }
       (g.options || []).forEach(function (o) {
         var chosen = (picks[g.key] || "") === o.key;
         var label = el("label", "pv-check pv-live" + (chosen ? " on" : ""));
@@ -2512,7 +3314,7 @@
           draw();
         });
         label.appendChild(input);
-        label.appendChild(el("span", null, o.label || o.key || ""));
+        label.appendChild(labelNode(null, o.labelRuns, o.label || o.key, false));
         box.appendChild(label);
       });
       if (!(picks[g.key] || "")) box.appendChild(el("div", "sig-meta", "Вариант не выбран."));
@@ -2535,14 +3337,30 @@
       body.innerHTML = "";
       if (s.type === "page") {
         var p = pages[s.index];
-        var h = el("h2", "pv-heading"); previewRuns(h, p.headingRuns || []); body.appendChild(h);
+        var h = el("h2", "pv-heading");
+        var ha = (p.headingAlign || "").toLowerCase();
+        if (ha === "center" || ha === "right" || ha === "justify") h.style.textAlign = ha;
+        previewRuns(h, p.headingRuns || []); body.appendChild(h);
         // Порядок ровно тот же, что покажет планшет: иначе предпросмотр обещал бы одно, а
         // клиент видел другое, и проверять по нему было бы нечего.
         pageOrder(p).forEach(function (it) {
           if (!holds(it.item.visibleWhen)) return;
           if (it.kind === 0) { previewBlock(body, it.item); return; }
           if (it.kind === 1) { body.appendChild(makeCheck(it.item, s.index, it.index)); return; }
-          body.appendChild(makeGroup(it.item));
+          if (it.kind === 2) { body.appendChild(makeGroup(it.item)); return; }
+          // Подпись и сканирование показываются местом, которое они займут: рисовать в
+          // предпросмотре настоящее перо незачем, а вот где они стоят, видеть надо.
+          if (it.kind === 3) {
+            var sw = el("div", "pv-inline-sign");
+            sw.appendChild(el("div", "pv-inline-title", (it.item.label || "Поле подписи") + (it.item.required ? " *" : "")));
+            sw.appendChild(el("div", "pv-pad", "Распишитесь здесь"));
+            body.appendChild(sw);
+            return;
+          }
+          var cw = el("div", "pv-inline-scan");
+          cw.appendChild(el("div", "pv-inline-title", (it.item.label || "Отсканируйте код") + (it.item.required ? " *" : "")));
+          cw.appendChild(el("div", "pv-scan-btn", "Сканировать код"));
+          body.appendChild(cw);
         });
       } else {
         // Порядок ровно как на планшете: блоки над подписью, надпись, само поле, блоки под
@@ -2571,9 +3389,44 @@
 
   // ---- Backup: export all pages to a file, import them back ----
   // Export saves what is currently in the editor, so unsaved edits are included in the backup.
+  // Картинки, на которые ссылается документ, читаются из медиатеки и кладутся в файл целиком.
+  // Иначе шаблон, перенесённый на другой сервер, показывал бы пустые рамки вместо печатей.
+  function собратьКартинки(doc) {
+    var файлы = [], seen = {};
+    function add(b) {
+      var u = b && b.imageUrl;
+      if (!u || !/^\/media\/[^/\\]+$/.test(u)) return;
+      var name = u.slice("/media/".length);
+      if (seen[name]) return;
+      seen[name] = 1; файлы.push(name);
+    }
+    (doc.pages || []).forEach(function (p) { (p.blocks || []).forEach(add); });
+    (doc.signBlocks || []).forEach(add);
+    (doc.signBlocksBelow || []).forEach(add);
+    return Promise.all(файлы.map(function (name) {
+      return fetch("/media/" + name, { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.blob() : null; })
+        .then(function (b) {
+          if (!b) return null;
+          return new Promise(function (res) {
+            var fr = new FileReader();
+            fr.onload = function () {
+              var s = String(fr.result);
+              var i = s.indexOf(",");
+              res({ file: name, data: i >= 0 ? s.slice(i + 1) : "" });
+            };
+            fr.onerror = function () { res(null); };
+            fr.readAsDataURL(b);
+          });
+        })
+        .catch(function () { return null; });
+    })).then(function (list) { return list.filter(Boolean); });
+  }
+
   $("exportDoc").addEventListener("click", function () {
-    saveDoc().then(function () {
-      var payload = { kind: "helix-signtablet-document", version: 1, exportedUtc: new Date().toISOString(), document: state.doc };
+    saveDoc().then(function () { return собратьКартинки(state.doc); }).then(function (images) {
+      var payload = { kind: "helix-signtablet-document", version: 2, exportedUtc: new Date().toISOString(),
+        document: state.doc, images: images };
       var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       var url = URL.createObjectURL(blob);
       var a = document.createElement("a");
@@ -2582,7 +3435,8 @@
       a.download = "signtablet-document-" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + ".json";
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-      toast("Файл с шаблоном сохранён");
+      toast(images.length ? ("Файл с шаблоном сохранён, картинок внутри: " + images.length)
+        : "Файл с шаблоном сохранён");
     });
   });
 
@@ -2601,7 +3455,10 @@
       apiSend("/document/import", "POST", parsed)
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          return loadDoc().then(function () { toast("Импортировано страниц: " + (j && j.pages != null ? j.pages : "")); });
+          return loadDoc().then(function () {
+            var хвост = j && j.images ? (", восстановлено картинок: " + j.images) : "";
+            toast("Импортировано страниц: " + (j && j.pages != null ? j.pages : "") + хвост);
+          });
         })
         .catch(function () { /* already reported by api() */ })
         .then(function () { input.value = ""; });
@@ -2934,6 +3791,16 @@
           .then(function (j) { toast("На планшете «" + d.name + "» показан номер " + j.code); });
       });
       actions.appendChild(bId);
+
+      // Наблюдение за экраном. Только для планшета на связи: у выключенного смотреть нечего,
+      // и кнопка отвечала бы «нет связи» вместо того, чтобы этого не предлагать.
+      if (d.online) {
+        var bWatch = iconBtn("eye", d.screen === "document" ? "Смотреть подписание" : "Смотреть", "btn-ghost btn-sm");
+        bWatch.title = "Видеть то же, что видит клиент на планшете. Только просмотр: изменить отсюда ничего нельзя";
+        bWatch.addEventListener("click", function () { openWatch(d); });
+        actions.appendChild(bWatch);
+      }
+
       // Only offered when tablet control is switched on: otherwise every button in the modal would
       // answer "управление выключено" and the operator would be left guessing where the switch is.
       if (kc.enabled) {
@@ -3891,12 +4758,17 @@
     },
     {
       method: "POST", path: "/api/ext/show-document",
-      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, Пол (M/F), email, telephone, document, date, cross-border, urine, UG (true/false), text1..text10. Булевы теги принимают только true или false, в любом виде: настоящий JSON-булев true, либо строку true в кавычках, регистр не важен. Другое значение возвращает ошибку с именем тега, а не молчаливо скрытый блок. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Есть условия по возрасту: он считается из даты рождения на сервере, поэтому присылать нужно только ДР, а документ сам решит, показывать ли блок для законных представителей (например «возраст меньше 14 лет»). Дата принимается как 01.01.1990 или 1990-01-01; если её не удалось разобрать, приходит ошибка с именем тега, а не молча скрытый блок. Имена тегов сравниваются без учёта регистра: пол, Пол и ПОЛ это один и тот же тег. Массив checkboxes задаёт пункты согласия: если key совпадает с именем чекбокса в документе, задаётся его начальное состояние прямо на своём месте; если такого имени в документе нет, пункт добавляется в конец страницы, помеченной как приёмник, и тогда нужен label. Массив groups задаёт выбор в двойных зависимых чекбоксах: key - имя группы в документе, selected - имя выбранного варианта, пустая строка означает, что не выбрано ничего. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId: показать документ не на том экране хуже, чем вернуть ошибку). В ответе missingPlaceholders - какие теги не переданы.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","Пол":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026",\n                 "cross-border":true,"urine":true,"UG":false,\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"key":"consent","checked":true},\n                     {"label":"Согласен на рассылку","checked":false,"required":false}],\n       "groups":[{"key":"transfer","selected":"deny"}]}\' \\\n  {BASE}/api/ext/show-document'
+      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, Пол (M/F), email, telephone, document, date, cross-border, urine, UG (true/false), text1..text10. Булевы теги принимают только true или false, в любом виде: настоящий JSON-булев true, либо строку true в кавычках, регистр не важен. Другое значение возвращает ошибку с именем тега, а не молчаливо скрытый блок. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Есть условия по возрасту: он считается из даты рождения на сервере, поэтому присылать нужно только ДР, а документ сам решит, показывать ли блок для законных представителей (например «возраст меньше 14 лет»). Есть и условия по сроку: «до даты осталось не больше N дней» считает полную дату с годом (приём назначен на такое-то число), «до годовщины не больше N дней» только день и месяц (день рождения). Считается по модулю, поэтому и до даты, и после неё. Дата принимается как 01.01.1990 или 1990-01-01; если её не удалось разобрать, приходит ошибка с именем тега, а не молча скрытый блок. Имена тегов сравниваются без учёта регистра: пол, Пол и ПОЛ это один и тот же тег. Массив checkboxes задаёт пункты согласия: если key совпадает с именем чекбокса в документе, задаётся его начальное состояние прямо на своём месте; если такого имени в документе нет, пункт добавляется в конец страницы, помеченной как приёмник, и тогда нужен label. Массив groups задаёт выбор в двойных зависимых чекбоксах: key - имя группы в документе, selected - имя выбранного варианта, пустая строка означает, что не выбрано ничего. Текст тоже можно прислать: label у чекбокса и title у группы заменяют формулировку документа целиком, а labelAppend и titleAppend дописывают к ней, если внешняя система не знает, что именно написано в документе. Подписи вариантов группы задаются так же: groups[].options[] с key варианта и label или labelAppend. Если прислать options, они и становятся списком вариантов вместо того, что стоит в документе: заказ может приходить со своим набором ответов, а складывать два набора значило бы показать клиенту оба сразу. Дописка, начинающаяся со знака препинания, прилипает к предыдущему слову без пробела. Присланный текст живёт до конца этого показа и в шаблон не попадает. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId: показать документ не на том экране хуже, чем вернуть ошибку). В ответе missingPlaceholders - какие теги не переданы.",
+      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","Пол":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026",\n                 "cross-border":true,"urine":true,"UG":false,\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"key":"consent","checked":true},\n                     {"key":"golod","labelAppend":"(с 22:00)"},\n                     {"label":"Согласен на рассылку","checked":false,"required":false}],\n       "groups":[{"key":"transfer","selected":"deny","title":"Передача данных",\n                  "options":[{"key":"deny","label":"Запрещаю"}]}]}\' \\\n  {BASE}/api/ext/show-document'
+    },
+    {
+      method: "GET", path: "/admin/#watch={код рабочего места}",
+      desc: "Не метод API, а прямая ссылка: открывает в админке наблюдение за экраном нужного планшета. Внешняя система может дать её оператору рядом со своим заказом, чтобы он не искал планшет в списке. Адресуется код рабочего места (workstationExternalId), как и везде; имя планшета и внутренний идентификатор тоже принимаются. Оператор должен быть уже вошедшим в админку. Окно только для просмотра: оттуда на планшет не уходит ничего, камера у оператора не открывается, запись не ведётся.",
+      sample: '{BASE}/admin/#watch=WS-204'
     },
     {
       method: "POST", path: "/api/ext/scan-request",
-      desc: "Запросить сканирование ШК/QR и ДОЖДАТЬСЯ результата: на планшете открывается камера, клиент показывает код, код возвращается в ответе и сохраняется. Поддерживаются QR, EAN-13, EAN-8, Code-128. Цель: deviceId или workstationExternalId. timeoutSec - сколько ждать (по умолчанию 60, максимум 300). Ответ: { ok, code, format, scanId, createdUtc }. Если код не показали за отведённое время - 408 и камера на планшете закрывается. Если планшет не на связи - сразу 409 с объяснением, а не ожидание до таймаута: команда сканирования живёт только в момент отправки и до выключенного планшета не дойдёт.",
+      desc: "Запросить сканирование ШК/QR и ДОЖДАТЬСЯ результата: на планшете открывается камера, клиент показывает код, код возвращается в ответе и сохраняется. Поддерживаются QR, Data Matrix, EAN-13, EAN-8, Code-128 и ITF (Interleaved 2 of 5, только цифры и только чётное их количество). Цель: deviceId или workstationExternalId. timeoutSec - сколько ждать (по умолчанию 60, максимум 300). Ответ: { ok, code, format, scanId, createdUtc }. Если код не показали за отведённое время - 408 и камера на планшете закрывается. Если планшет не на связи - сразу 409 с объяснением, а не ожидание до таймаута: команда сканирования живёт только в момент отправки и до выключенного планшета не дойдёт.",
       sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204","timeoutSec":60}\' \\\n  {BASE}/api/ext/scan-request'
     },
     {
@@ -4014,6 +4886,254 @@
     if (hub) { var old = hub; hub = null; try { old.stop(); } catch (e) { /* ignore */ } }
   }
 
+  // ==================================================================
+  // Наблюдение за экраном планшета
+  // ==================================================================
+  // Оператор видит у себя то же, что клиент видит на планшете. Картинка не передаётся: документ
+  // берётся с сервера один раз, а планшет присылает только то, что меняется, и окно
+  // перерисовывает у себя. Расход измеряется сотнями байт на событие вместо мегабит видео.
+  //
+  // Окно только для просмотра: в нём нет ни одной кнопки, которая что-то меняет, и на планшет
+  // отсюда не уходит ничего. Камера здесь не открывается никогда: про сканирование сообщается
+  // словами, поэтому запроса на доступ к камере у оператора не появляется.
+  //
+  // Ничего не сохраняется: поток живёт, пока открыто окно, и не оставляет следов ни на сервере,
+  // ни здесь.
+  var watch = { deviceId: null, name: "", doc: null, state: null, node: null, stamp: 0 };
+
+  // Ссылка вида /admin/#watch=WS-204 открывает наблюдение сразу за нужным планшетом. Так внешняя
+  // система, отправившая документ, может дать оператору прямую ссылку рядом со своим заказом, не
+  // заставляя его искать планшет в списке. Адресуется код рабочего места, как и везде в API;
+  // имя планшета и внутренний идентификатор тоже принимаются, если кому-то так удобнее.
+  function watchByName(нужное) {
+    var q = String(нужное || "").trim().toLowerCase();
+    if (!q) return;
+    return apiJson("/devices").then(function (list) {
+      var dev = (list || []).filter(function (d) {
+        return (d.workstation && String(d.workstation.externalId || "").toLowerCase() === q)
+          || String(d.name || "").toLowerCase() === q
+          || String(d.id || "").toLowerCase() === q;
+      })[0];
+      if (!dev) { toast("Планшет «" + нужное + "» не найден"); return; }
+      if (!dev.online) { toast("Планшет «" + dev.name + "» не на связи: смотреть нечего"); return; }
+      openWatch(dev);
+    }).catch(function () { toast("Не удалось найти планшет"); });
+  }
+
+  function openWatch(dev) {
+    if (!dev || !dev.id) return;
+    watch.deviceId = dev.id;
+    watch.name = dev.name || dev.id;
+    watch.doc = null; watch.state = null;
+
+    var root = el("div", "watch");
+    var head = el("div", "watch-head");
+    head.appendChild(el("h3", null, "Экран планшета: " + watch.name));
+    var live = el("span", "watch-live", "наблюдение");
+    head.appendChild(live);
+    root.appendChild(head);
+    root.appendChild(el("p", "sig-meta", "Здесь видно то же, что видит клиент. Окно только для просмотра: изменить отсюда ничего нельзя, на планшет не уходит ничего, и запись не ведётся."));
+
+    var frame = el("div", "watch-frame");
+    watch.node = el("div", "watch-screen");
+    frame.appendChild(watch.node);
+    root.appendChild(frame);
+
+    var actions = el("div", "modal-actions");
+    var close = el("button", "btn btn-ghost", "Закрыть");
+    close.addEventListener("click", closeModal);
+    actions.appendChild(close);
+    root.appendChild(actions);
+
+    openModal(root, true);
+    watchSay("Подключение к планшету…");
+    watchStart();
+  }
+
+  // Всплывающая подсказка с предложением посмотреть. Не открывает окно сама: оператор мог быть
+  // занят другим, и подменять ему экран без спроса нельзя.
+  function toastWatch(d) {
+    // Своё место, а не общая всплывашка: та живёт две секунды и заменяется следующей, а здесь
+    // нужно, чтобы предложение подождало оператора.
+    var host = document.body;
+    var box = el("div", "toast-watch");
+    box.appendChild(el("span", null, "Документ отправлен на планшет «" + (d.name || d.deviceId) + "»"));
+    var b = el("button", "btn btn-ghost btn-sm", "Смотреть");
+    b.addEventListener("click", function () { box.remove(); openWatch({ id: d.deviceId, name: d.name }); });
+    box.appendChild(b);
+    var x = el("button", "btn btn-ghost btn-sm", "×");
+    x.addEventListener("click", function () { box.remove(); });
+    box.appendChild(x);
+    host.appendChild(box);
+    setTimeout(function () { if (box.parentNode) box.remove(); }, 20000);
+  }
+
+  function watchSay(text) {
+    if (!watch.node) return;
+    watch.node.innerHTML = "";
+    watch.node.appendChild(el("div", "watch-note", text));
+  }
+
+  function watchStart() {
+    if (!hub || !watch.deviceId) { watchSay("Нет связи с сервером."); return; }
+    hub.invoke("WatchDevice", watch.deviceId)
+      .then(watchLoad)
+      .catch(function (e) { watchSay("Не удалось начать наблюдение: " + (e && e.message ? e.message : e)); });
+  }
+
+  function watchStop() {
+    var id = watch.deviceId;
+    watch.deviceId = null; watch.node = null; watch.doc = null; watch.state = null;
+    if (hub && id) hub.invoke("UnwatchDevice").catch(function () { /* соединение уже закрыто */ });
+  }
+
+  // Документ читается с сервера тем же, каким его получил планшет. Здесь он только рисуется.
+  function watchLoad() {
+    if (!watch.deviceId) return;
+    var id = watch.deviceId;
+    return apiJson("/devices/" + encodeURIComponent(id) + "/screen").then(function (data) {
+      if (watch.deviceId !== id) return;    // окно уже закрыли или переключили
+      watch.doc = (data && data.document) || null;
+      watch.mode = (data && data.mode) || "slides";
+      watchRender();
+    }).catch(function () { watchSay("Не удалось прочитать экран планшета."); });
+  }
+
+  function watchApply(deviceId, st) {
+    if (!watch.deviceId || deviceId !== watch.deviceId) return;
+    watch.state = st || null;
+    watchRender();
+  }
+
+  function watchRender() {
+    if (!watch.node) return;
+    var st = watch.state;
+    var mode = (st && st.mode) || watch.mode || "slides";
+
+    if (mode === "scan") {
+      watch.node.innerHTML = "";
+      var sc = el("div", "watch-scan");
+      sc.appendChild(el("div", "watch-scan-title", "Открыта камера"));
+      sc.appendChild(el("div", "sig-meta", "Клиент подносит код к камере планшета. Здесь камера не включается."));
+      if (st && st.scanCode) {
+        sc.appendChild(el("div", "watch-code", st.scanCode));
+        sc.appendChild(el("div", "sig-meta", "Код считан."));
+      }
+      watch.node.appendChild(sc);
+      return;
+    }
+    if (mode !== "document" || !watch.doc) {
+      watchSay(mode === "document" ? "Документ загружается…" : "На планшете идёт реклама.");
+      return;
+    }
+
+    var doc = watch.doc, pages = doc.pages || [];
+    watch.node.innerHTML = "";
+
+    var bar = el("div", "watch-bar");
+    var шаг = st && st.step ? ("Шаг " + st.step + " из " + st.steps) : "Документ";
+    bar.appendChild(el("span", null, шаг));
+    bar.appendChild(el("span", "watch-title", doc.title || ""));
+    watch.node.appendChild(bar);
+
+    var body = el("div", "watch-body pv-body");
+    var type = (st && st.type) || "page";
+    if (type === "thankyou") {
+      body.appendChild(el("h2", "pv-heading", "Спасибо"));
+      body.appendChild(el("div", "pv-text", doc.thankYouText || ""));
+    } else if (type === "signature") {
+      body.appendChild(el("h2", "pv-heading", doc.signPrompt || "Распишитесь"));
+      (doc.signBlocks || []).forEach(function (b) { previewBlock(body, b); });
+      body.appendChild(watchInk(st && st.finalInk, "Клиент ещё не расписался"));
+      (doc.signBlocksBelow || []).forEach(function (b) { previewBlock(body, b); });
+    } else {
+      var pi = st && st.pageIndex != null ? st.pageIndex : 0;
+      var page = pages[pi];
+      if (!page) { watchSay("Страница не найдена."); return; }
+      watchPage(body, page, pi, st);
+    }
+    watch.node.appendChild(body);
+  }
+
+  // Страница рисуется теми же кирпичиками, что и предпросмотр, но без единого обработчика:
+  // отметки здесь только показываются, нажать на них нельзя.
+  function watchPage(body, page, pi, st) {
+    var checks = (st && st.checks) || {};
+    var picks = (st && st.picks) || {};
+    var codes = (st && st.codes) || {};
+    var signs = (st && st.signs) || {};
+    var missing = {};
+    ((st && st.missing) || []).forEach(function (m) { missing[m] = true; });
+
+    var hruns = (page.headingRuns && page.headingRuns.length) ? page.headingRuns
+      : (page.heading ? [{ text: page.heading }] : []);
+    if (hruns.length) {
+      var h = el("h2", "pv-heading");
+      var ha = (page.headingAlign || "").toLowerCase();
+      if (ha === "center" || ha === "right" || ha === "justify") h.style.textAlign = ha;
+      previewRuns(h, hruns);
+      body.appendChild(h);
+    }
+    var blocks = (page.blocks && page.blocks.length) ? page.blocks
+      : (page.body ? [{ runs: [{ text: page.body }] }] : []);
+    pageOrder(page, blocks).forEach(function (it) {
+      if (it.kind === 0) { previewBlock(body, it.item); return; }
+      if (it.kind === 1) {
+        var key = "p" + pi + "_c" + it.index;
+        body.appendChild(watchCheck(it.item.labelRuns, it.item.label, !!checks[key], it.item.required, missing["check:" + key]));
+        return;
+      }
+      if (it.kind === 2) {
+        var g = it.item;
+        var box = el("div", "pv-group");
+        if (g.title || (g.titleRuns || []).length) {
+          var gt = el("div", "pv-group-title");
+          previewRuns(gt, labelRuns(g.titleRuns, g.title));
+          if (g.required) gt.appendChild(el("span", "req", " *"));
+          box.appendChild(gt);
+        }
+        var opts = el("div", "pv-group-options");
+        (g.options || []).forEach(function (o) {
+          opts.appendChild(watchCheck(o.labelRuns, o.label || o.key, (picks[g.key] || "") === o.key, false, false));
+        });
+        box.appendChild(opts);
+        body.appendChild(box);
+        return;
+      }
+      if (it.kind === 3) {
+        var sg = it.item;
+        var sw = el("div", "pv-inline-sign");
+        sw.appendChild(el("div", "pv-inline-title", (sg.label || "Поле подписи") + (sg.required ? " *" : "")));
+        sw.appendChild(watchInk(signs[sg.key], "Ещё не подписано"));
+        body.appendChild(sw);
+        return;
+      }
+      var sc = it.item;
+      var cw = el("div", "pv-inline-scan");
+      cw.appendChild(el("div", "pv-inline-title", (sc.label || "Сканирование кода") + (sc.required ? " *" : "")));
+      cw.appendChild(el("div", codes[sc.key] ? "watch-code" : "sig-meta",
+        codes[sc.key] ? codes[sc.key] : "Код ещё не считан"));
+      body.appendChild(cw);
+    });
+  }
+
+  function watchCheck(runs, plain, on, required, missed) {
+    var row = el("div", "watch-check" + (on ? " on" : "") + (missed ? " miss" : ""));
+    row.appendChild(el("span", "watch-box", on ? "✓" : ""));
+    row.appendChild(labelNode("watch-label", runs, plain, required));
+    return row;
+  }
+
+  function watchInk(dataUrl, empty) {
+    var box = el("div", "watch-ink");
+    if (dataUrl) {
+      var im = el("img"); im.src = dataUrl; box.appendChild(im);
+    } else {
+      box.appendChild(el("div", "sig-meta", empty));
+    }
+    return box;
+  }
+
   function connectHub() {
     stopHub();
     var conn = new signalR.HubConnectionBuilder()
@@ -4029,9 +5149,21 @@
       if (!document.querySelector('[data-panel="scan"]').classList.contains("hidden")) loadScans();
     });
     conn.on("DevicesChanged", function () { loadDevices(); });
+    // Планшет рассказал, что у него на экране. Приходит только тому, кто смотрит именно за ним.
+    conn.on("WatchState", watchApply);
+    // Документ поехал на планшет. Отправить его могла и внешняя система, поэтому оператору
+    // предлагается посмотреть прямо отсюда: иначе он узнал бы об этом только случайно.
+    conn.on("DocumentShown", function (d) {
+      if (!d || !d.deviceId) return;
+      if (watch.deviceId === d.deviceId) return;   // уже смотрим за этим планшетом
+      toastWatch(d);
+    });
+    // На планшете сменился документ: перечитываем его целиком, иначе рисовали бы старый.
+    conn.on("WatchReload", function () { watchLoad(); });
     conn.on("AlertsChanged", function () { loadAlerts(); });
     function reg() { conn.invoke("RegisterAdmin").catch(function () {}); }
-    conn.onreconnected(function () { reg(); loadDevices(); loadAlerts(); });
+    // Переподключение теряет группы: если окно наблюдения открыто, в свою надо войти заново.
+    conn.onreconnected(function () { reg(); loadDevices(); loadAlerts(); if (watch.deviceId) watchStart(); });
     conn.onclose(reconnectLater);
     conn.start().then(reg).then(loadAlerts).catch(reconnectLater);
   }

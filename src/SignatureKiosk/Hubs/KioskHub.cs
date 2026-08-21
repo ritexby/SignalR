@@ -33,7 +33,12 @@ public class KioskHub : Hub
     public async Task<CurrentCommand> RegisterKiosk()
     {
         var deviceId = DeviceId;
-        if (string.IsNullOrEmpty(deviceId)) throw new HubException("not a device connection");
+        // Страницу планшета можно открыть и в браузере оператора: тогда подключение опознано по
+        // куке админки, а не по токену планшета, и регистрировать нечего. Это обычное дело, а не
+        // сбой службы, поэтому не исключение: оно попадало бы в журнал оператора красной строкой
+        // при каждом переподключении. Планшет по ответу поймёт, что он не привязан, и покажет
+        // экран активации.
+        if (string.IsNullOrEmpty(deviceId)) return new CurrentCommand { Mode = "notdevice" };
 
         Context.Items[DeviceItemKey] = deviceId;
         await Groups.AddToGroupAsync(Context.ConnectionId, "kiosks");
@@ -75,6 +80,61 @@ public class KioskHub : Hub
         await Groups.AddToGroupAsync(Context.ConnectionId, "admins");
     }
 
+    // ---------- Наблюдение за экраном планшета ----------
+    // Оператор видит у себя то же, что клиент видит на планшете. Планшет не шлёт картинку: у
+    // админки есть тот же отрисовщик документа, и ей достаточно знать, что изменилось. Поэтому
+    // расход измеряется сотнями байт на событие, а не мегабитами видео.
+    //
+    // Связь односторонняя, от планшета к наблюдателю: из окна наблюдения на планшет не уходит
+    // ничего, там нет ни одной команды. Поток живёт только в памяти соединения и никуда не
+    // записывается: у данных подписанта в этой системе строгий срок жизни, и наблюдение не
+    // должно создавать вторую копию.
+    private const string WatchItemKey = "watching";
+
+    private static string WatchGroup(string deviceId) => "watch:" + deviceId;
+
+    /// <summary>Оператор начинает смотреть за одним планшетом. Только для админки.</summary>
+    public async Task WatchDevice(string? deviceId)
+    {
+        if (!IsAdmin) throw new HubException("admin only");
+        var id = (deviceId ?? "").Trim();
+        if (id.Length == 0 || _storage.GetDevice(id) is null) throw new HubException("unknown device");
+
+        // Смотреть можно только за одним планшетом сразу: иначе в одном окне оказались бы
+        // данные двух разных клиентов, а этого в системе быть не должно.
+        if (Context.Items.TryGetValue(WatchItemKey, out var was) && was is string old && old != id)
+        {
+            await Groups.RemoveFromGroupAsync(Context.ConnectionId, WatchGroup(old));
+            await _coord.SetWatchAsync(old, Context.ConnectionId, false);
+        }
+        Context.Items[WatchItemKey] = id;
+        await Groups.AddToGroupAsync(Context.ConnectionId, WatchGroup(id));
+        // Планшет начинает рассказывать о себе только теперь: пока никто не смотрит, он молчит
+        // и не тратит ни батарею, ни канал.
+        await _coord.SetWatchAsync(id, Context.ConnectionId, true);
+    }
+
+    /// <summary>Оператор перестал смотреть.</summary>
+    public async Task UnwatchDevice()
+    {
+        if (!Context.Items.TryGetValue(WatchItemKey, out var value) || value is not string id) return;
+        Context.Items.Remove(WatchItemKey);
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, WatchGroup(id));
+        await _coord.SetWatchAsync(id, Context.ConnectionId, false);
+    }
+
+    /// <summary>
+    /// Планшет рассказывает, что у него на экране. Личность берётся из токена, а не из
+    /// аргументов: иначе один планшет мог бы выдать себя за другой и подсунуть наблюдателю
+    /// чужую картину. Ответ уходит только тем, кто смотрит именно за этим планшетом.
+    /// </summary>
+    public async Task ReportScreen(object? state)
+    {
+        var deviceId = DeviceId;
+        if (string.IsNullOrEmpty(deviceId)) return;
+        await Clients.Group(WatchGroup(deviceId)).SendAsync("WatchState", deviceId, state);
+    }
+
     /// <summary>Called by a tablet after a completed signing flow so it returns to the slideshow.</summary>
     // Identity comes from the token claim, not from Context.Items: after an automatic reconnect the
     // connection is new and Items is empty until RegisterKiosk finishes, and a call landing in that
@@ -113,6 +173,11 @@ public class KioskHub : Hub
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
+        // Оператор закрыл вкладку или потерял связь: планшет должен перестать рассказывать о
+        // себе, иначе он говорил бы в пустоту до самой перезагрузки.
+        if (Context.Items.TryGetValue(WatchItemKey, out var watched) && watched is string watchedId)
+            await _coord.SetWatchAsync(watchedId, Context.ConnectionId, false);
+
         if (Context.Items.TryGetValue(DeviceItemKey, out var value) && value is string deviceId)
         {
             // Stamp the moment the tablet dropped, so "last seen" reflects when it actually went

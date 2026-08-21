@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.SignalR;
 using SignatureKiosk.Hubs;
@@ -127,7 +128,7 @@ public class KioskCoordinator
             // Resolve with THIS device's own signer data only, so a tablet never receives
             // another signer's fields or checkboxes.
             var doc = DocumentTemplating.Resolve(_storage.GetDocument(), state.Fields, state.DynamicCheckboxes,
-                state.GroupSelections, state.CheckboxStates);
+                state.GroupSelections, state.CheckboxStates, state.Texts, state.GroupOptions);
             return new CurrentCommand { Mode = "document", Document = doc };
         }
         return new CurrentCommand { Mode = "slides", Slides = BuildSlidesPayload(state) };
@@ -138,7 +139,9 @@ public class KioskCoordinator
     /// <summary>Set a device override's mode, signer fields and per-signer checkboxes (creating it from the default when absent).</summary>
     private static void SetDeviceState(StateStore states, IEnumerable<string> deviceIds, string mode,
         Dictionary<string, string> fields, List<DocCheckbox> checkboxes,
-        Dictionary<string, bool>? checkboxStates = null, Dictionary<string, string>? groupSelections = null)
+        Dictionary<string, bool>? checkboxStates = null, Dictionary<string, string>? groupSelections = null,
+        Dictionary<string, string>? texts = null,
+        Dictionary<string, List<DocGroupOption>>? groupOptions = null)
     {
         foreach (var deviceId in deviceIds)
         {
@@ -152,6 +155,11 @@ public class KioskCoordinator
             s.DynamicCheckboxes = checkboxes.Select(c => new DocCheckbox { Key = c.Key, Label = c.Label, Required = c.Required, Checked = c.Checked }).ToList();
             s.CheckboxStates = checkboxStates is null ? new Dictionary<string, bool>() : new Dictionary<string, bool>(checkboxStates);
             s.GroupSelections = groupSelections is null ? new Dictionary<string, string>() : new Dictionary<string, string>(groupSelections);
+            s.Texts = texts is null ? new Dictionary<string, string>() : new Dictionary<string, string>(texts);
+            s.GroupOptions = groupOptions is null
+                ? new Dictionary<string, List<DocGroupOption>>()
+                : groupOptions.ToDictionary(kv => kv.Key,
+                    kv => kv.Value.Select(o => new DocGroupOption { Key = o.Key, Label = o.Label }).ToList());
             s.DocumentSetUtc = mode == "document" ? DateTime.UtcNow : null;
         }
     }
@@ -250,10 +258,36 @@ public class KioskCoordinator
 
         var cbs = new List<DocCheckbox>();
         var states = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        // Тексты для того, что уже стоит в документе: формулировка зависит от заказа, а место
+        // в документе всегда одно и то же. Label заменяет текст целиком, LabelAppend дописывает
+        // к тому, что уже стоит: внешняя система не обязана знать формулировку документа.
+        var texts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var current = DocumentTemplating.CurrentTexts(template);
+        void SetText(string name, string? replace, string? append)
+        {
+            var text = string.IsNullOrWhiteSpace(replace)
+                ? (current.TryGetValue(name, out var have) ? have : "")
+                : replace!;
+            if (!string.IsNullOrWhiteSpace(append))
+            {
+                var tail = append!.Trim();
+                // Пробел ставится не всегда: дописка, начинающаяся со знака препинания, должна
+                // прилипнуть к предыдущему слову, иначе получится «НЕТ , не соблюдал».
+                var glue = tail.Length > 0 && ",.;:!?)»".IndexOf(tail[0]) >= 0 ? "" : " ";
+                text = (text.TrimEnd() + glue + tail).Trim();
+            }
+            if (!string.IsNullOrWhiteSpace(replace) || !string.IsNullOrWhiteSpace(append))
+                texts[name] = Cut(text, MaxCheckboxLabelLength);
+        }
         foreach (var c in (checkboxes ?? Array.Empty<DocCheckbox>()).Where(c => c is not null))
         {
             var key = DocumentTemplating.CleanKey(c.Key);
-            if (key.Length > 0 && known.Contains(key)) { states[key] = c.Checked; continue; }
+            if (key.Length > 0 && known.Contains(key))
+            {
+                states[key] = c.Checked;
+                SetText(key, c.Label, c.LabelAppend);
+                continue;
+            }
             if (cbs.Count >= MaxDynamicCheckboxes) continue;
             cbs.Add(new DocCheckbox
             {
@@ -265,17 +299,38 @@ public class KioskCoordinator
         }
 
         var selections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var options = new Dictionary<string, List<DocGroupOption>>(StringComparer.OrdinalIgnoreCase);
         foreach (var g in (groups ?? Array.Empty<GroupSelectionDto>()).Where(g => g is not null).Take(MaxDynamicCheckboxes))
         {
             var key = DocumentTemplating.CleanKey(g.Key);
             if (key.Length == 0) continue;
             selections[key] = DocumentTemplating.CleanKey(g.Selected);
+            SetText(key, g.Title, g.TitleAppend);
+            // Варианты, присланные вместе с заказом. Если их прислали, они и есть список:
+            // складывать их с теми, что в документе, значило бы показать клиенту два набора.
+            var sent = new List<DocGroupOption>();
+            foreach (var o in (g.Options ?? new List<DocGroupOption>()).Where(o => o is not null).Take(MaxDynamicCheckboxes))
+            {
+                var ok = DocumentTemplating.CleanKey(o.Key);
+                if (ok.Length == 0) continue;
+                SetText(key + "/" + ok, o.Label, o.LabelAppend);
+                sent.Add(new DocGroupOption { Key = ok, Label = Cut(o.Label, MaxCheckboxLabelLength) });
+            }
+            if (sent.Count > 0) options[key] = sent;
         }
 
-        _storage.MutateStates(st => SetDeviceState(st, new[] { deviceId }, "document", fieldMap, cbs, states, selections));
+        _storage.MutateStates(st => SetDeviceState(st, new[] { deviceId }, "document", fieldMap, cbs, states, selections, texts, options));
 
-        var doc = DocumentTemplating.Resolve(template, fieldMap, cbs, selections, states);
+        var doc = DocumentTemplating.Resolve(template, fieldMap, cbs, selections, states, texts, options);
         await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", doc);
+        // На планшете сменился документ: тот, кто смотрит, должен перечитать его заново, иначе
+        // рисовал бы старый документ поверх нового состояния.
+        await NotifyWatchersReloadAsync(deviceId);
+        // И админка должна узнать, что документ поехал: отправить его могла внешняя система, а
+        // не оператор, и тогда он об этом иначе не узнает вовсе.
+        var dev = _storage.GetDevice(deviceId);
+        await _hub.Clients.Group("admins").SendAsync("DocumentShown", new { deviceId, name = dev?.Name ?? deviceId });
+        await NotifyAdminsDevicesAsync();
     }
 
     /// <summary>Return one tablet to advertising and clear its signer data, then push its slides.</summary>
@@ -284,6 +339,7 @@ public class KioskCoordinator
         ClearSignerSession(deviceId);
         var payload = BuildSlidesPayload(_storage.ResolveState(deviceId));
         await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
+        await NotifyWatchersReloadAsync(deviceId);
     }
 
     /// <summary>
@@ -358,6 +414,44 @@ public class KioskCoordinator
     // ---------- Admin notifications ----------
 
     public Task NotifyAdminsDevicesAsync() => _hub.Clients.Group("admins").SendAsync("DevicesChanged");
+
+    // ---------- Наблюдение за экраном планшета ----------
+    // Кто за каким планшетом смотрит. Нужно, чтобы планшет рассказывал о себе только тогда,
+    // когда его действительно смотрят: иначе он тратил бы батарею и канал круглые сутки.
+    // Хранится в памяти и только на время соединений: наблюдение не оставляет следов.
+    private readonly ConcurrentDictionary<string, HashSet<string>> _watchers = new();
+
+    /// <summary>
+    /// Оператор начал или перестал смотреть за планшетом. Планшету сообщается только на границе:
+    /// когда появился первый наблюдатель и когда ушёл последний.
+    /// </summary>
+    public async Task SetWatchAsync(string deviceId, string connectionId, bool on)
+    {
+        if (string.IsNullOrEmpty(deviceId) || string.IsNullOrEmpty(connectionId)) return;
+
+        bool changed;
+        var set = _watchers.GetOrAdd(deviceId, _ => new HashSet<string>(StringComparer.Ordinal));
+        lock (set)
+        {
+            var was = set.Count > 0;
+            if (on) set.Add(connectionId); else set.Remove(connectionId);
+            changed = was != (set.Count > 0);
+            if (set.Count == 0) _watchers.TryRemove(deviceId, out _);
+        }
+        if (!changed) return;
+        await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync(on ? "WatchOn" : "WatchOff");
+    }
+
+    /// <summary>Сказать наблюдателям, что показанное на планшете сменилось целиком.</summary>
+    public Task NotifyWatchersReloadAsync(string deviceId) =>
+        IsWatched(deviceId) ? _hub.Clients.Group("watch:" + deviceId).SendAsync("WatchReload") : Task.CompletedTask;
+
+    /// <summary>Смотрит ли кто-нибудь за этим планшетом прямо сейчас.</summary>
+    public bool IsWatched(string deviceId)
+    {
+        if (!_watchers.TryGetValue(deviceId, out var set)) return false;
+        lock (set) return set.Count > 0;
+    }
 
     public Task NotifyAdminsSignatureAsync(SignatureRecord rec) =>
         _hub.Clients.Group("admins").SendAsync("SignatureReceived", new

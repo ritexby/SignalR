@@ -436,6 +436,38 @@ public class StorageService
         return info;
     }
 
+    /// <summary>
+    /// Вернуть картинку из файла шаблона под тем именем, на которое ссылается документ. Файл и
+    /// запись в указателе появляются вместе: файл без записи не виден в медиатеке, а запись без
+    /// файла показывает пустую рамку. Уже существующее имя не трогается: его могли заменить
+    /// нарочно. Возвращает true, если картинка действительно добавлена.
+    /// </summary>
+    public bool RestoreImage(string fileName, byte[] bytes, string originalName)
+    {
+        var name = Path.GetFileName(fileName ?? "");
+        if (name.Length == 0 || name != fileName || bytes is null || bytes.Length == 0) return false;
+        var id = Path.GetFileNameWithoutExtension(name);
+        if (id.Length == 0) return false;
+
+        lock (_lock)
+        {
+            var list = ReadOr(ImagesIndexPath, () => new List<ImageInfo>());
+            if (list.Any(i => string.Equals(i.FileName, name, StringComparison.OrdinalIgnoreCase))) return false;
+
+            var path = Path.Combine(ImagesDir, name);
+            if (!File.Exists(path)) File.WriteAllBytes(path, bytes);
+            list.Add(new ImageInfo
+            {
+                Id = id,
+                FileName = name,
+                OriginalName = string.IsNullOrWhiteSpace(originalName) ? name : originalName,
+                UploadedUtc = DateTime.UtcNow
+            });
+            Write(ImagesIndexPath, list);
+            return true;
+        }
+    }
+
     public bool DeleteImage(string id)
     {
         lock (_lock)
@@ -472,7 +504,8 @@ public class StorageService
 
     // ---------------- Signatures ----------------
 
-    public SignatureRecord AddSignature(SignatureSubmission sub, DocumentConfig resolvedDoc, Device? device, Workstation? workstation, byte[] pngBytes, Dictionary<string, string>? fields = null)
+    public SignatureRecord AddSignature(SignatureSubmission sub, DocumentConfig resolvedDoc, Device? device, Workstation? workstation, byte[] pngBytes, Dictionary<string, string>? fields = null,
+        List<(string Key, string Label, byte[] Png)>? extraSignatures = null)
     {
         lock (_lock)
         {
@@ -500,6 +533,19 @@ public class StorageService
                 if (_recentSubmissions.Count > 500) _recentSubmissions.Clear();
                 _recentSubmissions[device.Id + "|" + rec.SubmissionId] = rec.Id;
             }
+            // Подписи, поставленные внутри страниц, лежат отдельными файлами рядом с итоговой.
+            // Имя файла берётся из имени поля, приведённого к безопасному виду: запись подписи
+            // это то, что придётся открывать через год, и имя должно быть читаемым.
+            foreach (var extra in extraSignatures ?? new List<(string, string, byte[])>())
+            {
+                var safe = new string((extra.Key ?? "").Where(c => char.IsLetterOrDigit(c) || c is '-' or '_').ToArray());
+                if (safe.Length == 0) safe = "sign" + (rec.Signatures.Count + 1);
+                var file = "signature-" + safe + ".png";
+                File.WriteAllBytes(Path.Combine(dir, file), extra.Png);
+                rec.Signatures.Add(new SignedSignature { Key = extra.Key ?? "", Label = extra.Label ?? "", File = file });
+            }
+            rec.Scans = (sub.Scans ?? new List<SubmittedScan>()).Where(x => x is not null).ToList();
+
             Write(Path.Combine(dir, "meta.json"), rec);
             File.WriteAllBytes(Path.Combine(dir, "signature.png"), pngBytes);
             // Persist the exact resolved document so a failed PDF can be regenerated later
@@ -541,6 +587,21 @@ public class StorageService
             var path = Path.Combine(SignaturesDir, id, "document.json");
             if (!File.Exists(path)) return null;
             try { return JsonSerializer.Deserialize<DocumentConfig>(File.ReadAllText(path), Json); }
+            catch { return null; }
+        }
+    }
+
+    /// <summary>Картинка подписи, поставленной внутри страницы. null, если файла нет.</summary>
+    public byte[]? GetExtraSignatureBytes(string id, string file)
+    {
+        if (!IsSafeId(id) || string.IsNullOrWhiteSpace(file) || !IsSafeId(file)) return null;
+        lock (_lock)
+        {
+            try
+            {
+                var path = Path.Combine(SignaturesDir, id, file);
+                return File.Exists(path) ? File.ReadAllBytes(path) : null;
+            }
             catch { return null; }
         }
     }

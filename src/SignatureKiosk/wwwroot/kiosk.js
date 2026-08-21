@@ -178,6 +178,9 @@
     doc.config = config || { title: "", pages: [] };
     doc.checks = {};
     doc.picks = {};          // группа -> ключ выбранного варианта ("" = ничего не выбрано)
+    doc.signs = {};          // имя поля подписи -> картинка в виде data URL
+    doc.codes = {};          // имя поля сканирования -> { code, format, label }
+    doc.pagePads = {};       // имя поля подписи -> перо, чтобы очистить и восстановить
     doc.pad = null;
     doc.submitting = false;
     doc.screens = [];
@@ -224,7 +227,8 @@
   function clearDocState() {
     endDocSession();
     doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {}; doc.picks = {};
-    doc.pad = null; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
+    doc.signs = {}; doc.codes = {}; doc.pagePads = {};
+    doc.pad = null; doc.finalInk = ""; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
     el.docBody.innerHTML = ""; el.docFooter.innerHTML = "";
     el.docTitle.textContent = ""; el.docProgress.textContent = "";
   }
@@ -324,6 +328,76 @@
     return { current: current, total: shown };
   }
 
+  // ---------- Что осталось отметить ----------
+  // Кнопка «Далее» остаётся рабочей, а по нажатию система показывает, чего именно не хватает.
+  // Выключенная кнопка на нажатие не отвечает ничем: клиент видит серый прямоугольник и не
+  // понимает, что от него хотят, а искать одну неотмеченную галочку среди десятка приходится
+  // глазами. Здесь наоборот: пропущенное подсвечивается, экран прокручивается к первому из них,
+  // и подсказка называет их число.
+  function missingOn(pageIndex) {
+    var page = doc.config.pages[pageIndex];
+    var out = [];
+    if (!page) return out;
+    (page.checkboxes || []).forEach(function (cb, i) {
+      if (cb.required && condHolds(cb.visibleWhen) && !doc.checks[checkKey(pageIndex, i)])
+        out.push({ kind: "check", key: checkKey(pageIndex, i) });
+    });
+    (page.groups || []).forEach(function (g) {
+      if (g.required && condHolds(g.visibleWhen) && !(doc.picks[g.key] || ""))
+        out.push({ kind: "group", key: g.key || "" });
+    });
+    (page.signatures || []).forEach(function (sg) {
+      if (sg.required && condHolds(sg.visibleWhen) && !(doc.signs[sg.key] || ""))
+        out.push({ kind: "sign", key: sg.key || "" });
+    });
+    (page.scans || []).forEach(function (sc) {
+      if (sc.required && condHolds(sc.visibleWhen) && !doc.codes[sc.key])
+        out.push({ kind: "scan", key: sc.key || "" });
+    });
+    return out;
+  }
+
+  function clearMiss(node) {
+    if (!node) return;
+    node.classList.remove("miss");
+    var note = node.querySelector(".miss-note");
+    if (note) note.remove();
+  }
+
+  function clearAllMiss() {
+    el.docBody.querySelectorAll(".miss").forEach(clearMiss);
+  }
+
+  /// Подсветить пропущенное и подвести к первому. Возвращает, сколько нашлось.
+  function showMissing(pageIndex) {
+    clearAllMiss();
+    var missing = missingOn(pageIndex);
+    var first = null;
+    missing.forEach(function (m) {
+      var attr = m.kind === "check" ? "data-miss-key"
+        : m.kind === "group" ? "data-miss-group"
+        : m.kind === "sign" ? "data-miss-sign" : "data-miss-scan";
+      var node = el.docBody.querySelector('[' + attr + '="' + m.key + '"]');
+      if (!node) return;
+      node.classList.add("miss");
+      var note = document.createElement("div");
+      note.className = "miss-note";
+      note.textContent = m.kind === "check" ? "Нужно отметить, чтобы продолжить"
+        : m.kind === "group" ? "Нужно выбрать один вариант"
+        : m.kind === "sign" ? "Нужно расписаться в этом поле"
+        : "Нужно отсканировать код";
+      node.appendChild(note);
+      if (!first) first = node;
+    });
+    if (first) {
+      // Прокручиваем так, чтобы пункт оказался в удобном месте, а не вплотную к краю.
+      var box = first.getBoundingClientRect();
+      var area = el.docBody.getBoundingClientRect();
+      el.docBody.scrollBy({ top: box.top - area.top - 80, behavior: "smooth" });
+    }
+    return missing.length;
+  }
+
   function requiredSatisfied(pageIndex) {
     var page = doc.config.pages[pageIndex];
     if (!page) return true;
@@ -337,10 +411,73 @@
       var grp = page.groups[g];
       if (grp.required && condHolds(grp.visibleWhen) && !(doc.picks[grp.key] || "")) return false;
     }
+    for (var si = 0; si < (page.signatures || []).length; si++) {
+      var sg = page.signatures[si];
+      if (sg.required && condHolds(sg.visibleWhen) && !(doc.signs[sg.key] || "")) return false;
+    }
+    for (var ci = 0; ci < (page.scans || []).length; ci++) {
+      var sc = page.scans[ci];
+      if (sc.required && condHolds(sc.visibleWhen) && !doc.codes[sc.key]) return false;
+    }
     return true;
   }
 
+  // ==================================================================
+  // Наблюдение за экраном: что здесь происходит, видит оператор
+  // ==================================================================
+  // Картинка не шлётся. У админки есть тот же отрисовщик документа, поэтому достаточно
+  // рассказать, что изменилось: экран, страница, отметки, штрихи подписи. Расход измеряется
+  // сотнями байт на событие вместо мегабит видео.
+  //
+  // Планшет молчит, пока за ним никто не смотрит: сервер включает и выключает рассказ.
+  // Связь односторонняя: отсюда наверх уходит только состояние, а обратно не приходит ничего.
+  var watch = { on: false, timer: null, lastSign: "" };
+
+  function watchState() {
+    var screen = doc.screens[doc.index];
+    var out = { mode: doc.config ? "document" : "slides" };
+    if (scan && scan.active) {
+      // Про камеру говорим словами: у наблюдателя никакой камеры не открывается и разрешения
+      // не спрашивается, он видит только, что клиент подносит код.
+      out.mode = "scan";
+      out.scanCode = scan.lastCode || "";
+      return out;
+    }
+    if (!doc.config || !screen) return out;
+    out.type = screen.type;
+    out.pageIndex = screen.pageIndex != null ? screen.pageIndex : -1;
+    var pos = stepPosition();
+    out.step = pos.current; out.steps = pos.total;
+    out.checks = doc.checks;
+    out.picks = doc.picks;
+    out.codes = doc.codes;
+    // Подписи идут картинками только когда они уже готовы: пока клиент ведёт линию, штрихи
+    // догоняют отдельным потоком, иначе на каждое движение уходил бы целый PNG.
+    var signs = {};
+    Object.keys(doc.signs || {}).forEach(function (k) { if (doc.signs[k]) signs[k] = doc.signs[k]; });
+    out.signs = signs;
+    if (screen.type === "signature") out.finalInk = doc.finalInk || "";
+    out.missing = screen.type === "page"
+      ? (missingOn(screen.pageIndex) || []).map(function (m) { return m.kind + ":" + m.key; })
+      : [];
+    return out;
+  }
+
+  function watchPush() {
+    if (!watch.on || !conn) return;
+    if (watch.timer) return;
+    // Пачками, а не на каждое движение: перо даёт до сотни событий в секунду, и без окна
+    // канал захлебнулся бы. Десятая доля секунды на глаз неотличима от мгновенного.
+    watch.timer = setTimeout(function () {
+      watch.timer = null;
+      if (!watch.on || !conn) return;
+      try { conn.invoke("ReportScreen", watchState()).catch(function () { /* смотреть перестали */ }); }
+      catch (e) { /* соединение уже закрыто */ }
+    }, 120);
+  }
+
   function renderScreen() {
+    watchPush();
     var screen = doc.screens[doc.index];
     if (!screen) return;              // the document was cleared while a callback was in flight
     // Страница могла стать скрытой от только что поставленной галочки: показывать её дальше
@@ -360,6 +497,13 @@
 
   // Append styled runs to a node using textContent only (never innerHTML), so signer data and
   // template text can never inject markup. \n inside a run becomes a line break.
+  // Оформленный текст подписи пункта. Когда оформления нет, из простого текста делается один
+  // кусок: дальше всё рисуется одинаково и не приходится разбирать два случая.
+  function labelRuns(runs, plain) {
+    if (runs && runs.length) return runs;
+    return plain ? [{ text: plain }] : [];
+  }
+
   function appendRuns(parent, runs) {
     (runs || []).forEach(function (r) {
       var segs = String(r && r.text != null ? r.text : "").split("\n");
@@ -382,12 +526,21 @@
   function appendBlock(parent, b) {
     if (b && b.imageUrl && /^\/media\/[^/\\]+$/.test(b.imageUrl)) {
       var fig = document.createElement("div"); fig.className = "doc-image";
+      // Картинку тоже выравниваем. По умолчанию она стоит по центру: так было всегда, и
+      // менять это для документов, где выравнивание не задано, нельзя.
+      var ia = (b && b.align || "").toLowerCase();
+      if (ia === "right") fig.style.textAlign = "right";
+      else if (ia === "center") fig.style.textAlign = "center";
+      else if (ia === "justify") fig.style.textAlign = "left";
       var im = document.createElement("img"); im.src = b.imageUrl;
       var w = Math.min(Math.max(parseInt(b.imageWidth, 10) || 100, 10), 100);
       im.style.width = w + "%";
       fig.appendChild(im); parent.appendChild(fig);
     } else {
       var text = document.createElement("div"); text.className = "doc-text";
+      // Выравнивание задано на весь абзац, а не на кусок текста: так же оно попадёт и в PDF.
+      var al = (b && b.align || "").toLowerCase();
+      if (al === "center" || al === "right" || al === "justify") text.style.textAlign = al;
       appendRuns(text, (b && b.runs) || []); parent.appendChild(text);
     }
   }
@@ -408,6 +561,8 @@
     add(blocks, 0);
     add(page.checkboxes, 1);
     add(page.groups, 2);
+    add(page.signatures, 3);
+    add(page.scans, 4);
     items.sort(function (a, b) { return (a.ord - b.ord) || (a.kind - b.kind) || (a.index - b.index); });
     return items;
   }
@@ -416,11 +571,18 @@
     var page = doc.config.pages[pageIndex];
     doc.docPadResize = null;
     var body = document.createElement("div");
+    // Подпись и сканирование это отдельные экраны: клиент на них занят одним делом, и место
+    // под подпись или под камеру занимает столько, сколько нужно, а не полоску среди текста.
+    var kind = (page.kind || "").toLowerCase();
+    if (kind === "signature") body.className = "screen-sign";
+    else if (kind === "scan") body.className = "screen-scan";
 
     var hruns = (page.headingRuns && page.headingRuns.length) ? page.headingRuns
       : (page.heading ? [{ text: page.heading }] : []);
     if (hruns.length) {
       var h = document.createElement("h2");
+      var ha = (page.headingAlign || "").toLowerCase();
+      if (ha === "center" || ha === "right" || ha === "justify") h.style.textAlign = ha;
       appendRuns(h, hruns);
       body.appendChild(h);
     }
@@ -444,13 +606,21 @@
       input.addEventListener("change", function () {
         doc.checks[key] = input.checked;
         label.classList.toggle("checked", input.checked);
+        // Пометка «не отмечено» снимается сразу, как только пункт отметили: человек должен
+        // видеть, что список требований тает, а не что подсветка висит до конца.
+        if (input.checked) clearMiss(label);
         // Перерисовываем, только если от этого пункта что-то зависит: иначе страница
         // дёргалась бы под пальцем на каждой галочке без всякой причины.
+        // Наблюдателю отметка нужна всегда, даже когда от неё на странице ничего не зависит и
+        // перерисовки не будет: он должен видеть то же, что клиент, а не через раз.
+        watchPush();
         if (cb.key && dependsOn(cb.key)) rerender(); else updateFooter();
       });
+      label.setAttribute("data-miss-key", key);
       var span = document.createElement("span");
       span.className = "label";
-      span.textContent = cb.label || "";
+      // Текст пункта оформляется так же, как обычный абзац: жирный, курсив, цвет, размер.
+      appendRuns(span, labelRuns(cb.labelRuns, cb.label || ""));
       if (cb.required) {
         var req = document.createElement("span");
         req.className = "req"; req.textContent = "*";
@@ -469,7 +639,7 @@
       if (g.title) {
         var t = document.createElement("div");
         t.className = "group-title";
-        t.textContent = g.title;
+        appendRuns(t, labelRuns(g.titleRuns, g.title));
         if (g.required) {
           var req = document.createElement("span");
           req.className = "req"; req.textContent = "*";
@@ -477,8 +647,12 @@
         }
         box.appendChild(t);
       }
+      box.setAttribute("data-miss-group", g.key || "");
       var opts = document.createElement("div");
-      opts.className = "checks";
+      // Варианты стоят в одну строку: их два или три, они короткие («ДА», «НЕТ»), и в столбик
+      // они занимали пол-экрана впустую, отрывая ответ от вопроса. Вопрос при этом остаётся
+      // сверху. Если варианты длинные или их много, строка переносится сама.
+      opts.className = "checks group-options";
       (g.options || []).forEach(function (o) {
         var chosen = (doc.picks[g.key] || "") === o.key;
         var label = document.createElement("label");
@@ -492,7 +666,7 @@
         });
         var span = document.createElement("span");
         span.className = "label";
-        span.textContent = o.label || o.key || "";
+        appendRuns(span, labelRuns(o.labelRuns, o.label || o.key || ""));
         label.appendChild(input);
         label.appendChild(span);
         opts.appendChild(label);
@@ -513,12 +687,144 @@
       if (it.kind === 1) { checksBox().appendChild(makeCheckbox(it.item, it.index)); return; }
       checks = null;
       if (it.kind === 0) appendBlock(body, it.item);
-      else body.appendChild(makeGroup(it.item));
+      else if (it.kind === 2) body.appendChild(makeGroup(it.item));
+      else if (it.kind === 3) body.appendChild(makePageSignature(it.item));
+      else body.appendChild(makePageScan(it.item));
     });
+
+    // Поле подписи внутри страницы. Документ может требовать несколько подписей: согласие,
+    // отдельное согласие законного представителя, подтверждение отказа. Каждое поле хранит свою
+    // картинку и своё имя, поэтому в записи и в PDF видно, что именно подписано.
+    function makePageSignature(sig) {
+      var box = document.createElement("div");
+      box.className = "page-sign";
+      box.setAttribute("data-miss-sign", sig.key || "");
+      if (sig.label) {
+        var t = document.createElement("div");
+        t.className = "page-sign-title";
+        t.textContent = sig.label;
+        if (sig.required) {
+          var req = document.createElement("span");
+          req.className = "req"; req.textContent = "*";
+          t.appendChild(req);
+        }
+        box.appendChild(t);
+      }
+      var wrap = document.createElement("div");
+      wrap.className = "sign-wrap page-sign-wrap";
+      var canvas = document.createElement("canvas");
+      wrap.appendChild(canvas);
+      var line = document.createElement("div"); line.className = "sign-line"; wrap.appendChild(line);
+      var hint = document.createElement("div"); hint.className = "sign-hint"; hint.textContent = "Распишитесь здесь"; wrap.appendChild(hint);
+      box.appendChild(wrap);
+
+      var clear = document.createElement("button");
+      clear.className = "btn btn-ghost page-sign-clear"; clear.type = "button"; clear.textContent = "Очистить";
+      clear.addEventListener("click", function () {
+        var pad = doc.pagePads[sig.key];
+        if (pad) { pad.clear(); doc.signs[sig.key] = ""; wrap.classList.remove("has-ink"); updateFooter(); }
+      });
+      box.appendChild(clear);
+
+      // Планшет мог уже получить эту подпись раньше: возвращаясь назад, человек должен видеть
+      // то, что уже нарисовал, а не пустое поле.
+      setTimeout(function () { mountPad(sig, canvas, wrap); }, 0);
+      return box;
+    }
+
+    function mountPad(sig, canvas, wrap) {
+      var ratio = Math.max(window.devicePixelRatio || 1, 1);
+      var rect = wrap.getBoundingClientRect();
+      canvas.width = Math.round(rect.width * ratio);
+      canvas.height = Math.round(rect.height * ratio);
+      canvas.getContext("2d").scale(ratio, ratio);
+      var pad = new SignaturePad(canvas, { minWidth: 1.2, maxWidth: 3.2, penColor: "#111827", throttle: 0, minDistance: 0 });
+      attachCoalesced(canvas);
+      doc.pagePads[sig.key] = pad;
+      var saved = doc.signs[sig.key];
+      if (saved) { try { pad.fromDataURL(saved); wrap.classList.add("has-ink"); } catch (e) { /* не восстановилась */ } }
+      pad.addEventListener("endStroke", function () {
+        doc.signs[sig.key] = pad.isEmpty() ? "" : pad.toDataURL("image/png");
+        watchPush();
+        wrap.classList.toggle("has-ink", !pad.isEmpty());
+        if (!pad.isEmpty()) clearMiss(wrap.closest(".page-sign"));
+        updateFooter();
+      });
+    }
+
+    // Сканирование кода прямо на странице: клиент подносит штрихкод пробирки или QR из
+    // направления, и код попадает в запись подписи рядом с тем, что он подписал.
+    function makePageScan(sc) {
+      var box = document.createElement("div");
+      box.className = "page-scan";
+      box.setAttribute("data-miss-scan", sc.key || "");
+      var t = document.createElement("div");
+      t.className = "page-scan-title";
+      t.textContent = sc.label || "Отсканируйте код";
+      if (sc.required) {
+        var req = document.createElement("span");
+        req.className = "req"; req.textContent = "*";
+        t.appendChild(req);
+      }
+      box.appendChild(t);
+
+      var value = document.createElement("div");
+      value.className = "page-scan-value";
+      var btn = document.createElement("button");
+      btn.className = "btn btn-primary page-scan-btn"; btn.type = "button";
+
+      function sync() {
+        var got = doc.codes[sc.key];
+        value.textContent = got ? got.code : "";
+        value.classList.toggle("hidden", !got);
+        btn.textContent = got ? "Сканировать заново" : "Сканировать код";
+        box.classList.toggle("scanned", !!got);
+      }
+      btn.addEventListener("click", function () {
+        startScan({ label: sc.label, onCode: function (code, format) {
+          doc.codes[sc.key] = { code: code, format: format || "", label: sc.label || "" };
+          sync();
+          clearMiss(box);
+          updateFooter();
+        } });
+      });
+      box.appendChild(value);
+      box.appendChild(btn);
+      sync();
+      return box;
+    }
 
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
     renderFooter({ back: doc.index > 0, next: true, nextLabel: "Далее" });
+  }
+
+  // Между двумя кадрами планшет успевает снять несколько точек пера, и браузер отдаёт их не
+  // отдельными событиями, а внутри getCoalescedEvents последнего. Без них быстрый росчерк
+  // рисуется парой прямых срезов вместо кривой. Слушатель висит на самом холсте, а библиотека
+  // слушает window, поэтому промежуточные точки успевают дойти до неё раньше основного события
+  // и порядок не нарушается. Нужен и итоговому полю подписи, и полям внутри страниц.
+  var MAX_COALESCED = 32;   // защита от патологического всплеска событий
+  function attachCoalesced(canvas) {
+    var replaying = false;  // точки, разосланные здесь же, повторно разбирать не нужно
+    canvas.addEventListener("pointermove", function (e) {
+      if (replaying || typeof e.getCoalescedEvents !== "function") return;
+      var pts;
+      try { pts = e.getCoalescedEvents(); } catch (err) { return; }
+      if (!pts || pts.length < 2) return;                 // последняя точка это само событие
+      var start = Math.max(0, pts.length - 1 - MAX_COALESCED);
+      replaying = true;
+      try {
+        for (var i = start; i < pts.length - 1; i++) {
+          var c = pts[i];
+          canvas.dispatchEvent(new PointerEvent("pointermove", {
+            clientX: c.clientX, clientY: c.clientY,
+            pressure: c.pressure, pointerId: e.pointerId, pointerType: e.pointerType,
+            buttons: 1, bubbles: true, cancelable: false
+          }));
+        }
+      } finally { replaying = false; }   // рассылка синхронная, флаг всегда снимается
+    }, true);
   }
 
   function renderSignature() {
@@ -586,35 +892,18 @@
       minDistance: 0      // не выбрасывать близкие точки: именно они дают отставание от пера
     });
 
-    // Между двумя кадрами планшет успевает снять несколько точек пера, и браузер отдаёт их не
-    // отдельными событиями, а внутри getCoalescedEvents последнего. Без них быстрый росчерк
-    // рисуется парой прямых срезов вместо кривой. Слушатель висит на самом холсте, а библиотека
-    // слушает window, поэтому промежуточные точки успевают дойти до неё раньше основного события
-    // и порядок не нарушается.
-    var MAX_COALESCED = 32;   // защита от патологического всплеска событий
-    var replaying = false;    // точки, разосланные здесь же, повторно разбирать не нужно
-    canvas.addEventListener("pointermove", function (e) {
-      if (replaying || typeof e.getCoalescedEvents !== "function") return;
-      var pts;
-      try { pts = e.getCoalescedEvents(); } catch (err) { return; }
-      if (!pts || pts.length < 2) return;                 // последняя точка это само событие
-      var start = Math.max(0, pts.length - 1 - MAX_COALESCED);
-      replaying = true;
-      try {
-        for (var i = start; i < pts.length - 1; i++) {
-          var c = pts[i];
-          canvas.dispatchEvent(new PointerEvent("pointermove", {
-            clientX: c.clientX, clientY: c.clientY,
-            pressure: c.pressure, pointerId: e.pointerId, pointerType: e.pointerType,
-            buttons: 1, bubbles: true, cancelable: false
-          }));
-        }
-      } finally { replaying = false; }   // рассылка синхронная, флаг всегда снимается
-    }, true);
+    attachCoalesced(canvas);
     // Настройки пера доступны наружу, чтобы их можно было проверить тестом, а не на глаз.
     window.__padForTest = doc.pad;
     doc.pad.addEventListener("beginStroke", function () { hint.style.display = "none"; });
-    doc.pad.addEventListener("endStroke", updateFooter);
+    doc.pad.addEventListener("endStroke", function () {
+      updateFooter();
+      // Итоговая подпись уходит наблюдателю такой, какая она уже нарисована. Не на каждое
+      // движение пера, а по концу штриха: так линия появляется у оператора почти сразу, а
+      // канал не забивается сотней картинок в секунду.
+      doc.finalInk = doc.pad.isEmpty() ? "" : doc.pad.toDataURL("image/png");
+      watchPush();
+    });
     sizeCanvas();
     // Re-measure once the flex layout has settled so the pad fills its final size.
     requestAnimationFrame(sizeCanvas);
@@ -679,7 +968,15 @@
       next.className = "btn btn-primary"; next.id = "btnNext"; next.textContent = opts.nextLabel || "Далее";
       next.addEventListener("click", function () {
         var screen = doc.screens[doc.index];
-        if (screen.type === "page" && !requiredSatisfied(screen.pageIndex)) return;
+        if (screen.type === "page" && !requiredSatisfied(screen.pageIndex)) {
+          // Не молчим и не блокируем кнопку: показываем, что именно осталось отметить.
+          var n = showMissing(screen.pageIndex);
+          var note = document.getElementById("footerNote");
+          if (note) note.textContent = n === 1
+            ? "Отметьте выделенный пункт, чтобы продолжить"
+            : "Отметьте выделенные пункты: осталось " + n;
+          return;
+        }
         var to = stepIndex(doc.index, 1);
         if (to >= 0) { doc.index = to; renderScreen(); }
       });
@@ -688,7 +985,19 @@
     if (opts.sign) {
       var sign = document.createElement("button");
       sign.className = "btn btn-sign"; sign.id = "btnSign"; sign.textContent = "ПОДПИСАТЬ";
-      sign.addEventListener("click", submitSignature);
+      sign.addEventListener("click", function () {
+        if (!doc.pad || doc.pad.isEmpty()) {
+          var wrap = el.docBody.querySelector(".sign-wrap");
+          if (wrap) {
+            wrap.classList.add("miss");
+            setTimeout(function () { wrap.classList.remove("miss"); }, 2000);
+          }
+          var note = document.getElementById("footerNote");
+          if (note) note.textContent = "Поставьте подпись в выделенном поле";
+          return;
+        }
+        submitSignature();
+      });
       el.docFooter.appendChild(sign);
     }
     updateFooter();
@@ -700,13 +1009,20 @@
     var next = document.getElementById("btnNext");
     var sign = document.getElementById("btnSign");
     if (screen.type === "page" && next) {
+      // Кнопка остаётся рабочей: по нажатию она объясняет, чего не хватает, и подсвечивает
+      // это на экране. Выключенная кнопка не отвечает ничем, и человек остаётся один на один
+      // с серым прямоугольником.
       var ok = requiredSatisfied(screen.pageIndex);
-      next.disabled = !ok;
-      if (note) note.textContent = ok ? "" : "Отметьте обязательные пункты (*) для продолжения";
+      next.disabled = false;
+      next.classList.toggle("btn-wait", !ok);
+      if (note && !el.docBody.querySelector(".miss"))
+        note.textContent = ok ? "" : "Отметьте обязательные пункты (*)";
+      if (ok) clearAllMiss();
     }
     if (screen.type === "signature" && sign) {
       var empty = !doc.pad || doc.pad.isEmpty();
-      sign.disabled = empty || doc.submitting;
+      sign.disabled = doc.submitting;
+      sign.classList.toggle("btn-wait", empty);
       if (note) note.textContent = empty ? "Поставьте подпись в поле выше" : "";
     }
   }
@@ -725,6 +1041,36 @@
       });
     });
     return items;
+  }
+
+  // Подписи, поставленные внутри страниц. В запись идёт только то, что клиент видел: подпись
+  // в скрытом условием поле не считается поставленной.
+  function collectSignatures() {
+    var out = [];
+    (doc.config.pages || []).forEach(function (page) {
+      if (!condHolds(page.visibleWhen)) return;
+      (page.signatures || []).forEach(function (sg) {
+        if (!condHolds(sg.visibleWhen)) return;
+        var img = doc.signs[sg.key] || "";
+        if (!img) return;
+        out.push({ key: sg.key || "", label: sg.label || "", image: img });
+      });
+    });
+    return out;
+  }
+
+  function collectScans() {
+    var out = [];
+    (doc.config.pages || []).forEach(function (page) {
+      if (!condHolds(page.visibleWhen)) return;
+      (page.scans || []).forEach(function (sc) {
+        if (!condHolds(sc.visibleWhen)) return;
+        var got = doc.codes[sc.key];
+        if (!got) return;
+        out.push({ key: sc.key || "", label: sc.label || "", code: got.code || "", format: got.format || "" });
+      });
+    });
+    return out;
   }
 
   function collectGroups() {
@@ -760,6 +1106,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + (getToken() || "") },
       body: JSON.stringify({ items: collectItems(), groups: collectGroups(),
+        signatures: collectSignatures(), scans: collectScans(),
         signature: doc.pad.toDataURL("image/png"), submissionId: doc.submissionId })
     }).then(function (r) {
       if (doc.session !== session) return;          // document was replaced/cleared while sending
@@ -817,6 +1164,8 @@
   // ==================================================================
   function showLayer(which) {
     el.enroll.classList.add("hidden");
+    // Смена экрана это то, что наблюдателю надо увидеть первым делом.
+    setTimeout(watchPush, 0);
     // Any layer switch ends scanning: the camera must never keep running behind another screen.
     if (which !== "scan") stopScan();
     el.scan.classList.toggle("hidden", which !== "scan");
@@ -842,7 +1191,7 @@
   // Только передняя камера. Планшет висит лицом к клиенту, код показывают в неё, и выбор
   // камеры на экране только сбивал: нажав «другая камера», человек видел пустой кадр с
   // обратной стороны планшета и решал, что сканирование сломалось.
-  var scan = { controls: null, active: false, doneTimer: null, capTimer: null, gen: 0, facing: "user" };
+  var scan = { controls: null, active: false, doneTimer: null, capTimer: null, gen: 0, facing: "user", inline: null };
   var SCAN_MAX_MS = 90000;   // hard local cap: never film longer than this without a result
 
   function clearScanResult() {
@@ -851,6 +1200,7 @@
   }
 
   function stopScan() {
+    scan.inline = null;
     scan.gen++;                                   // invalidate any camera start still in flight
     if (scan.doneTimer) { clearTimeout(scan.doneTimer); scan.doneTimer = null; }
     if (scan.capTimer) { clearTimeout(scan.capTimer); scan.capTimer = null; }
@@ -889,8 +1239,12 @@
   var HINT_POSSIBLE_FORMATS = 2;
   var HINT_TRY_HARDER = 3;
 
-  function startScan() {
+  /// opts.onCode: сканирование вызвано элементом страницы, код возвращается ему, и планшет
+  /// возвращается к документу. Без opts это привычное сканирование по команде оператора.
+  function startScan(opts) {
     if (scan.active) return;
+    scan.lastCode = "";
+    scan.inline = (opts && typeof opts.onCode === "function") ? opts.onCode : null;
     if (scan.doneTimer) { clearTimeout(scan.doneTimer); scan.doneTimer = null; }  // stale "return" timer
     clearScanResult();
     if (!window.ZXingBrowser || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -921,9 +1275,13 @@
       // and TRY_HARDER is 3. Without this the reader ran with no hints at all, which is why a
       // barcode held to the camera was never picked up.
       if (ZX && ZX.BarcodeFormat) {
+        // ITF это чередующийся 2 из 5: линейный, только цифры и только чётное их количество,
+        // им маркируют транспортную упаковку и пробирки. Data Matrix это двумерный код,
+        // которым метят пробирки и реагенты там, где для QR не хватает места.
         hints.set(HINT_POSSIBLE_FORMATS, [
-          ZX.BarcodeFormat.QR_CODE, ZX.BarcodeFormat.EAN_13,
-          ZX.BarcodeFormat.EAN_8, ZX.BarcodeFormat.CODE_128
+          ZX.BarcodeFormat.QR_CODE, ZX.BarcodeFormat.DATA_MATRIX,
+          ZX.BarcodeFormat.EAN_13, ZX.BarcodeFormat.EAN_8,
+          ZX.BarcodeFormat.CODE_128, ZX.BarcodeFormat.ITF
         ]);
       }
       // Spend more effort per frame. A tablet camera gives a soft, low contrast image, and
@@ -959,6 +1317,13 @@
     });
   }
 
+  // Проверить путь кода без камеры иначе нельзя: в браузере проверки камеры нет, а разбирать
+  // надо именно то, что происходит после считывания. Работает только при открытом сканировании,
+  // поэтому подсунуть код в обход экрана не получится.
+  window.__sk_test_scan = function (code, format) {
+    if (scan.active || scan.inline) onScanned({ text: code, format: format });
+  };
+
   function onScanned(result) {
     var code = "";
     try { code = result.getText ? result.getText() : (result.text || ""); } catch (e) { code = ""; }
@@ -971,10 +1336,28 @@
     } catch (e) { format = ""; }
 
     // One code per session: stop the camera immediately, show confirmation, save, then leave.
+    scan.lastCode = code;
+    watchPush();
+    var inline = scan.inline;
     stopScan();
     el.scanMsg.textContent = "";
     el.scanCode.textContent = code;
     el.scanResult.classList.remove("hidden");
+
+    // Код для элемента страницы принадлежит документу: он уедет вместе с подписью и в общий
+    // список сканирований не попадает, иначе оператор видел бы там чужие коды вперемешку.
+    if (inline) {
+      scan.inline = null;
+      scan.doneTimer = setTimeout(function () {
+        scan.doneTimer = null;
+        clearScanResult();
+        showLayer("document");
+        startIdle();
+        inline(code, format);
+        renderScreen();
+      }, 900);
+      return;
+    }
 
     fetch("/api/scan", {
       method: "POST",
@@ -1001,6 +1384,12 @@
 
   function applyCommand(cmd) {
     if (!cmd) return;
+    // Сервер не узнал в этом подключении планшет: страницу открыли в браузере, где есть вход в
+    // админку, или токен уже не тот. Дальше ждать нечего, показываем экран активации.
+    if (cmd.mode === "notdevice") {
+      showEnroll("Это окно не привязано к планшету. Введите код активации.");
+      return;
+    }
     if (cmd.mode === "document") applyDocument(cmd.document);
     else applySlides(cmd.slides);
   }
@@ -1055,7 +1444,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "5.2";
+  var APP_VERSION = "6.0";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {
@@ -1087,6 +1476,9 @@
     conn.on("Identify", function (p) { showIdentify(p && p.code, p && p.name); });
     conn.on("StartScan", startScan);
     conn.on("StopScan", stopScan);
+    // За планшетом начали или перестали смотреть. Пока не смотрят, он не рассказывает ничего.
+    conn.on("WatchOn", function () { watch.on = true; watchPush(); });
+    conn.on("WatchOff", function () { watch.on = false; });
 
     conn.onreconnecting(function () { showStatus("Соединение потеряно. Переподключение…"); });
     conn.onreconnected(function () { hideStatus(); register(); });

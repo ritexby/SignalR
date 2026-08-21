@@ -270,6 +270,22 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
     if (items.Count > 200 || items.Any(i => i is null || (i.Label?.Length ?? 0) > 2000))
         return Results.BadRequest(new { error = "invalid items" });
 
+    // Подписи, поставленные внутри страниц, приходят тем же запросом. Каждая проверяется так же,
+    // как итоговая: чужие байты не должны попасть в запись под видом подписи.
+    var extraSignatures = new List<(string Key, string Label, byte[] Png)>();
+    foreach (var extra in (sub.Signatures ?? new List<SubmittedSignature>()).Where(x => x is not null).Take(40))
+    {
+        if ((extra.Image?.Length ?? 0) > MaxSignatureDataUrlChars)
+            return Results.BadRequest(new { error = "signature image too large" });
+        var bytes = DecodeDataUrlPng(extra.Image ?? "");
+        if (bytes is null || !IsPng(bytes) || bytes.Length > MaxSignaturePngBytes)
+            return Results.BadRequest(new { error = "invalid signature image" });
+        extraSignatures.Add((DocumentTemplating.CleanKey(extra.Key), extra.Label ?? "", bytes));
+    }
+    if ((sub.Scans?.Count ?? 0) > 40 || (sub.Scans ?? new List<SubmittedScan>())
+            .Any(x => x is null || (x.Code?.Length ?? 0) > StorageService.MaxScanCodeLength))
+        return Results.BadRequest(new { error = "invalid scans" });
+
     var deviceId = ctx.User.FindFirst("device_id")?.Value;
     if (deviceId is null) return Results.BadRequest(new { error = "device required" });
 
@@ -334,7 +350,7 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
 
         var template = storage.GetDocument();
         var resolvedDoc = DocumentTemplating.Resolve(template, fields, state.DynamicCheckboxes,
-            finalGroups, finalStates);
+            finalGroups, finalStates, state.Texts, state.GroupOptions);
         // Блоки, скрытые условием на чекбокс, клиент не видел: их не должно быть и в PDF.
         DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups);
 
@@ -348,12 +364,12 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
             : fields.Where(kv => used.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
         if (recordFields is { Count: 0 }) recordFields = null;
 
-        var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, recordFields);
+        var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, recordFields, extraSignatures);
 
         // The record is safely stored: from here the signer's data may leave the tablet.
         ClearSession();
 
-        try { pdf.Generate(rec, resolvedDoc, png); }
+        try { pdf.Generate(rec, resolvedDoc, png, file => storage.GetExtraSignatureBytes(rec.Id, file)); }
         catch (Exception ex) { app.Logger.LogError(ex, "PDF generation failed for {Id}", rec.Id); }
 
         await coord.NotifyAdminsSignatureAsync(rec);
@@ -483,6 +499,10 @@ admin.MapGet("/devices", (KioskHealthCache healthCache) =>
                 // Which build of the kiosk page this tablet is actually running. Blank on an old
                 // page that does not report it yet, which is itself the answer.
                 appVersion = isOnline && appVersions.TryGetValue(d.Id, out var v) ? v : null,
+                // Что сейчас на экране: реклама или документ. Оператору это нужно, чтобы знать,
+                // за чем есть смысл смотреть, особенно когда документ отправила внешняя система,
+                // а не он сам.
+                screen = storage.ResolveState(d.Id).Mode,
                 d.EnrolledUtc
             };
         });
@@ -701,6 +721,57 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
         pagesShown = resolved.Pages.Count
     });
 });
+
+// ---- Наблюдение за экраном планшета ----
+// Что сейчас показано на планшете, в том же виде, в каком это получил он сам. Нужно окну
+// наблюдения: оно рисует документ своим отрисовщиком, а от планшета получает только то, что
+// меняется. Отдаётся по требованию и только администратору, никуда не записывается.
+admin.MapGet("/devices/{id}/screen", (string id, KioskCoordinator coord) =>
+{
+    var dev = storage.GetDevice(id);
+    if (dev is null) return Results.NotFound(new { error = "Планшет не найден." });
+    var cmd = coord.BuildCurrentCommand(id);
+    return Results.Ok(new { mode = cmd.Mode, document = cmd.Document, slides = cmd.Slides });
+});
+
+// ---- Раскладка PDF ----
+// Возвращает, где именно окажется каждая строка будущего PDF. Считает это тот же генератор,
+// который потом соберёт настоящий файл, поэтому макет в админке не похож на PDF, а совпадает
+// с ним. Рисовать PDF в браузере для этого не нужно.
+admin.MapPost("/document/pdf-layout", (PreviewDto? dto, PdfService pdf) =>
+{
+    var doc = dto?.Document ?? storage.GetDocument();
+    DocumentTemplating.Sanitize(doc);
+    var badField = FieldSchema.Validate(dto?.Fields);
+    if (badField is not null) return Results.BadRequest(new { error = badField });
+    var badDate = DocumentTemplating.ValidateAgeFields(doc, dto?.Fields);
+    if (badDate is not null) return Results.BadRequest(new { error = badDate });
+
+    // Макет считается по документу с подставленными значениями: длина текста зависит от них,
+    // а значит и от них зависит, на какой странице окажется подпись.
+    var resolved = DocumentTemplating.Resolve(doc, dto?.Fields, dto?.Checkboxes);
+    var layout = pdf.Layout(resolved);
+    return Results.Ok(new
+    {
+        pageWidth = layout.PageWidth,
+        pageHeight = layout.PageHeight,
+        pageCount = layout.PageCount,
+        items = layout.Items,
+        placements = doc.SignaturePlacements,
+        // Поля подписи документа: их и расставляет оператор. Пустое имя это итоговая подпись.
+        fields = SignatureFieldsOf(doc)
+    });
+});
+
+static List<object> SignatureFieldsOf(DocumentConfig doc)
+{
+    var list = new List<object> { new { key = "", label = "Итоговая подпись под документом" } };
+    foreach (var p in doc.Pages ?? new List<DocPage>())
+        foreach (var sg in p.Signatures ?? new List<DocSignature>())
+            if (sg is not null && !string.IsNullOrWhiteSpace(sg.Key))
+                list.Add(new { key = sg.Key, label = string.IsNullOrWhiteSpace(sg.Label) ? sg.Key : sg.Label });
+    return list;
+}
 
 // ---- Tablet control through the FreeKiosk REST API on each tablet ----
 // Every call goes server -> tablet, so it only works while the tablets are reachable on the
@@ -967,15 +1038,38 @@ admin.MapPost("/document/import", (DocumentBackup? backup) =>
     var doc = backup?.Document;
     if (backup is null || doc is null || !string.Equals(backup.Kind, DocumentBackup.KindValue, StringComparison.Ordinal))
         return Results.BadRequest(new { error = "Это не файл шаблона документа HELIX SignTablet." });
-    if (backup.Version is < 1 or > 1)
+    // Версия 1 это файл без картинок, версия 2 с картинками. Обе читаются.
+    if (backup.Version is < 1 or > 2)
         return Results.BadRequest(new { error = "Версия файла шаблона не поддерживается." });
     // Validate AFTER sanitising: a file whose pages are all unusable would otherwise pass the check
     // and then replace the working template with an empty one.
     DocumentTemplating.Sanitize(doc);
     if (doc.Pages.Count == 0)
         return Results.BadRequest(new { error = "В файле нет ни одной пригодной страницы документа." });
+
+    // Картинки из файла кладутся в медиатеку под теми же именами, на которые ссылается документ.
+    // Без этого шаблон, перенесённый на другой сервер, показывал бы пустые рамки вместо печатей.
+    // Уже существующий файл не трогаем: он мог быть заменён нарочно.
+    var restored = 0;
+    foreach (var img in backup.Images ?? new List<BackupImage>())
+    {
+        if (img is null) continue;
+        var name = Path.GetFileName(img.File ?? "");
+        // Имя из файла в путь не превращается: только имя файла и только известное расширение.
+        if (name.Length == 0 || name != img.File || name.Length > 120) continue;
+        var ext = Path.GetExtension(name).ToLowerInvariant();
+        if (ext is not (".png" or ".jpg" or ".jpeg" or ".gif" or ".webp")) continue;
+        try
+        {
+            var bytes = Convert.FromBase64String(img.Data ?? "");
+            if (bytes.Length == 0 || bytes.Length > 8 * 1024 * 1024) continue;
+            if (storage.RestoreImage(name, bytes, img.File ?? name)) restored++;
+        }
+        catch (Exception ex) { app.Logger.LogWarning(ex, "Картинка {File} из файла шаблона не восстановлена", name); }
+    }
+
     storage.SaveDocument(doc);
-    return Results.Ok(new { ok = true, pages = doc.Pages.Count });
+    return Results.Ok(new { ok = true, pages = doc.Pages.Count, images = restored });
 });
 
 // A document is ALWAYS shown on exactly one tablet (never all/group), so the signer's
@@ -1025,6 +1119,16 @@ admin.MapGet("/signatures/{id}/image", (string id) =>
     return path is null ? Results.NotFound() : Results.File(path, "image/png");
 });
 
+admin.MapGet("/signatures/{id}/image/{file}", (string id, string file) =>
+{
+    // Подпись, поставленная внутри страницы. Имя файла берётся из самой записи, поэтому
+    // произвольный путь сюда не подставить.
+    var rec = storage.GetSignature(id);
+    if (rec is null || !rec.Signatures.Any(x => x.File == file)) return Results.NotFound();
+    var bytes = storage.GetExtraSignatureBytes(id, file);
+    return bytes is null ? Results.NotFound() : Results.File(bytes, "image/png");
+});
+
 admin.MapGet("/signatures/{id}/pdf", (string id, PdfService pdf) =>
 {
     var path = storage.GetPdfPath(id);
@@ -1038,7 +1142,7 @@ admin.MapGet("/signatures/{id}/pdf", (string id, PdfService pdf) =>
         var png = storage.GetSignatureImageBytes(id);
         if (rec is not null && doc is not null && png is not null)
         {
-            try { path = pdf.Generate(rec, doc, png); }
+            try { path = pdf.Generate(rec, doc, png, file => storage.GetExtraSignatureBytes(id, file)); }
             catch (Exception ex) { app.Logger.LogError(ex, "On-demand PDF regeneration failed for {Id}", id); }
         }
     }
