@@ -43,7 +43,37 @@ public static partial class DocumentTemplating
     };
 
     private static readonly HashSet<string> AllowedSizes = new(StringComparer.Ordinal) { "n", "l", "h" };
-    private static readonly HashSet<string> AllowedOps = new(StringComparer.Ordinal) { "eq", "ne", "empty", "notempty", "in" };
+    // agelt и agege считают возраст по дате рождения: внешняя система присылает только дату, а
+    // документу нужно знать, младше ли человек четырнадцати. Две операции, а не четыре, потому
+    // что «младше N» и «N и старше» делят людей ровно надвое, без щели и без нахлёста.
+    private static readonly HashSet<string> AllowedOps = new(StringComparer.Ordinal)
+        { "eq", "ne", "empty", "notempty", "in", "agelt", "agege" };
+
+    public static bool IsAgeOp(string? op) =>
+        string.Equals(op, "agelt", StringComparison.Ordinal) || string.Equals(op, "agege", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Полных лет на сегодня. Дата принимается в привычных видах: 01.01.1990, 1990-01-01,
+    /// 01/01/1990. Разбор нестрогий намеренно: формат даты приходит из чужой системы, и падать
+    /// из-за точки вместо дефиса нельзя.
+    /// </summary>
+    public static int? AgeYears(string? value, DateTime? today = null)
+    {
+        var v = (value ?? "").Trim();
+        if (v.Length == 0) return null;
+        var formats = new[] { "dd.MM.yyyy", "d.M.yyyy", "yyyy-MM-dd", "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yyyy" };
+        if (!DateTime.TryParseExact(v, formats, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var born) &&
+            !DateTime.TryParse(v, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out born))
+            return null;
+
+        var now = (today ?? DateTime.Now).Date;
+        if (born.Date > now) return null;               // дата из будущего это ошибка, а не возраст
+        var years = now.Year - born.Year;
+        if (born.Date.AddYears(years) > now) years--;   // день рождения в этом году ещё не наступил
+        return years;
+    }
     private static readonly IReadOnlyDictionary<string, string> EmptyMap =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -150,6 +180,18 @@ public static partial class DocumentTemplating
         // (да / нет) keeps working instead of silently never matching.
         var val = FieldSchema.Canonical(field, raw);
         var target = FieldSchema.Canonical(field, cond.Value);
+        if (IsAgeOp(cond.Op))
+        {
+            // Возраст считается из значения тега. Нет даты или её не удалось разобрать: условие
+            // не выполнено, блок не показывается. Показать блок «для законных представителей»
+            // взрослому хуже, чем не показать его при испорченной дате, о которой всё равно
+            // сообщается отдельно.
+            var years = AgeYears(raw);
+            if (years is null) return false;
+            if (!int.TryParse(target, out var limit)) return false;
+            return cond.Op == "agelt" ? years < limit : years >= limit;
+        }
+
         return cond.Op switch
         {
             "ne" => !Eq(val, target),
@@ -711,6 +753,45 @@ public static partial class DocumentTemplating
         foreach (var b in doc.SignBlocks ?? new List<DocBlock>()) Add(b?.VisibleWhen);
         foreach (var b in doc.SignBlocksBelow ?? new List<DocBlock>()) Add(b?.VisibleWhen);
         return used;
+    }
+
+    /// <summary>
+    /// Проверить даты, от которых зависят условия по возрасту. Если документ спрашивает «младше
+    /// 14», а прислали «вчера» или «01.13.1990», блок молча не покажется и никто не поймёт
+    /// почему. Возвращает текст ошибки или null.
+    /// </summary>
+    public static string? ValidateAgeFields(DocumentConfig doc, IReadOnlyDictionary<string, string>? fields)
+    {
+        if (fields is null || fields.Count == 0) return null;
+        var map = BuildMap(fields);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var cond in AllConditions(doc))
+            foreach (var part in Parts(cond))
+            {
+                if (!IsAgeOp(part.Op)) continue;
+                var field = part.Field.Trim();
+                if (!seen.Add(field)) continue;
+                if (map is null || !map.TryGetValue(field, out var raw) || string.IsNullOrWhiteSpace(raw)) continue;
+                if (AgeYears(raw) is null)
+                    return "Тег «" + field + "» используется в условии по возрасту, но значение «" + raw +
+                           "» не похоже на дату рождения. Подойдёт 01.01.1990 или 1990-01-01.";
+            }
+        return null;
+    }
+
+    /// <summary>Все условия документа, включая условия страниц, блоков, чекбоксов и групп.</summary>
+    private static IEnumerable<VisibleWhen?> AllConditions(DocumentConfig doc)
+    {
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null) continue;
+            yield return p.VisibleWhen;
+            foreach (var b in p.Blocks ?? new List<DocBlock>()) yield return b?.VisibleWhen;
+            foreach (var c in p.Checkboxes ?? new List<DocCheckbox>()) yield return c?.VisibleWhen;
+            foreach (var g in p.Groups ?? new List<DocGroup>()) yield return g?.VisibleWhen;
+        }
+        foreach (var b in doc.SignBlocks ?? new List<DocBlock>()) yield return b?.VisibleWhen;
+        foreach (var b in doc.SignBlocksBelow ?? new List<DocBlock>()) yield return b?.VisibleWhen;
     }
 
     public static List<string> Missing(DocumentConfig doc, IReadOnlyDictionary<string, string>? fields)

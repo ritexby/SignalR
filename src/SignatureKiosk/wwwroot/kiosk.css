@@ -61,7 +61,16 @@ html, body {
 
 /* Колонка, чтобы экран подписи мог занять всю высоту и отцентрировать поле по вертикали:
    при min-height в процентах это зависело от того, как браузер разрешит высоту родителя. */
-.doc-body { flex: 1; overflow-y: auto; padding: 18px 4px; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; }
+/* overflow-x: hidden обязателен вместе с переносом длинных слов: строка без пробелов
+   (звёздочки в разделителе, длинная ссылка, номер документа) иначе раздвигает область текста,
+   и страница начинает ездить пальцем вбок, хотя полосы прокрутки не видно. */
+.doc-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 18px 4px; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; }
+/* Текст приходит из внешней системы и из редактора: в нём может оказаться что угодно, в том
+   числе слово длиннее экрана. Разрываем такое слово, а не ломаем из-за него всю страницу. */
+.doc-body, .doc-body h2, .doc-text, .check .label, .group-title, .doc-title, .sign-prompt {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .doc-body h2 { font-size: clamp(1.15rem, 2.6vw, 1.6rem); margin: 0 0 14px; }
 .doc-text { font-size: var(--doc-text); line-height: var(--doc-line); white-space: pre-wrap; margin-bottom: 22px; }
 /* Curated rich-text sizes (relative to the surrounding text), used in headings and body. */
@@ -138,11 +147,6 @@ html, body {
 .scan-msg { color: #cbd5e1; font-size: 1.05rem; min-height: 1.3em; text-align: center; }
 /* Which camera reads a barcode depends on the tablet and on how it is mounted, so the client can
    switch on the spot. Sized for a finger, like everything else the client touches. */
-.scan-flip {
-  appearance: none; border: 1px solid #475569; background: #1e293b; color: #e2e8f0;
-  border-radius: 12px; padding: 14px 26px; font-size: 1.05rem; font-weight: 600; cursor: pointer;
-}
-.scan-flip:active { background: #334155; }
 .scan-result { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .scan-check { width: 68px; height: 68px; border-radius: 50%; background: var(--ok); position: relative; }
 .scan-check::after { content: ""; position: absolute; left: 50%; top: 47%; width: 17px; height: 33px; border: solid #fff; border-width: 0 6px 6px 0; transform: translate(-50%, -50%) rotate(45deg); }

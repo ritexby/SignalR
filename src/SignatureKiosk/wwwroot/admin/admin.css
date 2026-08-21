@@ -147,13 +147,38 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .field-sm { font-size: .82rem; color: var(--muted); font-weight: 600; }
 .rt-field { display: flex; flex-direction: column; gap: 6px; }
 .rt-label { font-size: .9rem; color: var(--muted); font-weight: 600; }
-.rt-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px; border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0; background: #f4f6fa; }
+.rt-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: #f4f6fa; }
+/* Панель одна на всю страницу и всплывает над редактируемым полем. Пятнадцать одинаковых
+   панелей делали карточку блока вдвое выше, а страницу вдвое длиннее. */
+/* Условие прямо в строке пункта. Пока условия нет, это один значок, и пункт занимает ровно
+   одну строку. Когда условие открывают, поля переносятся на следующую строку сами. */
+/* Пометка о несохранённых правках. Стоит рядом с «Сохранить», чтобы её нельзя было не увидеть. */
+.dirty-mark { align-self: center; font-size: .82rem; font-weight: 600; color: #b45309;
+  background: #fffaf0; border: 1px solid #fcd9a4; border-radius: 999px; padding: 4px 10px; white-space: nowrap; }
+
+.cond-age { max-width: 110px; }
+.cond-inline { flex: 0 1 auto; min-width: 0; }
+.cond-inline .cond-badge { margin: 0; white-space: nowrap; }
+.cond-inline.cond-open { flex-basis: 100%; }
+
+/* Свёрнутый элемент страницы: видна одна строка с началом текста. */
+.item-toggle { flex: 0 0 auto; }
+.item-summary { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: .9rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-collapsed > *:not(.block-mode):not(.cb-row):not(.group-head) { display: none !important; }
+.item-collapsed .seg, .item-collapsed .cb-key, .item-collapsed .cb-row label,
+.item-collapsed .cb-row input:not([data-role="cblabel"]), .item-collapsed .group-head input { display: none !important; }
+.item-collapsed { padding-top: 8px; padding-bottom: 8px; }
+
+.rt-float { position: fixed; z-index: 40; box-shadow: var(--sh3); border-color: #cbd5e1; background: #fff;
+  max-width: calc(100vw - 16px); animation: rt-in .12s ease-out; }
+@keyframes rt-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .rt-btn { min-width: 30px; height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text); font-weight: 700; cursor: pointer; font-size: .85rem; }
 .rt-btn:hover { border-color: var(--accent); }
 .rt-swatch { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(0,0,0,.2); border-radius: 4px; cursor: pointer; }
 .rt-swatch:hover { transform: scale(1.12); }
 .rt-tag { height: 28px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text); font-size: .82rem; margin-left: auto; }
-.rt-editor { min-height: 64px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 0 0 8px 8px; background: #fff; color: var(--text); line-height: 1.55; outline: none; }
+.rt-editor { min-height: 64px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); line-height: 1.55; outline: none; }
 .rt-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(22,163,74,.12); }
 /* Absolute, not relative: a size span can end up inside another one while editing, and with em
    the sizes multiplied, so pressing "A" inside a huge heading changed nothing on screen. In rem
@@ -225,6 +250,10 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .pv-heading .rt-h { font-size: 1.7em; }
 .pv-image { text-align: center; }
 .pv-image img { max-width: 100%; border-radius: 8px; }
+/* Предпросмотр повторяет планшет и в этом: длинное слово переносится, а не раздвигает окно. */
+.pv-body, .pv-text, .pv-heading, .pv-check, .pv-group-title, .pv-title, .pv-prompt {
+  overflow-wrap: anywhere; word-break: break-word; }
+.pv-body { overflow-x: hidden; }
 .pv-check { display: flex; align-items: flex-start; gap: 10px; font-size: 1.02rem; line-height: 1.45; background: #fff; border: 2px solid #e5e7eb; border-radius: 10px; padding: 10px 12px; }
 .pv-check.on { border-color: var(--accent); background: #e7f7ee; }
 .pv-box { width: 20px; height: 20px; flex: 0 0 auto; border: 2px solid #9aa3b2; border-radius: 5px; display: flex; align-items: center; justify-content: center; color: var(--accent); font-weight: 700; font-size: .85rem; background: #fff; }
@@ -552,7 +581,10 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .drag-handle:hover { color: var(--text); background: #eef2f7; }
 .drag-handle .ic { width: 17px; height: 17px; }
 .drag-handle:active { cursor: grabbing; }
-.dragging { opacity: .45; }
+/* pointer-events: none обязателен: иначе элемент под курсором это он сам, и определить, над
+   какой страницей он сейчас находится, невозможно. Без этого перенос на другую страницу молча
+   не срабатывал. */
+.dragging { opacity: .45; pointer-events: none; }
 
 /* ---- Условие в свёрнутом виде ---- */
 .cond-badge { align-self: flex-start; border: 1px dashed #b9c2d0; background: #fff; color: var(--muted); border-radius: 999px; padding: 5px 12px; font-size: .84rem; cursor: pointer; font-weight: 600; }

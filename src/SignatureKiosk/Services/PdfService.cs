@@ -293,18 +293,49 @@ public class PdfService
             {
                 if (para.Length == 0) { Gap(lineH * 0.6); continue; }
                 var line = "";
-                foreach (var word in para.Split(' '))
+                foreach (var raw in para.Split(' '))
                 {
-                    var trial = line.Length == 0 ? word : line + " " + word;
-                    if (line.Length > 0 && _gfx.MeasureString(trial, font).Width > _contentW)
+                    // Слово шире строки разрывается по символам: иначе его хвост уходит за поле.
+                    var pieces = _gfx.MeasureString(raw, font).Width > _contentW
+                        ? BreakLongWord(raw, font, _contentW)
+                        : new List<string> { raw };
+                    foreach (var word in pieces)
                     {
-                        Draw(line, font);
-                        line = word;
+                        var trial = line.Length == 0 ? word : line + " " + word;
+                        if (line.Length > 0 && _gfx.MeasureString(trial, font).Width > _contentW)
+                        {
+                            Draw(line, font);
+                            line = word;
+                        }
+                        else line = trial;
                     }
-                    else line = trial;
                 }
                 if (line.Length > 0) Draw(line, font);
             }
+        }
+
+        /// <summary>
+        /// Разбить слово, которое само по себе шире строки, на куски по ширине. Текст приходит
+        /// из внешней системы и из редактора: там встречается и разделитель из полусотни
+        /// звёздочек, и длинная ссылка. Без разрыва хвост такого слова уезжает за поле и в
+        /// подписанном документе просто пропадает, вместе со знаком препинания в конце.
+        /// </summary>
+        private List<string> BreakLongWord(string word, XFont font, double maxWidth)
+        {
+            var parts = new List<string>();
+            var current = "";
+            foreach (var ch in word)
+            {
+                var trial = current + ch;
+                if (current.Length > 0 && _gfx.MeasureString(trial, font).Width > maxWidth)
+                {
+                    parts.Add(current);
+                    current = ch.ToString();
+                }
+                else current = trial;
+            }
+            if (current.Length > 0) parts.Add(current);
+            return parts;
         }
 
         // ---------- Rich runs (bold / italic / size / colour) ----------
@@ -362,16 +393,27 @@ public class PdfService
                 for (int si = 0; si < segments.Length; si++)
                 {
                     if (si > 0) Flush(); // an explicit newline inside the run ends the line
-                    foreach (var word in segments[si].Split(' '))
+                    foreach (var raw in segments[si].Split(' '))
                     {
-                        if (word.Length == 0) continue;
-                        double ww = _gfx.MeasureString(word, font).Width;
-                        double sp = pending.Count > 0 ? space : 0;
-                        if (pending.Count > 0 && x + sp + ww > Margin + _contentW) { Flush(); sp = 0; }
-                        x += sp;
-                        pending.Add((word, font, brush, run.Italic, x, ww));
-                        x += ww;
-                        lineH = Math.Max(lineH, font.GetHeight());
+                        if (raw.Length == 0) continue;
+                        var pieces = _gfx.MeasureString(raw, font).Width > _contentW
+                            ? BreakLongWord(raw, font, _contentW)
+                            : new List<string> { raw };
+                        var first = true;
+                        foreach (var word in pieces)
+                        {
+                            double ww = _gfx.MeasureString(word, font).Width;
+                            // Пробел ставится только перед настоящим словом: куски одного
+                            // разорванного слова склеиваются без пробела, иначе разрыв читался бы
+                            // как два разных слова.
+                            double sp = pending.Count > 0 && first ? space : 0;
+                            if (pending.Count > 0 && x + sp + ww > Margin + _contentW) { Flush(); sp = 0; }
+                            x += sp;
+                            pending.Add((word, font, brush, run.Italic, x, ww));
+                            x += ww;
+                            lineH = Math.Max(lineH, font.GetHeight());
+                            first = false;
+                        }
                     }
                 }
             }

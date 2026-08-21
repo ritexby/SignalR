@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v5.1</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v5.2</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -82,6 +82,7 @@
             <button id="importDoc" class="btn btn-ghost" data-icon="upload" title="Восстановить страницы из ранее сохранённого файла">Импорт</button>
             <input id="importDocFile" type="file" accept="application/json,.json" hidden />
             <button id="saveDocument" class="btn btn-ghost" data-icon="save">Сохранить</button>
+            <span id="docDirty" class="dirty-mark hidden">есть несохранённые изменения</span>
             <span class="tb-sep"></span>
             <button id="showSlides" class="btn btn-ghost" data-icon="back">Вернуть рекламу</button>
             <button id="showDocument" class="btn btn-primary" data-icon="send">Отправить на планшет</button>

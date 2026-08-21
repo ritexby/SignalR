@@ -112,8 +112,7 @@
     scanVideo: document.getElementById("scanVideo"),
     scanMsg: document.getElementById("scanMsg"),
     scanResult: document.getElementById("scanResult"),
-    scanCode: document.getElementById("scanCode"),
-    scanFlip: document.getElementById("scanFlip")
+    scanCode: document.getElementById("scanCode")
   };
 
   function showStatus(t) { el.statusText.textContent = t; el.status.classList.remove("hidden"); }
@@ -840,21 +839,10 @@
   // command and always stopped when the screen closes, so the tablet never films silently.
   // gen invalidates a camera that is still starting when scanning has already been stopped, so a
   // stream can never be attached after the fact and keep filming behind another screen.
-  // "user" is the front camera. Remembered per tablet, because which camera actually reads a
-  // barcode depends on the hardware and on how the tablet is mounted.
-  var scan = {
-    controls: null, active: false, doneTimer: null, capTimer: null, gen: 0,
-    facing: localStorage.getItem("sk_scan_facing") === "environment" ? "environment" : "user"
-  };
-
-  // Switching cameras restarts the reader: the constraint is fixed when the stream opens.
-  if (el.scanFlip) el.scanFlip.addEventListener("click", function () {
-    scan.facing = scan.facing === "user" ? "environment" : "user";
-    try { localStorage.setItem("sk_scan_facing", scan.facing); } catch (e) { /* private mode */ }
-    var wasActive = scan.active;
-    stopScan();
-    if (wasActive) startScan();
-  });
+  // Только передняя камера. Планшет висит лицом к клиенту, код показывают в неё, и выбор
+  // камеры на экране только сбивал: нажав «другая камера», человек видел пустой кадр с
+  // обратной стороны планшета и решал, что сканирование сломалось.
+  var scan = { controls: null, active: false, doneTimer: null, capTimer: null, gen: 0, facing: "user" };
   var SCAN_MAX_MS = 90000;   // hard local cap: never film longer than this without a result
 
   function clearScanResult() {
@@ -944,13 +932,8 @@
     } catch (e) { /* fall back to all formats */ }
 
     var reader = new window.ZXingBrowser.BrowserMultiFormatReader(hints.size ? hints : undefined);
-    // Wall-mounted tablets face the client, so the front camera is the default. It is also the
-    // weaker one on most tablets, so the client can switch to the rear camera on the spot and the
-    // choice is remembered.
-    el.scanFlip.classList.remove("hidden");
-    el.scanFlip.textContent = scan.facing === "user" ? "Камера сзади" : "Камера спереди";
-    // Mirror the front camera only: the rear one already faces the same way as the client's hand.
-    el.scanVideo.classList.toggle("mirrored", scan.facing === "user");
+    // Кадр зеркалим: клиент видит себя как в зеркале и наводит код увереннее.
+    el.scanVideo.classList.add("mirrored");
     reader.decodeFromConstraints(
       { video: { facingMode: scan.facing, width: { ideal: 1920 }, height: { ideal: 1080 } } },
       el.scanVideo,
@@ -1072,7 +1055,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "5.1";
+  var APP_VERSION = "5.2";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {

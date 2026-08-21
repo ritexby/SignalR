@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "5.1";
+  var APP_VERSION = "5.2";
 
   var state = {
     slidesTarget: "all",   // кому идёт реклама: all / group:{id} / device:{id} / devices
@@ -139,6 +139,7 @@
 
   function loadTab(name) {
     if (name === "signatures") loadSignatures();
+    if (name === "document") maybeOfferDraft();
     var content = document.querySelector(".content");
     if (content) content.classList.toggle("content-wide", name === "document");
     if (name === "devices") { loadDevices(); loadKioskControl(); loadSchedule(); }
@@ -346,7 +347,13 @@
     "text1", "text2", "text3", "text4", "text5", "text6", "text7", "text8", "text9", "text10"];
   // Curated colour palette (matches the tablet and the PDF renderer).
   var RT_COLORS = ["#1a1c22", "#16a34a", "#dc2626", "#2563eb", "#ea580c", "#7c3aed", "#0d9488", "#6b7280"];
-  var COND_OPS = [["eq", "равно"], ["ne", "не равно"], ["empty", "пусто"], ["notempty", "не пусто"], ["in", "одно из (через запятую)"]];
+  // Возраст считается из даты рождения: внешняя система присылает только ДР, а документу нужно
+  // знать, младше ли человек четырнадцати, чтобы показать блок для законных представителей.
+  // Две операции, а не четыре: «младше N» и «N и старше» делят людей ровно надвое.
+  var COND_OPS = [["eq", "равно"], ["ne", "не равно"], ["empty", "пусто"], ["notempty", "не пусто"],
+    ["in", "одно из (через запятую)"], ["agelt", "возраст меньше, лет"], ["agege", "возраст от, лет"]];
+  var AGE_OPS = ["agelt", "agege"];
+  function isAgeOp(op) { return AGE_OPS.indexOf(op) >= 0; }
   // Tags that only ever carry a fixed set of values. Offering them as a list removes the guesswork
   // (was it "M" or "муж"? "да" or "yes"?) and the typo that silently makes a condition never match.
   // Подписи значений для человека: на проводе пол остаётся M и F, потому что так его шлёт
@@ -394,7 +401,23 @@
   }
   var OTHER_OPTION = "\u0000other";   // cannot collide with a real tag or value
 
-  function loadDoc() { return apiJson("/document").then(function (d) { state.doc = d; renderDoc(); }); }
+  function loadDoc() {
+    return apiJson("/document").then(function (d) {
+      state.doc = d; renderDoc(); docLoaded = true;
+      // Черновик предлагается, только когда открыта вкладка документа: окно поверх «Слайдов»
+      // перекрывало бы вкладки и мешало тому, кто про документ сейчас и не думает.
+      if (document.querySelector('[data-panel="document"]:not(.hidden)')) maybeOfferDraft();
+    });
+  }
+
+  var docLoaded = false;
+  var draftOffered = false;
+
+  function maybeOfferDraft() {
+    if (draftOffered || !docLoaded) return;
+    draftOffered = true;
+    offerDraft();
+  }
   function renderDoc() {
     $("docTitle").value = state.doc.title || ""; $("signPrompt").value = state.doc.signPrompt || ""; $("thankYou").value = state.doc.thankYouText || "";
     $("idleReturn").value = state.doc.idleReturnSec != null ? state.doc.idleReturnSec : 180;
@@ -740,31 +763,98 @@
     b.addEventListener("click", function (e) { e.preventDefault(); fn(); });
     return b;
   }
+  // ---------- Панель оформления ----------
+  // Панель одна на всю страницу и всплывает над тем полем, которое редактируется. Раньше своя
+  // панель была у каждого блока и каждого заголовка: на документе из пяти страниц это
+  // пятнадцать одинаковых панелей и больше двухсот кнопок, из-за которых карточка блока
+  // становилась вдвое выше, а вся страница растягивалась на девять экранов.
+  var rtBar = null;      // сама панель
+  var rtTarget = null;   // поле, к которому она сейчас относится
+
+  function rtCommand(fn) {
+    return function () { if (rtTarget) fn(rtTarget); };
+  }
+
+  function buildRtBar() {
+    var bar = el("div", "rt-toolbar rt-float"); bar.setAttribute("data-role", "rtbar");
+    bar.appendChild(tbBtn("Ж", "Жирный", rtCommand(function (ed) {
+      if (insideEditor(ed)) { document.execCommand("bold", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); }
+    })));
+    bar.appendChild(tbBtn("К", "Курсив", rtCommand(function (ed) {
+      if (insideEditor(ed)) { document.execCommand("italic", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); }
+    }), true));
+    bar.appendChild(tbBtn("A", "Обычный размер", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-n"; }, "size"); })));
+    bar.appendChild(tbBtn("A+", "Крупный", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-l"; }, "size"); })));
+    bar.appendChild(tbBtn("A++", "Огромный", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-h"; }, "size"); })));
+    RT_COLORS.forEach(function (c) {
+      var sw = el("button", "rt-swatch"); sw.type = "button"; sw.style.background = c; sw.title = "Цвет " + c;
+      sw.addEventListener("mousedown", function (e) { e.preventDefault(); });
+      sw.addEventListener("click", function (e) {
+        e.preventDefault();
+        if (rtTarget) wrapSelection(rtTarget, function (s) { s.style.color = c; }, "color");
+      });
+      bar.appendChild(sw);
+    });
+    bar.appendChild(tbBtn("○", "Цвет по умолчанию", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.style.color = "inherit"; }, "color"); })));
+    bar.appendChild(tbBtn("¶", "Склеить перенесённые строки: абзацы останутся абзацами, а разрывы посреди предложения уйдут. Нужно после копирования из PDF, где каждая строка приходит отдельной.",
+      rtCommand(function (ed) { unwrapLines(ed); })));
+    var tsel = el("select", "rt-tag"); tsel.appendChild(new Option("+ тег", ""));
+    KNOWN_FIELDS.forEach(function (f) { tsel.appendChild(new Option(f, f)); });
+    // mousedown с preventDefault нельзя: список тогда не открывается. Поле не теряет выделение,
+    // потому что при возврате фокуса оно восстанавливается сохранённым диапазоном.
+    tsel.addEventListener("change", function () {
+      if (tsel.value && rtTarget) { insertTag(rtTarget, tsel.value); }
+      tsel.value = "";
+    });
+    bar.appendChild(tsel);
+    document.body.appendChild(bar);
+    return bar;
+  }
+
+  function placeRtBar() {
+    if (!rtBar || !rtTarget || rtBar.classList.contains("hidden")) return;
+    var r = rtTarget.getBoundingClientRect();
+    var barH = rtBar.offsetHeight || 40;
+    var top = document.querySelector(".topbar");
+    var minTop = (top ? top.offsetHeight : 0) + 6;
+    // Панель стоит над полем. Если поле уехало под шапку, панель остаётся у шапки, чтобы не
+    // исчезнуть вместе с началом длинного блока.
+    var y = r.top - barH - 6;
+    if (y < minTop) y = Math.min(minTop, Math.max(minTop, r.bottom - barH - 6));
+    if (r.bottom < minTop || r.top > window.innerHeight - 20) { rtBar.classList.add("hidden"); return; }
+    var x = Math.max(8, Math.min(r.left, window.innerWidth - rtBar.offsetWidth - 8));
+    rtBar.style.top = Math.round(y) + "px";
+    rtBar.style.left = Math.round(x) + "px";
+  }
+
+  function showRtBar(ed) {
+    if (!rtBar) rtBar = buildRtBar();
+    rtTarget = ed;
+    rtBar.classList.remove("hidden");
+    placeRtBar();
+  }
+
+  function hideRtBar() {
+    if (rtBar) rtBar.classList.add("hidden");
+    rtTarget = null;
+  }
+
+  // Панель показывается по фокусу в поле и прячется, когда фокус ушёл и из поля, и из неё.
+  document.addEventListener("focusin", function (e) {
+    var ed = e.target.closest ? e.target.closest(".rt-editor") : null;
+    if (ed) { showRtBar(ed); return; }
+    if (rtBar && rtBar.contains(e.target)) return;
+    hideRtBar();
+  });
+  window.addEventListener("scroll", function () { placeRtBar(); }, true);
+  window.addEventListener("resize", function () { placeRtBar(); });
+
   function richEditor(labelText, runs, role) {
     var wrap = el("div", "rt-field");
     if (labelText) wrap.appendChild(el("div", "rt-label", labelText));
     var ed = el("div", "rt-editor"); ed.contentEditable = "true"; ed.setAttribute("data-role", role); ed.innerHTML = runsToHtml(runs);
     attachPasteGuard(ed);
-    var bar = el("div", "rt-toolbar");
-    bar.appendChild(tbBtn("Ж", "Жирный", function () { if (insideEditor(ed)) { document.execCommand("bold", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); } }));
-    bar.appendChild(tbBtn("К", "Курсив", function () { if (insideEditor(ed)) { document.execCommand("italic", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); } }, true));
-    bar.appendChild(tbBtn("A", "Обычный размер", function () { wrapSelection(ed, function (s) { s.className = "rt-n"; }, "size"); }));
-    bar.appendChild(tbBtn("A+", "Крупный", function () { wrapSelection(ed, function (s) { s.className = "rt-l"; }, "size"); }));
-    bar.appendChild(tbBtn("A++", "Огромный", function () { wrapSelection(ed, function (s) { s.className = "rt-h"; }, "size"); }));
-    RT_COLORS.forEach(function (c) {
-      var sw = el("button", "rt-swatch"); sw.type = "button"; sw.style.background = c; sw.title = "Цвет " + c;
-      sw.addEventListener("mousedown", function (e) { e.preventDefault(); });
-      sw.addEventListener("click", function (e) { e.preventDefault(); wrapSelection(ed, function (s) { s.style.color = c; }, "color"); });
-      bar.appendChild(sw);
-    });
-    bar.appendChild(tbBtn("○", "Цвет по умолчанию", function () { wrapSelection(ed, function (s) { s.style.color = "inherit"; }, "color"); }));
-    bar.appendChild(tbBtn("¶", "Склеить перенесённые строки: абзацы останутся абзацами, а разрывы посреди предложения уйдут. Нужно после копирования из PDF, где каждая строка приходит отдельной.",
-      function () { unwrapLines(ed); }));
-    var tsel = el("select", "rt-tag"); tsel.appendChild(new Option("+ тег", ""));
-    KNOWN_FIELDS.forEach(function (f) { tsel.appendChild(new Option(f, f)); });
-    tsel.addEventListener("change", function () { if (tsel.value) { insertTag(ed, tsel.value); tsel.value = ""; } });
-    bar.appendChild(tsel);
-    wrap.appendChild(bar); wrap.appendChild(ed);
+    wrap.appendChild(ed);
     return wrap;
   }
 
@@ -850,6 +940,8 @@
         var known = fieldValues(f);
         if (dk.checks.indexOf(f) >= 0) known = ["true", "false"];
         else if (Object.prototype.hasOwnProperty.call(dk.groups, f)) known = dk.groups[f].slice();
+        // У возраста значение это число лет: список значений тега тут ни при чём.
+        if (isAgeOp(op.value)) known = null;
         // «одно из» принимает список через запятую, одним выбором его не выразить.
         var listable = known && op.value !== "in";
         valSel.innerHTML = "";
@@ -867,6 +959,14 @@
 
       function syncRow() {
         fldOther.style.display = fld.value === OTHER_OPTION ? "" : "none";
+        // Возраст вводится числом, а не текстом: так в поле не окажется «четырнадцать».
+        if (isAgeOp(op.value)) {
+          val.type = "number"; val.min = "0"; val.max = "130"; val.placeholder = "лет";
+          val.classList.add("cond-age");
+        } else {
+          val.type = "text"; val.removeAttribute("min"); val.removeAttribute("max");
+          val.placeholder = "значение"; val.classList.remove("cond-age");
+        }
         var needsValue = op.value !== "empty" && op.value !== "notempty";
         valSel.style.display = needsValue && valSel.options.length ? "" : "none";
         val.style.display = needsValue && (!valSel.options.length || valSel.value === OTHER_OPTION) ? "" : "none";
@@ -933,6 +1033,8 @@
       var opName = "";
       COND_OPS.forEach(function (o) { if (o[0] === c.op) opName = o[1]; });
       if (c.op === "empty" || c.op === "notempty") return "«" + c.field + "» " + opName;
+      if (c.op === "agelt") return "возраст по «" + c.field + "» меньше " + (c.value || "?") + " лет";
+      if (c.op === "agege") return "возраст по «" + c.field + "» от " + (c.value || "?") + " лет";
       return "«" + c.field + "» " + opName + " " + (valueLabel(c.field, c.value) || "(пусто)");
     }
     function describe() {
@@ -1097,6 +1199,42 @@
     }
   }
 
+  // Сворачивание элемента страницы в одну строку. Блок с абзацем текста занимает полтора
+  // сантиметра высоты, и на документе из тридцати элементов страница растягивается на девять
+  // экранов, по которым невозможно ориентироваться. Свёрнутый элемент показывает начало своего
+  // текста, и его видно в общем списке рядом с соседями.
+  function addItemCollapse(card, summaryOf) {
+    var head = card.querySelector(".drag-handle");
+    if (!head || !head.parentNode) return;
+    var toggle = el("button", "page-toggle item-toggle"); toggle.type = "button";
+    toggle.appendChild(icon("down"));
+    var summary = el("span", "item-summary");
+
+    function sync() {
+      var off = card.classList.contains("item-collapsed");
+      toggle.innerHTML = ""; toggle.appendChild(icon(off ? "right" : "down"));
+      toggle.title = off ? "Развернуть" : "Свернуть";
+      summary.textContent = off ? summaryOf() : "";
+      summary.classList.toggle("hidden", !off);
+    }
+    toggle.addEventListener("click", function () {
+      card.classList.toggle("item-collapsed");
+      sync();
+    });
+    card.setCollapsed = function (v) { card.classList.toggle("item-collapsed", !!v); sync(); };
+
+    head.parentNode.insertBefore(toggle, head.nextSibling);
+    head.parentNode.insertBefore(summary, toggle.nextSibling);
+    sync();
+  }
+
+  /// Короткая выжимка из набора фрагментов: начало текста, чтобы элемент узнавался в списке.
+  function shortRuns(runs, max) {
+    var t = (runs || []).map(function (r) { return (r && r.text) || ""; }).join("").replace(/\s+/g, " ").trim();
+    if (!t) return "(пусто)";
+    return t.length > (max || 90) ? t.slice(0, max || 90) + "…" : t;
+  }
+
   function blockCard(b) {
     b = b || {};
     var bc = el("div", "block-card page-item"); bc.setAttribute("data-role", "blockcard");
@@ -1152,6 +1290,11 @@
     var del = iconBtn("trash", "Удалить блок", "btn-danger btn-sm");
     del.addEventListener("click", function () { removeItem(bc); });
     bc.appendChild(del);
+    addItemCollapse(bc, function () {
+      if (bc.getAttribute("data-mode") === "image") return "картинка";
+      var ed = bc.querySelector('[data-role="blockbody"]');
+      return shortRuns(ed ? editorToRuns(ed) : []);
+    });
     return bc;
   }
 
@@ -1283,6 +1426,15 @@
         problems.push({ level: "warn", text: where + ": условие ссылается на «" + f + "». Такого имени нет ни среди стандартных тегов, ни среди чекбоксов документа. Это сработает, только если внешняя система пришлёт поле с точно таким именем; иначе блок не покажется никогда." });
       if (cond.op !== "empty" && cond.op !== "notempty" && !String(cond.value || "").trim())
         problems.push({ level: "error", text: where + ": в условии не задано значение." });
+      if (isAgeOp(cond.op)) {
+        var лет = parseInt(cond.value, 10);
+        if (!(лет >= 0 && лет <= 130))
+          problems.push({ level: "error", text: where + ": в условии по возрасту нужно число лет, а стоит «" + cond.value + "»." });
+        if (isKey)
+          problems.push({ level: "error", text: where + ": возраст считается по дате рождения, а «" + f + "» это чекбокс документа, а не дата." });
+        else if (!/^(ДР|дата рождения|birth|dob)$/i.test(f))
+          problems.push({ level: "warn", text: where + ": возраст считается по «" + f + "». Убедитесь, что в этом теге приходит дата рождения, например 01.01.1990." });
+      }
       if (isKey && keys.groups[f] && cond.op !== "empty" && cond.op !== "notempty") {
         var opts = keys.groups[f];
         if (opts.length && opts.indexOf(cond.value) < 0)
@@ -1390,19 +1542,49 @@
       });
     }
 
+    // Список, над которым сейчас курсор. Для элементов страницы это может быть другая страница:
+    // перенести пункт со страницы 4 на страницу 2 иначе можно было только удалив и набрав
+    // заново. Для самих страниц список всегда один.
+    function listUnder(e) {
+      if (list.getAttribute("data-role") !== "itemlist") return list;
+      var under = document.elementFromPoint(e.clientX, e.clientY);
+      var other = under && under.closest ? under.closest('[data-role="itemlist"]') : null;
+      return other || list;
+    }
+
+    // Автопрокрутка у края окна. Без неё перенести пункт со страницы 1 на страницу 4 нельзя
+    // физически: обе страницы одновременно на экран не помещаются, а курсор за окно не выходит.
+    var edgeTimer = null;
+    function edgeScroll(y) {
+      var зона = 90, шаг = 0;
+      if (y < зона) шаг = -Math.ceil((зона - y) / 4);
+      else if (y > window.innerHeight - зона) шаг = Math.ceil((y - (window.innerHeight - зона)) / 4);
+      if (!шаг) { stopEdge(); return; }
+      if (edgeTimer) return;
+      edgeTimer = setInterval(function () {
+        if (!item) { stopEdge(); return; }
+        window.scrollBy(0, шаг);
+      }, 16);
+    }
+    function stopEdge() { if (edgeTimer) { clearInterval(edgeTimer); edgeTimer = null; } }
+
     function onMove(e) {
       if (!item) return;
       moved = true;
       var y = e.clientY;
-      var others = itemsOf().filter(function (n) { return n !== item; });
+      edgeScroll(y);
+      var target = listUnder(e);
+      var others = Array.prototype.slice.call(target.children).filter(function (n) {
+        return n !== item && n.matches && n.matches(itemSelector);
+      });
       var before = null;
       // Первый сосед, чья середина ниже курсора: перед ним и встаём.
       for (var i = 0; i < others.length; i++) {
         var r = others[i].getBoundingClientRect();
         if (y < r.top + r.height / 2) { before = others[i]; break; }
       }
-      if (before) { if (item.nextSibling !== before) list.insertBefore(item, before); }
-      else if (list.lastElementChild !== item) list.appendChild(item);
+      if (before) { if (item.nextSibling !== before) target.insertBefore(item, before); }
+      else if (target.lastElementChild !== item) target.appendChild(item);
       e.preventDefault();
     }
 
@@ -1410,15 +1592,22 @@
       document.removeEventListener("mousemove", onMove, true);
       document.removeEventListener("mouseup", onUp, true);
       document.body.classList.remove("dragging-now");
+      stopEdge();
       if (!item) return;
       item.classList.remove("dragging");
       var wasMoved = moved;
+      var landed = item.parentNode;
       item = null; moved = false;
       if (!wasMoved) return;
       // Порядок изменился: перечитываем документ из DOM. Для страниц ещё и перерисовываем,
       // иначе номера страниц и оглавление разойдутся с тем, что на экране.
       if (list === $("pagesEditor")) { collectDoc(); collapsedPages = {}; renderPages(); }
-      else if (list.getAttribute("data-role") === "itemlist") normalizeBars(list);
+      else if (list.getAttribute("data-role") === "itemlist") {
+        // Полосы вставки пересобираются в обоих списках: и там, откуда унесли, и там, куда
+        // положили, иначе в одном из них полосы окажутся подряд.
+        normalizeBars(list);
+        if (landed && landed !== list && landed.getAttribute("data-role") === "itemlist") normalizeBars(landed);
+      }
       updatePlaceholders();
     }
 
@@ -1766,9 +1955,14 @@
     reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательный")); row.appendChild(reqLabel);
     var chkLabel = el("label"); var chk = el("input"); chk.type = "checkbox"; chk.checked = !!cb.checked; chk.setAttribute("data-role", "cbchecked");
     chkLabel.appendChild(chk); chkLabel.appendChild(document.createTextNode(" отмечен")); row.appendChild(chkLabel);
+    // Условие стоит в той же строке, а не под ней: пункт это одна строка, и вторая строка
+    // с одной кнопкой «+ условие показа» удваивала высоту списка на ровном месте. Когда
+    // условие задано, значок разворачивается в поля и строка временно становится выше.
+    var cond = conditionEditor(cb.visibleWhen, "cbcond");
+    cond.classList.add("cond-inline");
+    row.appendChild(cond);
     var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { removeItem(box); }); row.appendChild(del);
     box.appendChild(row);
-    box.appendChild(conditionEditor(cb.visibleWhen, "cbcond"));
     return box;
   }
 
@@ -1795,6 +1989,13 @@
     var reqLabel = el("label"); var req = el("input"); req.type = "checkbox"; req.checked = !!g.required; req.setAttribute("data-role", "greq");
     reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательно выбрать")); head.appendChild(reqLabel);
     var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { removeItem(card); }); head.appendChild(del);
+    setTimeout(function () {
+      addItemCollapse(card, function () {
+        var t = (card.querySelector('[data-role="gtitle"]') || {}).value || "";
+        var n = card.querySelectorAll('[data-role="optrow"]').length;
+        return (t || "(без заголовка)") + "   ·   вариантов: " + n;
+      });
+    }, 0);
     card.appendChild(head);
 
     var opts = el("div", "opt-list"); opts.setAttribute("data-role", "optlist");
@@ -1861,7 +2062,103 @@
     scrollToCard(cards[cards.length - 1]);
   }
   $("addPage").addEventListener("click", addPage);
-  $("saveDocument").addEventListener("click", function () { collectDoc(); apiSend("/document", "PUT", state.doc).then(function () { toast("Документ сохранён"); }); });
+  $("saveDocument").addEventListener("click", function () { saveDoc().then(function () { toast("Документ сохранён"); }); });
+
+  // ---- Защита несохранённого ----
+  // Документ пишется на сервер только по кнопке. Закрытая вкладка, обновление страницы или
+  // упавший браузер до этого момента уносили с собой всю работу, и ничто об этом не
+  // предупреждало. Теперь правки видно в шапке, браузер спрашивает при уходе, а черновик
+  // лежит в самом браузере и предлагается к восстановлению.
+  var DRAFT_KEY = "sk_doc_draft";
+  var dirty = false;
+  var draftTimer = null;
+
+  function markDirty() {
+    if (!dirty) { dirty = true; syncDirty(); }
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraft, 1200);
+  }
+
+  function syncDirty() {
+    var btn = $("saveDocument");
+    if (btn) {
+      btn.classList.toggle("btn-primary", dirty);
+      btn.classList.toggle("btn-ghost", !dirty);
+      btn.title = dirty ? "Есть несохранённые изменения" : "Изменений нет";
+    }
+    var mark = $("docDirty");
+    if (mark) mark.classList.toggle("hidden", !dirty);
+  }
+
+  function saveDraft() {
+    try {
+      collectDoc();
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ at: Date.now(), doc: state.doc }));
+    } catch (e) { /* приватный режим или переполнение: черновик просто не сохранится */ }
+  }
+
+  function dropDraft() {
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* нечего убирать */ }
+  }
+
+  function saveDoc() {
+    collectDoc();
+    return apiSend("/document", "PUT", state.doc).then(function (r) {
+      dirty = false; syncDirty(); dropDraft();
+      return r;
+    });
+  }
+
+  // Любая правка внутри вкладки документа считается изменением: перечислять поля по одному
+  // значило бы однажды забыть новое и снова терять работу молча.
+  (function () {
+    var panel = document.querySelector('[data-panel="document"]');
+    if (!panel) return;
+    ["input", "change"].forEach(function (ev) {
+      panel.addEventListener(ev, function (e) {
+        if (e.target.closest && e.target.closest(".preview-setup, .preview-wrap")) return;
+        markDirty();
+      });
+    });
+    panel.addEventListener("click", function (e) {
+      // Добавление, удаление и перетаскивание тоже меняют документ, а событий ввода не дают.
+      if (e.target.closest && e.target.closest(".insert-chip, .btn-danger, .btn-add, #addPage, .page-toggle, .item-toggle"))
+        markDirty();
+    });
+  })();
+
+  window.addEventListener("beforeunload", function (e) {
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = "";
+    return "";
+  });
+
+  /// Черновик предлагается, только если он новее и отличается от того, что на сервере.
+  function offerDraft() {
+    var raw = null;
+    try { raw = localStorage.getItem(DRAFT_KEY); } catch (e) { return; }
+    if (!raw) return;
+    var draft = null;
+    try { draft = JSON.parse(raw); } catch (e) { dropDraft(); return; }
+    if (!draft || !draft.doc) { dropDraft(); return; }
+    if (JSON.stringify(draft.doc) === JSON.stringify(state.doc)) { dropDraft(); return; }
+
+    var c = el("div");
+    c.appendChild(el("h3", null, "Есть несохранённый черновик"));
+    c.appendChild(el("p", "sig-meta",
+      "В браузере остались правки от " + new Date(draft.at).toLocaleString("ru-RU") +
+      ", которые не были сохранены на сервер. Восстановить их или продолжить с того, что на сервере?"));
+    var restore = iconBtn("upload", "Восстановить черновик", "btn-primary");
+    restore.addEventListener("click", function () {
+      state.doc = draft.doc; renderDoc(); dirty = true; syncDirty(); closeModal();
+      toast("Черновик восстановлен. Не забудьте сохранить.");
+    });
+    var drop = iconBtn("trash", "Отказаться от черновика", "btn-ghost");
+    drop.addEventListener("click", function () { dropDraft(); closeModal(); });
+    c.appendChild(restore); c.appendChild(drop);
+    openModal(c);
+  }
 
   // ---- Preview: see the document exactly as the tablet will render it ----
   // Values are entered by the operator, resolved on the server (same code path as a real show),
@@ -2275,8 +2572,7 @@
   // ---- Backup: export all pages to a file, import them back ----
   // Export saves what is currently in the editor, so unsaved edits are included in the backup.
   $("exportDoc").addEventListener("click", function () {
-    collectDoc();
-    apiSend("/document", "PUT", state.doc).then(function () {
+    saveDoc().then(function () {
       var payload = { kind: "helix-signtablet-document", version: 1, exportedUtc: new Date().toISOString(), document: state.doc };
       var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       var url = URL.createObjectURL(blob);
@@ -2313,11 +2609,26 @@
     reader.readAsText(file);
   });
 
+  // Планшет из адресата вида device:{id}. Нужно, чтобы сказать, на связи он или нет: от этого
+  // зависит, увидит ли клиент документ сейчас или он дождётся подключения.
+  function targetDevice(target) {
+    var id = String(target || "").replace(/^device:/, "");
+    return state.devices.filter(function (d) { return d.id === id; })[0] || null;
+  }
+
   function doShowDocument(fields) {
+    var dev = targetDevice(state.docTarget);
     apiSend("/show-document", "POST", { target: state.docTarget, fields: fields })
       .then(function (r) { return r.json(); })
       .then(function (j) {
-        toast("Документ показан (" + targetLabel(state.docTarget) + ")");
+        // Говорим то, что произошло на самом деле. Планшету не на связи документ сохраняется и
+        // появится при подключении, а сообщение «документ показан» заставляло оператора идти
+        // смотреть на экран, где ничего не изменилось.
+        if (dev && !dev.online) {
+          toast("Отправлено, но планшет «" + dev.name + "» сейчас не на связи. Документ появится, как только он подключится.");
+        } else {
+          toast("Документ показан (" + targetLabel(state.docTarget) + ")");
+        }
         if (j && j.missingPlaceholders && j.missingPlaceholders.length)
           setTimeout(function () { toast("Не заполнены: " + j.missingPlaceholders.join(", ")); }, 1500);
       });
@@ -2325,7 +2636,13 @@
   function openFieldsModal(placeholders) {
     var c = el("div");
     c.appendChild(el("h3", null, "Данные для документа"));
+    var dev = targetDevice(state.docTarget);
     c.appendChild(el("p", "sig-meta", "Значения подставятся в плейсхолдеры и отправятся на: " + targetLabel(state.docTarget)));
+    // Состояние адресата видно до отправки, а не выясняется по молчащему экрану.
+    if (dev && !dev.online)
+      c.appendChild(el("div", "note-box note-warn",
+        "Планшет «" + dev.name + "» сейчас не на связи. Документ сохранится и появится на нём, как только он подключится. " +
+        "Если нужно показать прямо сейчас, выберите другой планшет в списке над кнопками."));
     var inputs = {};
     placeholders.forEach(function (k) {
       var known = fieldValues(k);
@@ -2374,7 +2691,7 @@
     if (!/^device:/.test(state.docTarget)) { toast("Выберите планшет. Документ показывается только на один планшет."); return; }
     collectDoc();
     var proceed = function () {
-      apiSend("/document", "PUT", state.doc).then(function () {
+      saveDoc().then(function () {
         // Именно previewFields, а не только теги из текста: тег, использованный лишь в условии,
         // иначе не спрашивался, значение уходило пустым, и блок молча не показывался.
         var fields = previewFields();
@@ -3574,7 +3891,7 @@
     },
     {
       method: "POST", path: "/api/ext/show-document",
-      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, Пол (M/F), email, telephone, document, date, cross-border, urine, UG (true/false), text1..text10. Булевы теги принимают только true или false, в любом виде: настоящий JSON-булев true, либо строку true в кавычках, регистр не важен. Другое значение возвращает ошибку с именем тега, а не молчаливо скрытый блок. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Имена тегов сравниваются без учёта регистра: пол, Пол и ПОЛ это один и тот же тег. Массив checkboxes задаёт пункты согласия: если key совпадает с именем чекбокса в документе, задаётся его начальное состояние прямо на своём месте; если такого имени в документе нет, пункт добавляется в конец страницы, помеченной как приёмник, и тогда нужен label. Массив groups задаёт выбор в двойных зависимых чекбоксах: key - имя группы в документе, selected - имя выбранного варианта, пустая строка означает, что не выбрано ничего. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId: показать документ не на том экране хуже, чем вернуть ошибку). В ответе missingPlaceholders - какие теги не переданы.",
+      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, Пол (M/F), email, telephone, document, date, cross-border, urine, UG (true/false), text1..text10. Булевы теги принимают только true или false, в любом виде: настоящий JSON-булев true, либо строку true в кавычках, регистр не важен. Другое значение возвращает ошибку с именем тега, а не молчаливо скрытый блок. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Есть условия по возрасту: он считается из даты рождения на сервере, поэтому присылать нужно только ДР, а документ сам решит, показывать ли блок для законных представителей (например «возраст меньше 14 лет»). Дата принимается как 01.01.1990 или 1990-01-01; если её не удалось разобрать, приходит ошибка с именем тега, а не молча скрытый блок. Имена тегов сравниваются без учёта регистра: пол, Пол и ПОЛ это один и тот же тег. Массив checkboxes задаёт пункты согласия: если key совпадает с именем чекбокса в документе, задаётся его начальное состояние прямо на своём месте; если такого имени в документе нет, пункт добавляется в конец страницы, помеченной как приёмник, и тогда нужен label. Массив groups задаёт выбор в двойных зависимых чекбоксах: key - имя группы в документе, selected - имя выбранного варианта, пустая строка означает, что не выбрано ничего. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId: показать документ не на том экране хуже, чем вернуть ошибку). В ответе missingPlaceholders - какие теги не переданы.",
       sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","Пол":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026",\n                 "cross-border":true,"urine":true,"UG":false,\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"key":"consent","checked":true},\n                     {"label":"Согласен на рассылку","checked":false,"required":false}],\n       "groups":[{"key":"transfer","selected":"deny"}]}\' \\\n  {BASE}/api/ext/show-document'
     },
     {

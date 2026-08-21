@@ -668,6 +668,8 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
     if (badField is not null) return Results.BadRequest(new { error = badField });
     var doc = dto?.Document ?? storage.GetDocument();
     DocumentTemplating.Sanitize(doc);
+    var badDate = DocumentTemplating.ValidateAgeFields(doc, dto?.Fields);
+    if (badDate is not null) return Results.BadRequest(new { error = badDate });
 
     // Разбор ровно такой же, как при показе на планшет, иначе предпросмотр обещал бы одно, а
     // клиент видел другое. Чекбокс с именем, которое есть в документе, задаёт состояние тому
@@ -985,6 +987,8 @@ admin.MapPost("/show-document", async (ShowDocumentDto dto, KioskCoordinator coo
         return Results.BadRequest(new { error = "Документ показывается только на один планшет. Выберите планшет." });
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
+    var badDate = DocumentTemplating.ValidateAgeFields(storage.GetDocument(), dto?.Fields);
+    if (badDate is not null) return Results.BadRequest(new { error = badDate });
     await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups);
     var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
     return Results.Ok(new { ok = true, missingPlaceholders = missing });
@@ -1137,6 +1141,8 @@ ext.MapPost("/show-document", async (ExtShowDocumentDto dto, KioskCoordinator co
 {
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
+    var badDate = DocumentTemplating.ValidateAgeFields(storage.GetDocument(), dto?.Fields);
+    if (badDate is not null) return Results.BadRequest(new { error = badDate });
     var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
     if (deviceId is null)
         return Results.Json(new { error }, statusCode: status);
