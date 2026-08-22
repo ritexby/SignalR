@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v6.0</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v6.4</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -74,6 +74,13 @@
           <label class="target-inline">Планшет:
             <select id="docTarget"></select>
           </label>
+          <!-- Смотреть экран стоит рядом с выбором планшета: относится оно именно к нему, а не к
+               документу. Открывается отдельным окном браузера, чтобы редактор остался на месте. -->
+          <button id="watchDoc" class="btn btn-ghost" data-icon="eye" title="Открыть отдельным окном то, что сейчас на экране выбранного планшета. Только просмотр">Смотреть экран планшета</button>
+          <span class="tb-sep"></span>
+          <button id="exportDoc" class="btn btn-ghost" data-icon="download" title="Сохранить весь документ в файл, вместе с картинками и настройками PDF">Экспорт</button>
+          <button id="importDoc" class="btn btn-ghost" data-icon="upload" title="Восстановить документ из ранее сохранённого файла">Импорт</button>
+          <input id="importDocFile" type="file" accept="application/json,.json" hidden />
           <!-- Пометка стоит слева, где есть свободное место: внутри ряда кнопок она раздвигала
                его и «Отправить на планшет» уезжала на вторую строку. -->
           <span id="docDirty" class="dirty-mark hidden">есть несохранённые изменения</span>
@@ -81,14 +88,14 @@
             <button id="checkDoc" class="btn btn-ghost" data-icon="shield" title="Найти ошибки в документе до того, как он попадёт к клиенту">Проверить</button>
             <button id="previewDoc" class="btn btn-ghost" data-icon="eye" title="Посмотреть, как документ будет выглядеть на планшете, с тестовыми значениями тегов">Предпросмотр</button>
             <button id="pdfLayout" class="btn btn-ghost" data-icon="page" title="Показать листы будущего PDF и расставить на них подписи мышью">PDF</button>
+            <button id="apiTest" class="btn btn-ghost" data-icon="send" title="Вставить запрос, как будто он пришёл по API, и выполнить его целиком">API</button>
             <span class="tb-sep"></span>
-            <button id="exportDoc" class="btn btn-ghost" data-icon="download" title="Сохранить все страницы в файл как резервную копию">Экспорт</button>
-            <button id="importDoc" class="btn btn-ghost" data-icon="upload" title="Восстановить страницы из ранее сохранённого файла">Импорт</button>
-            <input id="importDocFile" type="file" accept="application/json,.json" hidden />
             <button id="saveDocument" class="btn btn-ghost" data-icon="save">Сохранить</button>
             <span class="tb-sep"></span>
-            <button id="showSlides" class="btn btn-ghost" data-icon="back">Вернуть рекламу</button>
-            <button id="showDocument" class="btn btn-primary" data-icon="send">Отправить на планшет</button>
+            <button id="showSlides" class="btn btn-ghost" data-icon="back"
+                    title="Вернуть выбранный планшет к показу рекламы и стереть на нём данные подписанта">Вернуть рекламу</button>
+            <button id="showDocument" class="btn btn-primary" data-icon="send"
+                    title="Показать документ на выбранном планшете. Документ всегда уходит только на один планшет">Отправить на планшет</button>
           </div>
         </div>
         <div id="docNoDevices" class="note-box note-warn hidden">
@@ -110,9 +117,6 @@
           <div class="doc-extra">
             <label class="field">Текст над полем подписи
               <input id="signPrompt" type="text" />
-            </label>
-            <label class="field">Текст экрана «Спасибо»
-              <input id="thankYou" type="text" />
             </label>
             <label class="field">Автовозврат к рекламе, сек
               <input id="idleReturn" type="number" min="0" max="3600" />

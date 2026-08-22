@@ -306,7 +306,13 @@ public class AlertMonitor : BackgroundService
     }
 
     // Enough to keep a fleet check short without flooding a small office switch.
-    private const int MaxParallelHealthChecks = 8;
+    // Сколько планшетов опрашивается одновременно. Считается от худшего случая: весь парк
+    // выключен, и каждый ответ стоит полного времени ожидания. Оператор вправе поставить его
+    // до тридцати секунд, значит при двухстах планшетах и восьми за раз проход занимал бы
+    // 200 / 8 * 30 = 750 секунд, вчетверо дольше своего же пятиминутного шага: проходы шли бы
+    // встык, а опрос никогда не заканчивался. При тридцати двух худший случай укладывается в
+    // 210 секунд. Для сервера это тридцать два коротких запроса в локальную сеть, не нагрузка.
+    private const int MaxParallelHealthChecks = 32;
 
     /// <summary>Read health from every tablet at once, a few at a time.</summary>
     private async Task<List<(Device Device, KioskHealth Health)>> PollHealthAsync(

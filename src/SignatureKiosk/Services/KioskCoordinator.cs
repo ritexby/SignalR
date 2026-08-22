@@ -17,12 +17,16 @@ public class KioskCoordinator
     private readonly IHubContext<KioskHub> _hub;
     private readonly StorageService _storage;
     private readonly DeviceTracker _tracker;
+    private readonly ILogger<KioskCoordinator> _log;
 
-    public KioskCoordinator(IHubContext<KioskHub> hub, StorageService storage, DeviceTracker tracker)
+    public KioskCoordinator(IHubContext<KioskHub> hub, StorageService storage, DeviceTracker tracker,
+        ILogger<KioskCoordinator> log)
     {
         _hub = hub;
         _storage = storage;
         _tracker = tracker;
+        _log = log;
+        _ = Task.Run(DevicesNotifyLoopAsync);
     }
 
     public static string DeviceGroup(string deviceId) => "dev:" + deviceId;
@@ -59,12 +63,51 @@ public class KioskCoordinator
 
     public SlidesPayload BuildSlidesPayload(KioskState state)
     {
-        var images = _storage.GetImages().ToDictionary(i => i.Id, i => i.FileName);
+        // Картинка со сроком показа выпадает из списка сама, когда срок не наступил или прошёл.
+        // Считается на сервере и по дню, а не по часам: реклама живёт днями, и час начала показа
+        // никому не нужен. Планшет получает уже готовый список и ничего про сроки не знает.
+        var today = DateTime.Now.Date;
+        var images = _storage.GetImages().ToDictionary(i => i.Id, i => i);
         var urls = new List<string>();
         foreach (var imgId in state.PlaylistImageIds)
-            if (images.TryGetValue(imgId, out var fileName))
-                urls.Add("/media/" + fileName);
+            if (images.TryGetValue(imgId, out var info) && ImageShowsToday(info, today))
+                urls.Add("/media/" + info.FileName);
         return new SlidesPayload { Images = urls, IntervalSec = state.IntervalSec };
+    }
+
+    /// <summary>
+    /// Разослать рекламу заново всем планшетам, которые её показывают. Нужно, когда состав
+    /// картинок мог измениться сам: наступил или кончился срок показа. Планшет, на котором идёт
+    /// документ, не трогается: реклама никогда не перебивает подписание.
+    /// </summary>
+    public async Task RefreshSlidesAsync()
+    {
+        // Состояние читается один раз на всех: при двухстах планшетах чтение на каждого
+        // означало бы двести разборов одного и того же файла подряд.
+        var states = _storage.GetStates();
+        var images = _storage.GetImages().ToDictionary(i => i.Id, i => i);
+        var today = DateTime.Now.Date;
+        foreach (var dev in _storage.GetDevices())
+        {
+            var state = states.Devices.TryGetValue(dev.Id, out var s) ? s : states.Default;
+            if (state.Mode == "document") continue;
+            var urls = new List<string>();
+            foreach (var imgId in state.PlaylistImageIds)
+                if (images.TryGetValue(imgId, out var info) && ImageShowsToday(info, today))
+                    urls.Add("/media/" + info.FileName);
+            await _hub.Clients.Group(DeviceGroup(dev.Id))
+                .SendAsync("ShowSlides", new SlidesPayload { Images = urls, IntervalSec = state.IntervalSec });
+        }
+    }
+
+    /// <summary>Показывается ли картинка сегодня, по заданным ей срокам.</summary>
+    public static bool ImageShowsToday(ImageInfo info, DateTime today)
+    {
+        var from = DocumentTemplating.ParseDate(info.ShowFrom);
+        if (from is not null && today < from.Value) return false;
+        var to = DocumentTemplating.ParseDate(info.ShowTo);
+        if (to is not null && today > to.Value) return false;
+        return true;
     }
 
     /// <summary>
@@ -174,7 +217,8 @@ public class KioskCoordinator
     /// but it is not flipped and receives no ShowSlides push. Only the explicit
     /// "return to slides" action moves a tablet out of document mode.
     /// </summary>
-    public async Task SaveAndShowSlidesAsync(string target, List<string> imageIds, int intervalSec,
+    /// <summary>Возвращает, скольким планшетам реклама действительно ушла прямо сейчас.</summary>
+    public async Task<int> SaveAndShowSlidesAsync(string target, List<string> imageIds, int intervalSec,
         IReadOnlyList<string>? deviceIds = null)
     {
         intervalSec = Math.Clamp(intervalSec, 1, 3600);
@@ -220,8 +264,16 @@ public class KioskCoordinator
         });
 
         var payload = BuildSlidesPayload(new KioskState { PlaylistImageIds = playlist, IntervalSec = intervalSec });
+        // Считаем только тех, кто действительно на связи: сохранить настройку и показать её на
+        // экране это разные события, и оператору важно знать, случилось ли второе.
+        var online = _tracker.OnlineDeviceIds();
+        var дошло = 0;
         foreach (var deviceId in recipients)
+        {
             await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
+            if (online.Contains(deviceId)) дошло++;
+        }
+        return дошло;
     }
 
     private static bool IsShowingDocument(StateStore states, string deviceId) =>
@@ -413,13 +465,57 @@ public class KioskCoordinator
 
     // ---------- Admin notifications ----------
 
-    public Task NotifyAdminsDevicesAsync() => _hub.Clients.Group("admins").SendAsync("DevicesChanged");
+    // Массовое переподключение планшетов, скажем после моргнувшего Wi-Fi или перезапуска службы,
+    // это двести событий подряд. Каждое рассылалось во все открытые админки, и каждая в ответ
+    // запрашивала полный список планшетов: двести запросов и двести полных списков за пару
+    // секунд, хотя достаточно одного, потому что список всё равно приходит целиком.
+    // Уведомления собираются в пачку: сразу после отправки берётся пауза, и всё случившееся за
+    // это время схлопывается в одно уведомление. Последнее изменение при этом не теряется
+    // никогда, оно лишь может прийти позже на длину паузы.
+    private static readonly TimeSpan DevicesNotifyWindow = TimeSpan.FromMilliseconds(400);
+    private readonly SemaphoreSlim _devicesSignal = new(0, 1);
+    private int _devicesDirty;
+
+    public Task NotifyAdminsDevicesAsync()
+    {
+        // Сигнал ставится только на переходе «чисто» в «грязно»: сто событий подряд оставляют
+        // ровно один, и семафор ёмкостью в единицу никогда не переполняется.
+        if (Interlocked.Exchange(ref _devicesDirty, 1) == 0) _devicesSignal.Release();
+        return Task.CompletedTask;
+    }
+
+    private async Task DevicesNotifyLoopAsync()
+    {
+        while (true)
+        {
+            await _devicesSignal.WaitAsync();
+            // Сброс до отправки, а не после: изменение, случившееся во время самой отправки,
+            // поставит новый сигнал и будет разослано следующим кругом, а не пропадёт.
+            Interlocked.Exchange(ref _devicesDirty, 0);
+            try { await _hub.Clients.Group("admins").SendAsync("DevicesChanged"); }
+            catch (Exception ex)
+            {
+                // Разослать не удалось: это не повод уронить цикл и остаться без уведомлений
+                // до перезапуска службы.
+                _log.LogWarning(ex, "Не удалось разослать обновление списка планшетов");
+            }
+            await Task.Delay(DevicesNotifyWindow);
+        }
+    }
 
     // ---------- Наблюдение за экраном планшета ----------
     // Кто за каким планшетом смотрит. Нужно, чтобы планшет рассказывал о себе только тогда,
     // когда его действительно смотрят: иначе он тратил бы батарею и канал круглые сутки.
     // Хранится в памяти и только на время соединений: наблюдение не оставляет следов.
-    private readonly ConcurrentDictionary<string, HashSet<string>> _watchers = new();
+    // Учёт ведётся под одним замком целиком. Раньше набор наблюдателей брался из словаря, а
+    // замок ставился уже на него: последний уходящий наблюдатель убирал набор из словаря, и
+    // тот, кто успел взять этот же набор мгновением раньше, вставал в список, которого в словаре
+    // уже нет. Наблюдение при этом молча переставало существовать для сервера: планшет,
+    // переподключившись, больше не получал «за тобой смотрят», и оператор смотрел на застывшую
+    // картинку. Случай редкий, но при двухстах планшетах окна наблюдения открывают и закрывают
+    // постоянно.
+    private readonly Dictionary<string, HashSet<string>> _watchers = new(StringComparer.Ordinal);
+    private readonly object _watchLock = new();
 
     /// <summary>
     /// Оператор начал или перестал смотреть за планшетом. Планшету сообщается только на границе:
@@ -430,13 +526,22 @@ public class KioskCoordinator
         if (string.IsNullOrEmpty(deviceId) || string.IsNullOrEmpty(connectionId)) return;
 
         bool changed;
-        var set = _watchers.GetOrAdd(deviceId, _ => new HashSet<string>(StringComparer.Ordinal));
-        lock (set)
+        lock (_watchLock)
         {
-            var was = set.Count > 0;
-            if (on) set.Add(connectionId); else set.Remove(connectionId);
-            changed = was != (set.Count > 0);
-            if (set.Count == 0) _watchers.TryRemove(deviceId, out _);
+            _watchers.TryGetValue(deviceId, out var set);
+            var was = set is { Count: > 0 };
+            if (on)
+            {
+                set ??= new HashSet<string>(StringComparer.Ordinal);
+                set.Add(connectionId);
+                _watchers[deviceId] = set;
+            }
+            else if (set is not null)
+            {
+                set.Remove(connectionId);
+                if (set.Count == 0) _watchers.Remove(deviceId);
+            }
+            changed = was != (set is { Count: > 0 });
         }
         if (!changed) return;
         await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync(on ? "WatchOn" : "WatchOff");
@@ -449,8 +554,7 @@ public class KioskCoordinator
     /// <summary>Смотрит ли кто-нибудь за этим планшетом прямо сейчас.</summary>
     public bool IsWatched(string deviceId)
     {
-        if (!_watchers.TryGetValue(deviceId, out var set)) return false;
-        lock (set) return set.Count > 0;
+        lock (_watchLock) return _watchers.TryGetValue(deviceId, out var set) && set.Count > 0;
     }
 
     public Task NotifyAdminsSignatureAsync(SignatureRecord rec) =>

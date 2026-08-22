@@ -11,7 +11,14 @@ using SignatureKiosk.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddSignalR().AddJsonProtocol(options =>
+builder.Services.AddSignalR(o =>
+{
+    // По умолчанию сообщение больше 32 КБ обрывает соединение целиком. Планшет шлёт наблюдателю
+    // только уменьшенные копии подписи, но полагаться на одну лишь бережность клиента нельзя:
+    // разрыв связи посреди подписания возвращает клиента на первую страницу и заставляет
+    // проходить документ заново. Запас взят с многократным перекрытием разумного сообщения.
+    o.MaximumReceiveMessageSize = 256 * 1024;
+}).AddJsonProtocol(options =>
 {
     options.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
 });
@@ -466,6 +473,10 @@ var admin = app.MapGroup("/api/admin").RequireAuthorization("Admin");
 admin.MapGet("/devices", (KioskHealthCache healthCache) =>
 {
     var online = tracker.OnlineDeviceIds();
+    // Состояние читается один раз на весь список. Раньше оно читалось на каждый планшет
+    // отдельно: при двухстах планшетах один запрос списка означал двести чтений и разборов
+    // одного и того же файла, а список запрашивается на каждое событие сети.
+    var states = storage.GetStates();
     var liveIps = tracker.OnlineIps();
     var appVersions = tracker.OnlineAppVersions();
     var healthById = healthCache.All();
@@ -502,7 +513,7 @@ admin.MapGet("/devices", (KioskHealthCache healthCache) =>
                 // Что сейчас на экране: реклама или документ. Оператору это нужно, чтобы знать,
                 // за чем есть смысл смотреть, особенно когда документ отправила внешняя система,
                 // а не он сам.
-                screen = storage.ResolveState(d.Id).Mode,
+                screen = states.Devices.TryGetValue(d.Id, out var st) ? st.Mode : states.Default.Mode,
                 d.EnrolledUtc
             };
         });
@@ -589,8 +600,46 @@ admin.MapDelete("/apikeys/{id}", (string id) =>
     storage.DeleteApiKey(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
 
 // ---- Images ----
+// Предел размера одной картинки рекламы. Реклама уезжает на планшеты целиком и хранится на
+// сервере, поэтому снимок с телефона на двадцать мегабайт здесь не место.
+const long MaxImageBytes = 8L * 1024 * 1024;
+
 admin.MapGet("/images", () =>
-    Results.Ok(storage.GetImages().Select(i => new { i.Id, i.OriginalName, i.UploadedUtc, url = "/media/" + i.FileName })));
+{
+    var today = DateTime.Now.Date;
+    return Results.Ok(storage.GetImages().Select(i => new
+    {
+        i.Id, i.OriginalName, i.UploadedUtc, url = "/media/" + i.FileName,
+        i.ShowFrom, i.ShowTo,
+        // Показывается ли она сегодня. Считает сервер: у него и часы, и правило, а оператор
+        // иначе гадал бы, попадает ли сегодняшний день в заданный срок.
+        showsToday = KioskCoordinator.ImageShowsToday(i, today)
+    }));
+});
+
+// Сроки показа картинки: с какого и по какой день она участвует в рекламе. Пустая дата снимает
+// ограничение с этой стороны.
+admin.MapPut("/images/{id}/dates", (string id, ImageDatesDto? dto, KioskCoordinator coord) =>
+{
+    var from = (dto?.ShowFrom ?? "").Trim();
+    var to = (dto?.ShowTo ?? "").Trim();
+    if (from.Length > 0 && DocumentTemplating.ParseDate(from) is null)
+        return Results.BadRequest(new { error = "Дата начала показа не разобрана. Подойдёт 2026-08-21 или 21.08.2026." });
+    if (to.Length > 0 && DocumentTemplating.ParseDate(to) is null)
+        return Results.BadRequest(new { error = "Дата окончания показа не разобрана. Подойдёт 2026-08-21 или 21.08.2026." });
+    var f = DocumentTemplating.ParseDate(from);
+    var t = DocumentTemplating.ParseDate(to);
+    // Срок наоборот это всегда ошибка ввода, а не хитрое правило: такая картинка не покажется
+    // никогда, и молчать об этом нельзя.
+    if (f is not null && t is not null && t < f)
+        return Results.BadRequest(new { error = "Дата окончания раньше даты начала: такая картинка не покажется никогда." });
+    if (!storage.SetImageDates(id, f?.ToString("yyyy-MM-dd"), t?.ToString("yyyy-MM-dd")))
+        return Results.NotFound(new { error = "Картинка не найдена." });
+    // Состав рекламы изменился прямо сейчас: планшеты держат выданный им список и сами о сроках
+    // не знают, поэтому список пересобирается и уходит заново.
+    _ = coord.RefreshSlidesAsync();
+    return Results.Ok(new { ok = true, showFrom = f?.ToString("yyyy-MM-dd"), showTo = t?.ToString("yyyy-MM-dd") });
+});
 
 admin.MapPost("/images", async (HttpRequest req) =>
 {
@@ -598,19 +647,39 @@ admin.MapPost("/images", async (HttpRequest req) =>
         return Results.BadRequest(new { error = "expected multipart/form-data" });
     var form = await req.ReadFormAsync();
     var added = new List<object>();
+    var skipped = new List<string>();
     foreach (var file in form.Files)
     {
         var ext = ResolveImageExtension(file.FileName, file.ContentType);
-        if (ext is null) continue;
+        if (ext is null) { skipped.Add(file.FileName + ": это не картинка"); continue; }
+        // Предел на файл. Реклама уезжает на планшеты целиком и хранится на сервере, поэтому
+        // снимок с телефона на двадцать мегабайт здесь не место: он и грузиться будет минуту,
+        // и место займёт зря. Восьми мегабайт хватает любой рекламной картинке с запасом.
+        if (file.Length > MaxImageBytes)
+        {
+            skipped.Add(file.FileName + ": " + (file.Length / (1024 * 1024)) + " МБ, а больше " +
+                        (MaxImageBytes / (1024 * 1024)) + " МБ картинка быть не может");
+            continue;
+        }
         await using var s = file.OpenReadStream();
         var info = storage.AddImage(s, file.FileName, ext);
         added.Add(new { info.Id, info.OriginalName, url = "/media/" + info.FileName });
     }
-    return Results.Ok(added);
+    // Молча пропустить файл нельзя: оператор увидел бы «Картинки загружены» и не понял, почему
+    // их в списке нет.
+    if (added.Count == 0 && skipped.Count > 0)
+        return Results.BadRequest(new { error = "Ничего не загружено. " + string.Join("; ", skipped) });
+    return Results.Ok(new { added, skipped });
 });
 
-admin.MapDelete("/images/{id}", (string id) =>
-    storage.DeleteImage(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
+admin.MapDelete("/images/{id}", (string id, KioskCoordinator coord) =>
+{
+    if (!storage.DeleteImage(id)) return Results.NotFound();
+    // Планшет держит выданный ему список и о том, что файла больше нет, не знает: он показывал
+    // бы битую картинку до самой перезагрузки. Список пересобирается и уходит заново.
+    _ = coord.RefreshSlidesAsync();
+    return Results.Ok(new { ok = true });
+});
 
 // ---- Playlist / slideshow ----
 admin.MapGet("/playlist", (string? target, string? ids) =>
@@ -644,8 +713,11 @@ admin.MapPut("/playlist", async (PlaylistSaveDto dto, KioskCoordinator coord) =>
     var target = string.IsNullOrWhiteSpace(dto?.Target) ? KioskCoordinator.AllTarget : dto!.Target!;
     if (target == "devices" && (dto?.DeviceIds is null || dto.DeviceIds.Count == 0))
         return Results.BadRequest(new { error = "Отметьте хотя бы один планшет." });
-    await coord.SaveAndShowSlidesAsync(target, dto?.ImageIds ?? new List<string>(), dto?.IntervalSec ?? 8, dto?.DeviceIds);
-    return Results.Ok(new { ok = true });
+    var дошло = await coord.SaveAndShowSlidesAsync(target, dto?.ImageIds ?? new List<string>(), dto?.IntervalSec ?? 8, dto?.DeviceIds);
+    // Сохранить настройку и показать её на экране это разные события: оператору важно знать,
+    // случилось ли второе, иначе «Сохранено и отправлено» звучит одинаково и когда реклама
+    // поехала на десять планшетов, и когда ни один из них не включён.
+    return Results.Ok(new { ok = true, shown = дошло });
 });
 
 // ---- Document ----
@@ -1083,6 +1155,10 @@ admin.MapPost("/show-document", async (ShowDocumentDto dto, KioskCoordinator coo
     if (badField is not null) return Results.BadRequest(new { error = badField });
     var badDate = DocumentTemplating.ValidateAgeFields(storage.GetDocument(), dto?.Fields);
     if (badDate is not null) return Results.BadRequest(new { error = badDate });
+    // Документ без страниц показывать нечего: планшет останется с тем же экраном, а оператор
+    // будет думать, что отправка не сработала. Молча делать ничего хуже, чем сказать почему.
+    if (storage.GetDocument().Pages.Count == 0)
+        return Results.BadRequest(new { error = "В документе нет ни одной страницы: показывать нечего. Добавьте страницу на вкладке «Документ»." });
     await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups);
     var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
     return Results.Ok(new { ok = true, missingPlaceholders = missing });
@@ -1156,7 +1232,11 @@ admin.MapGet("/signatures/{id}/pdf", (string id, PdfService pdf) =>
 var ext = app.MapGroup("/api/ext").RequireRateLimiting("ext").AddEndpointFilter(async (ctx, next) =>
 {
     var key = ctx.HttpContext.Request.Headers["X-Api-Key"].ToString();
-    if (!storage.ValidateApiKey(key))
+    // Вошедший администратор проходит и без ключа: он проверяет свой же документ из админки, а
+    // права у него и так шире, чем у любого ключа. Искать ключ ради проверки собственного
+    // документа значило бы мешать работать на ровном месте.
+    var админ = ctx.HttpContext.User?.HasClaim("role", "admin") == true;
+    if (!админ && !storage.ValidateApiKey(key))
         return Results.Json(new { error = "invalid api key" }, statusCode: StatusCodes.Status401Unauthorized);
     return await next(ctx);
 });
@@ -1247,6 +1327,10 @@ ext.MapPost("/show-document", async (ExtShowDocumentDto dto, KioskCoordinator co
     if (badField is not null) return Results.BadRequest(new { error = badField });
     var badDate = DocumentTemplating.ValidateAgeFields(storage.GetDocument(), dto?.Fields);
     if (badDate is not null) return Results.BadRequest(new { error = badDate });
+    // Тот же случай, что и в админке: показывать нечего, и внешняя система должна узнать это
+    // сразу, а не гадать, почему на планшете ничего не изменилось.
+    if (storage.GetDocument().Pages.Count == 0)
+        return Results.BadRequest(new { error = "В документе нет ни одной страницы: показывать нечего." });
     var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
     if (deviceId is null)
         return Results.Json(new { error }, statusCode: status);

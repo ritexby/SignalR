@@ -252,3 +252,11 @@ html, body {
 }
 .group-options .check.checked { border-color: var(--accent); background: rgba(37, 99, 235, .06); }
 .group-options .check .label { font-weight: 600; }
+
+/* Обтекание картинки текстом. Пункты, группы и подпись обтекать не должны: они и так узкие,
+   а рядом с картинкой превратились бы в обрывки. */
+.doc-image-wrap { margin-bottom: 12px; }
+.doc-image-wrap img { width: 100%; }
+.checks, .group, .page-sign, .scan-inline { clear: both; }
+.doc-text::after { content: ""; display: block; clear: none; }
+h2 { clear: both; }

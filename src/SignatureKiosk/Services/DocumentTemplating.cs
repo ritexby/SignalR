@@ -47,20 +47,17 @@ public static partial class DocumentTemplating
     // документу нужно знать, младше ли человек четырнадцати. Две операции, а не четыре, потому
     // что «младше N» и «N и старше» делят людей ровно надвое, без щели и без нахлёста.
     private static readonly HashSet<string> AllowedOps = new(StringComparer.Ordinal)
-        { "eq", "ne", "empty", "notempty", "in", "agelt", "agege", "datewithin", "annivwithin" };
+        { "eq", "ne", "empty", "notempty", "in", "agelt", "agege", "annivwithin" };
 
     public static bool IsAgeOp(string? op) =>
         string.Equals(op, "agelt", StringComparison.Ordinal) || string.Equals(op, "agege", StringComparison.Ordinal);
 
     /// <summary>
-    /// Условия по сроку: сколько дней между сегодняшним днём и датой из тега.
-    /// datewithin  - до самой даты осталось или прошло не больше N дней (дата целиком, с годом);
-    /// annivwithin - до годовщины этой даты осталось или прошло не больше N дней (день и месяц,
-    ///               год не важен). Это случай дня рождения: сравнивать полную дату там
-    ///               бессмысленно, она в прошлом на десятки лет.
+    /// Условие по сроку: до годовщины даты из тега осталось или прошло не больше N дней. Считается
+    /// день и месяц, год не важен. Это случай дня рождения: сравнивать полную дату там
+    /// бессмысленно, она в прошлом на десятки лет.
     /// </summary>
     public static bool IsDaysOp(string? op) =>
-        string.Equals(op, "datewithin", StringComparison.Ordinal) ||
         string.Equals(op, "annivwithin", StringComparison.Ordinal);
 
     /// <summary>Дата из тега. Разбор нестрогий: формат приходит из чужой системы.</summary>
@@ -215,7 +212,7 @@ public static partial class DocumentTemplating
             LabelRuns = runs.Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
             Required = c.Required,
             Checked = isChecked,
-            VisibleWhen = live is null ? null : LiveCondition(c.VisibleWhen, live),
+            VisibleWhen = live is null ? null : LiveCondition(c.VisibleWhen, map, live),
             Ord = c.Ord
         };
     }
@@ -280,7 +277,7 @@ public static partial class DocumentTemplating
             Options = options,
             Required = g.Required,
             Selected = selected.Length == 0 ? null : selected,
-            VisibleWhen = LiveCondition(g.VisibleWhen, live),
+            VisibleWhen = LiveCondition(g.VisibleWhen, map, live),
             Ord = g.Ord
         };
     }
@@ -300,10 +297,31 @@ public static partial class DocumentTemplating
             if (extra is not null && !string.IsNullOrWhiteSpace(extra.Field)) yield return extra;
     }
 
-    /// <summary>Выполняется ли условие целиком: все его части одновременно.</summary>
+    /// <summary>
+    /// Наборы условия: первый это оно само со своим списком «и», остальные приходят из списка
+    /// «или». Достаточно одного выполненного набора целиком.
+    /// </summary>
+    public static IEnumerable<VisibleWhen> Groups(VisibleWhen? cond)
+    {
+        if (cond is null) yield break;
+        yield return cond;
+        foreach (var alt in cond.Or ?? new List<VisibleWhen>())
+            if (alt is not null) yield return alt;
+    }
+
+    /// <summary>Выполняется ли условие: хотя бы один набор целиком.</summary>
     public static bool Matches(VisibleWhen? cond, IReadOnlyDictionary<string, string>? fields)
     {
-        foreach (var part in Parts(cond))
+        if (cond is null) return true;
+        foreach (var group in Groups(cond))
+            if (MatchesGroup(group, fields)) return true;
+        return false;
+    }
+
+    /// <summary>Выполнен ли один набор: все его части одновременно.</summary>
+    private static bool MatchesGroup(VisibleWhen group, IReadOnlyDictionary<string, string>? fields)
+    {
+        foreach (var part in Parts(group))
             if (!MatchesOne(part, fields)) return false;
         return true;
     }
@@ -311,6 +329,16 @@ public static partial class DocumentTemplating
     private static bool MatchesOne(VisibleWhen? cond, IReadOnlyDictionary<string, string>? fields)
     {
         if (cond is null || string.IsNullOrWhiteSpace(cond.Field)) return true;
+        // «Не» переворачивает ответ части целиком, включая случай «даты нет». Иначе «возраст
+        // меньше 14» и «не возраст меньше 14» оба оказались бы невыполненными при непришедшей
+        // дате рождения, и клиент не увидел бы ни детского варианта, ни взрослого. Отрицание
+        // обязано быть в точности обратным, иначе о нём нельзя рассуждать.
+        var ok = Holds(cond, fields);
+        return cond.Not ? !ok : ok;
+    }
+
+    private static bool Holds(VisibleWhen cond, IReadOnlyDictionary<string, string>? fields)
+    {
         fields ??= EmptyMap;
         var field = cond.Field.Trim();
         fields.TryGetValue(field, out var raw);
@@ -325,7 +353,7 @@ public static partial class DocumentTemplating
             // выполнено. Показать «поздравляем с днём рождения» не тому хуже, чем не показать
             // при испорченной дате, о которой всё равно сообщается отдельно.
             if (ParseDate(raw) is null) return false;
-            return WithinDays(raw, cond.Op == "annivwithin", target);
+            return WithinDays(raw, anniversary: true, target);
         }
 
         if (IsAgeOp(cond.Op))
@@ -404,7 +432,7 @@ public static partial class DocumentTemplating
                 HeadingAlign = p.HeadingAlign,
                 Blocks = ResolveBlocks(Blocks(p), map, live),
                 IncludeDynamic = p.IncludeDynamic,
-                VisibleWhen = LiveCondition(p.VisibleWhen, live),
+                VisibleWhen = LiveCondition(p.VisibleWhen, map, live),
                 Checkboxes = (p.Checkboxes ?? new List<DocCheckbox>())
                     .Where(c => c is not null && Keep(c.VisibleWhen, map, live))
                     .Select(c => Cb(c, map, live, checkboxStates, texts)).ToList(),
@@ -416,14 +444,15 @@ public static partial class DocumentTemplating
                     .Select(x => new DocSignature
                     {
                         Key = x.Key, Label = Apply(x.Label, map), Required = x.Required,
-                        Ord = x.Ord, VisibleWhen = LiveCondition(x.VisibleWhen, live)
+                        Width = x.Width, Height = x.Height, Align = x.Align,
+                        Ord = x.Ord, VisibleWhen = LiveCondition(x.VisibleWhen, map, live)
                     }).ToList(),
                 Scans = (p.Scans ?? new List<DocScan>())
                     .Where(x => x is not null && Keep(x.VisibleWhen, map, live))
                     .Select(x => new DocScan
                     {
                         Key = x.Key, Label = Apply(x.Label, map), Required = x.Required,
-                        Ord = x.Ord, VisibleWhen = LiveCondition(x.VisibleWhen, live)
+                        Ord = x.Ord, VisibleWhen = LiveCondition(x.VisibleWhen, map, live)
                     }).ToList()
             };
             // Экран подписи или сканирования без своего поля показывать нечего: поле могло не
@@ -460,6 +489,11 @@ public static partial class DocumentTemplating
             SignBlocks = ResolveBlocks(doc.SignBlocks ?? new List<DocBlock>(), map, live),
             SignBlocksBelow = ResolveBlocks(doc.SignBlocksBelow ?? new List<DocBlock>(), map, live),
             ThankYouText = Apply(doc.ThankYouText, map),
+            ThankYouRuns = LabelRuns(doc.ThankYouRuns, doc.ThankYouText)
+                .Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
+            ThankYouAlign = doc.ThankYouAlign,
+            ThankYouBlocks = ResolveBlocks(doc.ThankYouBlocks ?? new List<DocBlock>(), map, live),
+            ThankYouSec = doc.ThankYouSec,
             IdleReturnSec = doc.IdleReturnSec,
             PdfFontScale = doc.PdfFontScale,
             PdfSignatureScale = doc.PdfSignatureScale,
@@ -543,9 +577,8 @@ public static partial class DocumentTemplating
     /// </summary>
     private static bool Keep(VisibleWhen? cond, IReadOnlyDictionary<string, string>? map, HashSet<string> live)
     {
-        foreach (var part in Parts(cond))
-            if (!IsLive(part, live) && !MatchesOne(part, map)) return false;
-        return true;
+        Split(cond, map, live, out var keep);
+        return keep;
     }
 
     /// <summary>
@@ -553,15 +586,50 @@ public static partial class DocumentTemplating
     /// здесь уже решены, и отправлять их значит рассказывать планшету о данных, которых он не
     /// должен знать.
     /// </summary>
-    private static VisibleWhen? LiveCondition(VisibleWhen? cond, HashSet<string> live)
+    private static VisibleWhen? LiveCondition(VisibleWhen? cond,
+        IReadOnlyDictionary<string, string>? map, HashSet<string>? live)
+        => Split(cond, map, live, out _);
+
+    /// <summary>
+    /// Разбор условия на две половины: что решается здесь, по присланным тегам, и что должен
+    /// вычислить планшет, когда клиент отмечает пункты. С «или» это одно решение, а не два
+    /// независимых: какие наборы доедут до планшета, зависит от того, какие уже провалились
+    /// здесь. Возвращает остаток для планшета; keep равен false, когда показывать нечего.
+    /// </summary>
+    private static VisibleWhen? Split(VisibleWhen? cond, IReadOnlyDictionary<string, string>? map,
+        HashSet<string>? live, out bool keep)
     {
-        var liveParts = Parts(cond).Where(p => IsLive(p, live))
-            .Select(p => new VisibleWhen { Field = p.Field.Trim(), Op = p.Op, Value = p.Value })
-            .ToList();
-        if (liveParts.Count == 0) return null;
-        var head = liveParts[0];
-        if (liveParts.Count > 1) head.And = liveParts.Skip(1).ToList();
-        return head;
+        keep = true;
+        if (cond is null || live is null) return null;
+        var alive = new List<VisibleWhen>();
+        foreach (var group in Groups(cond))
+        {
+            var deferred = new List<VisibleWhen>();
+            var dead = false;
+            foreach (var part in Parts(group))
+            {
+                if (IsLive(part, live))
+                    deferred.Add(new VisibleWhen
+                    {
+                        Field = part.Field.Trim(), Op = part.Op, Value = part.Value,
+                        // Отрицание едет с частью: без него планшет вычислил бы её наоборот.
+                        Not = part.Not
+                    });
+                else if (!MatchesOne(part, map)) { dead = true; break; }
+            }
+            if (dead) continue;
+            // Набор выполнен целиком уже здесь: ждать планшета незачем, содержимое видно всегда,
+            // и остальные наборы значения не имеют.
+            if (deferred.Count == 0) return null;
+            var head = deferred[0];
+            if (deferred.Count > 1) head.And = deferred.Skip(1).ToList();
+            alive.Add(head);
+        }
+        // Не выжил ни один набор: содержимое скрыто и на планшет не едет вовсе.
+        if (alive.Count == 0) { keep = false; return null; }
+        var first = alive[0];
+        if (alive.Count > 1) first.Or = alive.Skip(1).ToList();
+        return first;
     }
 
     /// <summary>Resolve a list of blocks: drop those whose condition fails, substitute text runs,
@@ -668,7 +736,9 @@ public static partial class DocumentTemplating
                 Align = b.Align,
                 ImageUrl = b.ImageUrl,
                 ImageWidth = b.ImageWidth,
-                VisibleWhen = LiveCondition(b.VisibleWhen, live),
+                Wrap = b.Wrap,
+                WrapGap = b.WrapGap,
+                VisibleWhen = LiveCondition(b.VisibleWhen, map, live),
                 Ord = b.Ord
             });
         }
@@ -707,15 +777,30 @@ public static partial class DocumentTemplating
     {
         if (cond is null) return null;
         CleanCondition(cond);
-        if (string.IsNullOrWhiteSpace(cond.Field)) return null;
-        cond.Field = Clamp(cond.Field).Trim();
-        cond.Value = Clamp(cond.Value);
-        foreach (var part in cond.And ?? new List<VisibleWhen>())
+        // Набор без единой заполненной части ничего не ограничивает, а в «или» такой набор делал
+        // бы условие выполненным всегда. Пустые выбрасываются; не осталось ни одного, значит и
+        // условия нет.
+        // Наборы берутся списком сразу: перебор ленивый, и обнуление cond.Or внутри цикла
+        // оборвало бы его же на первом шаге, молча потеряв все наборы после «или».
+        var groups = new List<VisibleWhen>();
+        foreach (var group in Groups(cond).ToList())
         {
-            part.Field = Clamp(part.Field).Trim();
-            part.Value = Clamp(part.Value);
+            var parts = Parts(group).ToList();
+            if (parts.Count == 0) continue;
+            foreach (var part in parts)
+            {
+                part.Field = Clamp(part.Field).Trim();
+                part.Value = Clamp(part.Value);
+            }
+            var head = parts[0];
+            head.And = parts.Count > 1 ? parts.Skip(1).ToList() : null;
+            head.Or = null;
+            groups.Add(head);
         }
-        return cond;
+        if (groups.Count == 0) return null;
+        var first = groups[0];
+        first.Or = groups.Count > 1 ? groups.Skip(1).ToList() : null;
+        return first;
     }
 
     // ---------- Sanitise on save ----------
@@ -792,6 +877,13 @@ public static partial class DocumentTemplating
                 sig.Key = CleanKey(sig.Key);
                 if (sig.Key.Length == 0) sig.Key = "sign" + (i + 1);
                 sig.Label = Clamp(sig.Label);
+                // Размер места под подпись: уже десятой части страницы расписаться негде, а выше
+                // трёхсот точек оно занимает лист целиком и выталкивает текст на новую страницу.
+                // Уже шестидесяти точек расписаться негде, а шире листа место всё равно не
+                // поместится: ширина текста на A4 это 495 точек.
+                sig.Width = Math.Clamp(sig.Width <= 0 ? 280 : sig.Width, 60, 495);
+                sig.Height = Math.Clamp(sig.Height <= 0 ? 100 : sig.Height, 40, 300);
+                sig.Align = CleanAlign(sig.Align);
                 sig.VisibleWhen = Normalized(sig.VisibleWhen);
             }
             if (p.Signatures.Count > MaxPerKind) p.Signatures = p.Signatures.Take(MaxPerKind).ToList();
@@ -859,6 +951,14 @@ public static partial class DocumentTemplating
         doc.PdfFontScale = Math.Clamp(doc.PdfFontScale <= 0 ? 100 : doc.PdfFontScale, 50, 100);
         // Место под подпись: меньше сорока процентов от неё останется росчерк в марку величиной.
         doc.PdfSignatureScale = Math.Clamp(doc.PdfSignatureScale <= 0 ? 100 : doc.PdfSignatureScale, 40, 100);
+        // Экран благодарности: меньше двух секунд человек не успевает прочитать, больше минуты
+        // планшет впустую занят и следующий клиент ждёт у выключенного на вид экрана.
+        doc.ThankYouSec = Math.Clamp(doc.ThankYouSec <= 0 ? 6 : doc.ThankYouSec, 2, 60);
+        doc.ThankYouRuns = CleanRuns(doc.ThankYouRuns);
+        if (doc.ThankYouRuns.Count > 0) doc.ThankYouText = Clamp(PlainOf(doc.ThankYouRuns, doc.ThankYouText));
+        doc.ThankYouAlign = CleanAlign(doc.ThankYouAlign);
+        doc.ThankYouBlocks = Compact(doc.ThankYouBlocks);
+        foreach (var b in doc.ThankYouBlocks) { CleanBlock(b); b.Align = CleanAlign(b.Align); }
 
         doc.SignBlocks = Compact(doc.SignBlocks);
         foreach (var b in doc.SignBlocks) CleanBlock(b);
@@ -953,6 +1053,16 @@ public static partial class DocumentTemplating
             .OrderBy(x => x.Key).ThenBy(x => x.Kind).ThenBy(x => x.Index)
             .ToList();
         for (var i = 0; i < ordered.Count; i++) ordered[i].Set(i);
+
+        // Хранение приводится к тому же порядку, в каком элементы стоят на странице. Иначе один
+        // и тот же документ, пришедший по API и собранный в редакторе, лежит в разном порядке:
+        // на экране разницы нет, номер решает всё, но сравнить два таких документа между собой
+        // уже нельзя, и любая сверка выдаёт расхождения на ровном месте.
+        p.Blocks = p.Blocks.OrderBy(x => x.Ord).ToList();
+        p.Checkboxes = p.Checkboxes.OrderBy(x => x.Ord).ToList();
+        p.Groups = p.Groups.OrderBy(x => x.Ord).ToList();
+        p.Signatures = p.Signatures.OrderBy(x => x.Ord).ToList();
+        p.Scans = p.Scans.OrderBy(x => x.Ord).ToList();
     }
 
     /// <summary>A non-null list without null elements.</summary>
@@ -969,6 +1079,13 @@ public static partial class DocumentTemplating
         foreach (var r in b.Runs) CleanRun(r);
         b.ImageUrl = CleanImageUrl(b.ImageUrl);
         b.ImageWidth = b.ImageUrl is null ? 100 : Math.Clamp(b.ImageWidth <= 0 ? 100 : b.ImageWidth, 10, 100);
+        // Обтекание только у картинки и только двумя сторонами: текст «вокруг со всех сторон»
+        // выглядит красиво лишь на широкой колонке, а на планшете превращается в узкие обрывки.
+        var wrap = (b.Wrap ?? "").Trim().ToLowerInvariant();
+        b.Wrap = b.ImageUrl is not null && wrap is "left" or "right" ? wrap : null;
+        // Картинка во всю ширину обтекать не может: текста рядом с ней не поместится.
+        if (b.Wrap is not null && b.ImageWidth > 70) b.ImageWidth = 70;
+        b.WrapGap = Math.Clamp(b.WrapGap < 0 ? 10 : b.WrapGap, 0, 60);
     }
 
     /// <summary>
@@ -1045,9 +1162,39 @@ public static partial class DocumentTemplating
     /// границы импортированный файл мог бы принести список любой длины.</summary>
     private const int MaxAndParts = 5;
 
+    /// <summary>Сколько наборов можно соединить через «или». Та же граница и по той же причине,
+    /// что и у «и»: без неё импортированный файл принёс бы список любой длины.</summary>
+    private const int MaxOrGroups = 5;
+
     private static void CleanCondition(VisibleWhen? c)
     {
         if (c is null) return;
+        CleanGroup(c);
+        var alts = new List<VisibleWhen>();
+        foreach (var alt in c.Or ?? new List<VisibleWhen>())
+        {
+            if (alt is null) continue;
+            CleanGroup(alt);
+            // Вложенности нет: «или» плоское. Иначе внутри набора оказался бы ещё один список
+            // наборов, а редактор такое дерево показать не умеет.
+            alt.Or = null;
+            if (alt.Field.Length > 0) alts.Add(alt);
+            if (alts.Count >= MaxOrGroups) break;
+        }
+        c.Or = alts.Count > 0 ? alts : null;
+        // Условие без первого набора, но с остальными: первый из оставшихся становится основным,
+        // иначе пустой набор делал бы условие выполненным всегда.
+        if (c.Field.Length == 0 && c.Or is { Count: > 0 })
+        {
+            var head = c.Or[0];
+            c.Field = head.Field; c.Op = head.Op; c.Value = head.Value; c.And = head.And;
+            c.Or = c.Or.Count > 1 ? c.Or.Skip(1).ToList() : null;
+        }
+    }
+
+    /// <summary>Привести в порядок один набор: его собственную часть и присоединённые через «и».</summary>
+    private static void CleanGroup(VisibleWhen c)
+    {
         CleanOnePart(c);
         if (c.And is null) return;
         var extras = new List<VisibleWhen>();
@@ -1056,8 +1203,10 @@ public static partial class DocumentTemplating
             if (part is null) continue;
             CleanOnePart(part);
             // Вложенности нет: «и» плоское, и разрешать её значило бы хранить дерево, которое
-            // редактор всё равно не умеет показать.
+            // редактор всё равно не умеет показать. «Или» внутри присоединённой части снимается
+            // по той же причине: иначе набор наборов протащили бы внутрь набора.
             part.And = null;
+            part.Or = null;
             if (part.Field.Length > 0) extras.Add(part);
             if (extras.Count >= MaxAndParts) break;
         }
@@ -1157,7 +1306,12 @@ public static partial class DocumentTemplating
         var used = new HashSet<string>(Placeholders(doc), StringComparer.OrdinalIgnoreCase);
         void Add(VisibleWhen? cond)
         {
-            foreach (var part in Parts(cond)) used.Add(part.Field.Trim());
+            // Обойти надо все наборы, а не только первый: тег, названный лишь в наборе после
+            // «или», иначе не попал бы в список нужных, до планшета не доехал бы вовсе, и
+            // условие никогда бы не выполнилось.
+            foreach (var group in Groups(cond))
+                foreach (var part in Parts(group))
+                    used.Add(part.Field.Trim());
         }
         foreach (var p in doc.Pages ?? new List<DocPage>())
         {
@@ -1185,7 +1339,7 @@ public static partial class DocumentTemplating
         var map = BuildMap(fields);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var cond in AllConditions(doc))
-            foreach (var part in Parts(cond))
+            foreach (var part in Groups(cond).SelectMany(Parts))
             {
                 var поВозрасту = IsAgeOp(part.Op);
                 var поСроку = IsDaysOp(part.Op);

@@ -51,9 +51,36 @@ public class ScheduleRunner : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _logger.LogError(ex, "Schedule pass failed"); }
 
+            // Смена суток меняет состав рекламы: у картинки мог наступить или кончиться срок
+            // показа. Планшет об этом сам не узнает, он показывает список, который ему выдали,
+            // поэтому список пересобирается и уходит заново.
+            try { await RefreshSlidesOnNewDay(DateTime.Now); }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex) { _logger.LogError(ex, "Slide refresh failed"); }
+
             try { if (!await timer.WaitForNextTickAsync(stoppingToken)) break; }
             catch (OperationCanceledException) { break; }
         }
+    }
+
+    /// <summary>Какие сутки уже обработаны: реклама пересобирается один раз за день.</summary>
+    private string _slidesDay = "";
+
+    /// <summary>
+    /// Пересобрать рекламу на всех планшетах при смене суток. Картинка со сроком показа сама
+    /// появляется и пропадает, но планшет держит выданный ему список и о датах ничего не знает.
+    /// Планшет, на котором идёт документ, не трогается: реклама никогда не перебивает подписание.
+    /// </summary>
+    public async Task RefreshSlidesOnNewDay(DateTime now)
+    {
+        var day = now.ToString("yyyy-MM-dd");
+        if (_slidesDay == day) return;
+        var первыйЗапуск = _slidesDay.Length == 0;
+        _slidesDay = day;
+        // При первом запуске ничего не рассылаем: планшеты только что получили своё при
+        // подключении, и лишняя рассылка сразу после старта никому не нужна.
+        if (первыйЗапуск) return;
+        await _coord.RefreshSlidesAsync();
     }
 
     /// <summary>Выполнить все правила, чей момент наступил. now задаётся явно, чтобы это можно было проверить.</summary>

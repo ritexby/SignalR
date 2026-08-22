@@ -208,9 +208,23 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .cond-rows { display: flex; flex-direction: column; gap: 6px; width: 100%; }
 .cond-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .cond-and { display: none; font-weight: 700; color: #6366f1; min-width: 16px; }
-.cond-row.cond-extra .cond-and { display: inline; }
+.cond-row.cond-extra .cond-and { display: inline-block; }
+/* Соединение с предыдущей строкой. Узкое и в своём цвете: это не такое же поле, как тег или
+   значение, а связка между строками, и путать её с ними нельзя. */
+.cond-row select.cond-join { padding: 4px 6px; font-weight: 700; color: #6366f1; background: #eef0ff; border-color: #c7cbf5; }
+/* Строка, начинающая новый набор, отделяется чертой: по ней видно границу наборов, а от этой
+   границы зависит, покажется блок или нет. */
+.cond-row.cond-extra.cond-or { border-top: 1px dashed #c7cbf5; padding-top: 8px; margin-top: 2px; }
+/* Пометка «не» на строке условия. Выключенная выглядит как обычная бледная кнопка, включённая
+   заметно окрашена: она переворачивает смысл всей строки, и не заметить её нельзя. */
+.cond-row .cond-not { padding: 5px 10px; font-weight: 700; border: 1.5px solid #b9c2d0; border-radius: 8px;
+  background: #fff; color: #8a94a6; cursor: pointer; line-height: 1.1; }
+.cond-row .cond-not.on { background: #fee2e2; border-color: #dc2626; color: #b91c1c; }
+.cond-row .cond-not:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(220,38,38,.18); }
 .cond-drop { padding: 4px 9px; }
+.cond-adds { display: flex; flex-wrap: wrap; gap: 6px; align-self: flex-start; }
 .cond-add { align-self: flex-start; }
+.cond-add-or { align-self: flex-start; color: #6366f1; }
 .cond-row input, .cond-row select { padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; color: var(--text); }
 .cond-row input:focus, .cond-row select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .cond-field { min-width: 170px; }
@@ -767,3 +781,38 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 /* Окно условия по сроку: два числа, «дней до» и «дней после». */
 .cond-window { display: inline-flex; align-items: center; gap: 6px; }
 .cond-window-sep { font-size: .82rem; color: var(--muted); white-space: nowrap; }
+/* Реклама в окне наблюдения: сам слайд, а не надпись о нём. */
+.watch-slides { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.watch-slide { max-width: 100%; max-height: 60vh; border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,.14); }
+
+/* Крестик закрытия окна стоит в правом верхнем углу: элементы управления не должны под него
+   заезжать, иначе «плюс» масштаба и закрытие сливаются в одно пятно. */
+.modal-box.wide .pdfl-head { padding-right: 44px; }
+.modal-box.wide .watch-head { padding-right: 44px; }
+
+/* Проверка запроса API: поле для тела запроса и ответ сервера как есть. */
+.apitest { display: flex; flex-direction: column; gap: 10px; }
+.apitest h3 { margin: 0; }
+.api-input { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem;
+  line-height: 1.5; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; resize: vertical; }
+.apitest .api-code { max-height: 300px; overflow: auto; margin: 0; }
+/* Куда уйдёт проверочный запрос. Это настоящая отправка, и это должно быть видно заранее. */
+.api-target { font-size: .88rem; padding: 8px 12px; border-radius: 8px; background: #f1f3f6; color: var(--muted); }
+.api-target.ok { background: rgba(22, 163, 74, .10); color: #15803d; }
+.api-target.warn { background: rgba(234, 88, 12, .12); color: #c2410c; }
+.api-target.busy { background: rgba(220, 38, 38, .10); color: #b91c1c; font-weight: 600; }
+
+/* Сроки показа картинки в рекламе. */
+.img-dates { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px 8px; }
+.img-date { display: inline-flex; align-items: center; gap: 4px; font-size: .78rem; color: var(--muted); }
+.img-date input { padding: 3px 6px; font-size: .78rem; border: 1px solid var(--line); border-radius: 6px; }
+.img-date-state { flex-basis: 100%; font-size: .75rem; color: var(--muted); }
+.img-date-state.on { color: #15803d; }
+.img-date-state.off { color: #b91c1c; font-weight: 600; }
+.card.img-hidden-today img { opacity: .45; filter: grayscale(1); }
+/* Обтекание картинки текстом в предпросмотре и в окне наблюдения. */
+.pv-image-wrap img { width: 100%; }
+.pv-check, .pv-group, .pv-inline-sign, .pv-inline-scan, .pv-heading, .watch-check { clear: both; }
+/* Планшет пропал: метка «наблюдение» гаснет, чтобы застывшая картинка не читалась как поломка. */
+.watch-live.off { background: #6b7280; }
+.watch-live.off::before { animation: none; }

@@ -59,6 +59,12 @@ public class KioskHub : Hub
         // is genuine.
         await _coord.NotifyAdminsDevicesAsync();
 
+        // Планшет мог переподключиться, пока за ним смотрят: сервер говорит об этом только на
+        // границе, когда наблюдатель появился или ушёл, поэтому вернувшийся планшет иначе молчал
+        // бы, а оператор смотрел бы на застывшую картинку и не знал об этом.
+        if (_coord.IsWatched(deviceId))
+            await Clients.Caller.SendAsync("WatchOn");
+
         return _coord.BuildCurrentCommand(deviceId);
     }
 

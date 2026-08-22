@@ -468,6 +468,21 @@ public class StorageService
         }
     }
 
+    /// <summary>Задать сроки показа картинки. Пусто означает «без ограничения» с этой стороны.</summary>
+    public bool SetImageDates(string id, string? showFrom, string? showTo)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(ImagesIndexPath, () => new List<ImageInfo>());
+            var img = list.FirstOrDefault(i => i.Id == id);
+            if (img is null) return false;
+            img.ShowFrom = string.IsNullOrWhiteSpace(showFrom) ? null : showFrom;
+            img.ShowTo = string.IsNullOrWhiteSpace(showTo) ? null : showTo;
+            Write(ImagesIndexPath, list);
+            return true;
+        }
+    }
+
     public bool DeleteImage(string id)
     {
         lock (_lock)
@@ -910,12 +925,39 @@ public class StorageService
     /// значением и все планшеты, ключи или подписи исчезли бы без следа. Отложенный файл виден
     /// в каталоге данных и упоминается в логе, так что его можно разобрать руками.
     /// </summary>
+    // Текст файлов держится в памяти: он меняется только через Write этого же процесса, поэтому
+    // повторное чтение с диска ничего не даёт. Разбор при этом остаётся на каждый вызов: тот, кто
+    // получил объект, вправе его менять, и отдавать одну и ту же копию всем нельзя.
+    // При двухстах планшетах состояние читается на каждое подключение, каждую подпись и каждый
+    // список: без этого одно событие сети превращалось в сотни обращений к диску.
+    private readonly Dictionary<string, (string Text, DateTime Stamp, long Length)> _text = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Текст файла из кэша, если он не менялся на диске. Метка времени и размер проверяются
+    /// всегда: файл могли поправить руками рядом с работающей службой, и делать вид, что этого
+    /// не было, до перезапуска нельзя. Проверка это один запрос к файловой системе вместо
+    /// полного чтения и разбора.
+    /// </summary>
+    private string? ReadText(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists) { _text.Remove(path); return null; }
+        if (_text.TryGetValue(path, out var cached)
+            && cached.Stamp == info.LastWriteTimeUtc && cached.Length == info.Length)
+            return cached.Text;
+        var text = File.ReadAllText(path);
+        info.Refresh();
+        _text[path] = (text, info.LastWriteTimeUtc, info.Length);
+        return text;
+    }
+
     private T ReadOr<T>(string path, Func<T> fallback)
     {
-        if (!File.Exists(path)) return fallback();
+        var text = ReadText(path);
+        if (text is null) return fallback();
         try
         {
-            var v = JsonSerializer.Deserialize<T>(File.ReadAllText(path), Json);
+            var v = JsonSerializer.Deserialize<T>(text, Json);
             if (v is not null) return v;
         }
         catch (Exception ex)
@@ -935,6 +977,8 @@ public class StorageService
         {
             var backup = path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
             File.Move(path, backup, overwrite: true);
+            // Испорченный текст из кэша тоже надо убрать, иначе он переживёт карантин файла.
+            _text.Remove(path);
             var file = Path.GetFileName(path);
             var backupName = Path.GetFileName(backup);
             // В очередь кладём всегда: из неё фоновая проверка поднимает уведомление оператору.
@@ -960,9 +1004,14 @@ public class StorageService
 
     private void Write<T>(string path, T value)
     {
+        var text = JsonSerializer.Serialize(value, Json);
         var tmp = path + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(value, Json));
+        File.WriteAllText(tmp, text);
         File.Move(tmp, path, overwrite: true);
+        // Кэш обновляется тем же текстом, который лёг на диск: следующее чтение получит именно
+        // записанное, а не то, что было до записи.
+        var info = new FileInfo(path);
+        _text[path] = (text, info.LastWriteTimeUtc, info.Length);
     }
 
     private static DocumentConfig DefaultDocument() => new()

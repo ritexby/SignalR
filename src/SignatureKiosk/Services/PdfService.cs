@@ -150,9 +150,14 @@ public class PdfService
                         keepImages[file] = xi;
                     }
                     imageBlocks++;
-                    w.BlockImage(xi, block.ImageWidth, DocumentTemplating.CleanImageUrl(block.ImageUrl) ?? "", block.Align);
+                    // Картинка не встаёт сбоку другой картинки: две обтекаемые подряд означали бы
+                    // колонку из картинок и обрывки текста между ними.
+                    w.ClearWrap();
+                    w.BlockImage(xi, block.ImageWidth, DocumentTemplating.CleanImageUrl(block.ImageUrl) ?? "",
+                        block.Align, block.Wrap, block.WrapGap);
                 }
                 else if (block.Runs is { Count: > 0 }) { w.Rich(block.Runs, isHeading: false, block.Align); w.Gap(8); }
+                else if (!string.IsNullOrEmpty(block.ImageUrl)) { /* картинка уже нарисована выше */ }
             }
         }
 
@@ -210,6 +215,7 @@ public class PdfService
         void RenderGroup(string? title, bool required, string? selected, List<DocGroupOption> options,
             string? selectedLabel, List<TextRun>? titleRuns = null)
         {
+            w.ClearWrap();
             w.Gap(6);
             var head = DocumentTemplating.LabelRuns(titleRuns, title);
             if (head.Count > 0) w.Rich(MarkedRuns("", head, required), isHeading: true);
@@ -230,6 +236,7 @@ public class PdfService
 
         foreach (var page in doc.Pages ?? new List<DocPage>())
         {
+            w.ClearWrap();
             var heading = DocumentTemplating.HeadingRuns(page);
             if (heading.Count > 0) { w.Rich(heading, isHeading: true, page.HeadingAlign); w.Gap(2); }
 
@@ -238,6 +245,7 @@ public class PdfService
                 if (kind == 0) { RenderBlocks(new[] { DocumentTemplating.Blocks(page)[index] }); continue; }
                 if (kind == 1)
                 {
+                    w.ClearWrap();
                     var cb = page.Checkboxes[index];
                     // Оформление подписи пункта попадает и в PDF: пункт, выделенный на планшете,
                     // должен так же выделяться и на бумаге, иначе документ на экране и документ
@@ -252,8 +260,10 @@ public class PdfService
                     // экране: иначе по документу нельзя понять, что именно ею подтверждено.
                     var sig = page.Signatures[index];
                     if (placed.Contains((sig.Key ?? "").Trim())) continue;
+                    w.ClearWrap();
                     w.Gap(6);
-                    w.SignatureBlock(sig.Label, PageSignature(sig.Key), "Подпись в этом поле не поставлена.", sig.Key ?? "");
+                    w.SignatureBlock(sig.Label, PageSignature(sig.Key), "Подпись в этом поле не поставлена.",
+                        sig.Key ?? "", sig.Width, sig.Height, sig.Align);
                     continue;
                 }
                 // Отсканированный код в PDF не печатается: это служебные данные заказа, а не то,
@@ -314,6 +324,7 @@ public class PdfService
         var брак = signaturePng is not null && img is null;
         if (!placed.Contains("") || брак)
         {
+            w.ClearWrap();
             w.Gap(26);
             if (брак)
             {
@@ -437,7 +448,42 @@ public class PdfService
 
         public void Gap(double h) => _y += h;
 
-        private void Ensure(double h) { if (_y + h > _pageH - Margin) NewPage(); }
+        /// <summary>
+        /// Опуститься ниже обтекаемой картинки, если поток ещё внутри неё. Нужно перед тем, что
+        /// не должно вставать сбоку: пунктом, группой, местом подписи или новой картинкой. Иначе
+        /// они наехали бы на картинку, а обтекание задумано только для текста.
+        /// </summary>
+        public void ClearWrap()
+        {
+            if (!FloatActive) { ClearFloat(); return; }
+            _y = _floatBottom + 4;
+            ClearFloat();
+        }
+
+        // ---------- Обтекание картинки текстом ----------
+        // Пока строка попадает в вертикальный отрезок, занятый картинкой, её левая или правая
+        // граница сдвигается. Это и есть обтекание: свой перенос строк обходит картинку так же,
+        // как это делает браузер на планшете.
+        private double _floatBottom;   // до какого y картинка занимает место
+        private double _floatWidth;    // сколько она отнимает по ширине, вместе с отступом
+        private bool _floatRight;      // картинка справа, значит текст жмётся влево
+
+        private bool FloatActive => _floatWidth > 0 && _y < _floatBottom;
+        /// <summary>Левая граница строки на текущей высоте.</summary>
+        private double LineLeft => FloatActive && !_floatRight ? Margin + _floatWidth : Margin;
+        /// <summary>Правая граница строки на текущей высоте.</summary>
+        private double LineRight => Margin + _contentW - (FloatActive && _floatRight ? _floatWidth : 0);
+
+        private void ClearFloat() { _floatWidth = 0; _floatBottom = 0; }
+
+        private void Ensure(double h)
+        {
+            if (_y + h <= _pageH - Margin) return;
+            // Новая страница обнуляет обтекание: картинка осталась на прошлой, и держать её
+            // отступ дальше значило бы сузить текст без всякой причины.
+            ClearFloat();
+            NewPage();
+        }
 
         private void Draw(string text, XFont font)
         {
@@ -540,7 +586,7 @@ public class PdfService
             // выравнивании по обоим краям, поэтому куски разорванного слова, склеенные без
             // пробела, растягиванием не разъезжаются.
             var pending = new List<(string text, XFont font, XBrush brush, bool italic, double x, double w, bool gap)>();
-            double x = Margin, lineH = 0;
+            double x = LineLeft, lineH = 0;
             var mode = (align ?? "").Trim().ToLowerInvariant();
 
             // lastLine: последняя строка абзаца. По обоим краям она не растягивается, иначе
@@ -552,8 +598,9 @@ public class PdfService
                 Ensure(h);
                 double baseline = _y + lineH;
                 var last = pending[^1];
-                double lineW = last.x + last.w - Margin;
-                double free = _contentW - lineW;
+                var left = pending[0].x;
+                double lineW = last.x + last.w - left;
+                double free = (LineRight - left) - lineW;
                 double shift = 0, stretch = 0;
                 if (free > 0)
                 {
@@ -573,7 +620,7 @@ public class PdfService
                     DrawWord(t.text, t.font, t.brush, t.italic, t.x + shift + stretch * passed, baseline);
                 }
                 _y += h;
-                pending.Clear(); x = Margin; lineH = 0;
+                pending.Clear(); x = LineLeft; lineH = 0;
             }
 
             foreach (var run in runs ?? new List<TextRun>())
@@ -590,8 +637,9 @@ public class PdfService
                     foreach (var raw in segments[si].Split(' '))
                     {
                         if (raw.Length == 0) continue;
-                        var pieces = _gfx.MeasureString(raw, font).Width > _contentW
-                            ? BreakLongWord(raw, font, _contentW)
+                        var доступно = LineRight - LineLeft;
+                        var pieces = _gfx.MeasureString(raw, font).Width > доступно
+                            ? BreakLongWord(raw, font, доступно)
                             : new List<string> { raw };
                         var first = true;
                         foreach (var word in pieces)
@@ -601,7 +649,7 @@ public class PdfService
                             // разорванного слова склеиваются без пробела, иначе разрыв читался бы
                             // как два разных слова.
                             double sp = pending.Count > 0 && first ? space : 0;
-                            if (pending.Count > 0 && x + sp + ww > Margin + _contentW) { Flush(false); sp = 0; }
+                            if (pending.Count > 0 && x + sp + ww > LineRight) { Flush(false); sp = 0; }
                             x += sp;
                             pending.Add((word, font, brush, run.Italic, x, ww, sp > 0));
                             x += ww;
@@ -638,7 +686,8 @@ public class PdfService
         }
 
         /// <summary>Draw a block image scaled to a percent of the content width, capped to the page.</summary>
-        public void BlockImage(XImage img, int widthPct, string url = "", string? align = null)
+        public void BlockImage(XImage img, int widthPct, string url = "", string? align = null,
+            string? wrap = null, int wrapGap = 10)
         {
             if (img.PixelWidth <= 0 || img.PixelHeight <= 0) return;
             double pct = Math.Clamp(widthPct <= 0 ? 100 : widthPct, 10, 100) / 100.0;
@@ -651,6 +700,20 @@ public class PdfService
             // подчиняется тому же выравниванию, что и текст. По обоим краям для картинки
             // означает по левому: растягивать её было бы искажением.
             var mode = (align ?? "").Trim().ToLowerInvariant();
+            var сторона = (wrap ?? "").Trim().ToLowerInvariant();
+            if (сторона is "left" or "right")
+            {
+                // Картинка с обтеканием не сдвигает поток вниз: она встаёт сбоку и открывает
+                // вертикальный отрезок, внутри которого строки становятся уже.
+                var отступ = Math.Clamp(wrapGap, 0, 60);
+                double ix = сторона == "right" ? Margin + _contentW - dw : Margin;
+                _gfx.DrawImage(img, ix, _y, dw, dh);
+                Note("image", ix, _y, dw, dh, url);
+                _floatWidth = dw + отступ;
+                _floatBottom = _y + dh + 4;
+                _floatRight = сторона == "right";
+                return;
+            }
             double free = _contentW - dw;
             double dx = free <= 0 ? 0 : mode == "center" ? free / 2 : mode == "right" ? free : 0;
             _gfx.DrawImage(img, Margin + dx, _y, dw, dh);
@@ -668,28 +731,37 @@ public class PdfService
         /// <param name="img">Сама подпись. Пусто, если её ещё нет или встроить не удалось.</param>
         /// <param name="note">Что написать вместо подписи, когда её нет.</param>
         /// <param name="key">Имя поля подписи, попадает в раскладку.</param>
-        public void SignatureBlock(string? label, XImage? img, string? note, string key)
+        public void SignatureBlock(string? label, XImage? img, string? note, string key,
+            int widthPt = 0, int heightPt = 0, string? align = null)
         {
+            // Размер места под подпись задаётся у самого поля, в точках. Ноль означает «как
+            // всегда»: документы, собранные до появления этой настройки, выглядят как выглядели.
+            double bw = widthPt > 0 ? Math.Min(Math.Clamp(widthPt, 60, 495) * _signScale, _contentW) : SignW;
+            double bh = heightPt > 0 ? Math.Clamp(heightPt, 40, 300) * _signScale : SignH;
+            var mode = (align ?? "").Trim().ToLowerInvariant();
+            double свободно = _contentW - bw;
+            double bx = Margin + (свободно <= 0 ? 0 : mode == "center" ? свободно / 2 : mode == "right" ? свободно : 0);
+
             double head = string.IsNullOrEmpty(label) ? 0 : H2.GetHeight() * 1.5;
-            Ensure(head + SignH + 12);
+            Ensure(head + bh + 12);
             if (!string.IsNullOrEmpty(label))
             {
-                _gfx.DrawString(label, H2, XBrushes.Black, new XPoint(Margin, _y + H2.GetHeight()));
-                Note("text", Margin, _y, _gfx.MeasureString(label, H2).Width, head, label, H2.Size, true);
+                _gfx.DrawString(label, H2, XBrushes.Black, new XPoint(bx, _y + H2.GetHeight()));
+                Note("text", bx, _y, _gfx.MeasureString(label, H2).Width, head, label, H2.Size, true);
                 _y += head;
             }
-            Note("sign", Margin, _y, SignW, SignH, key);
+            Note("sign", bx, _y, bw, bh, key);
             if (img is not null)
             {
-                var (dw, dh) = FitInto(img, SignW, SignH);
-                _gfx.DrawImage(img, Margin, _y + (SignH - dh) / 2, dw, dh);
+                var (dw, dh) = FitInto(img, bw, bh);
+                _gfx.DrawImage(img, bx, _y + (bh - dh) / 2, dw, dh);
             }
             else if (!string.IsNullOrEmpty(note))
             {
-                _gfx.DrawString(note, Body, XBrushes.Gray, new XPoint(Margin, _y + Body.GetHeight()));
+                _gfx.DrawString(note, Body, XBrushes.Gray, new XPoint(bx, _y + Body.GetHeight()));
             }
-            _y += SignH + 4;
-            _gfx.DrawLine(new XPen(XColors.Gray, 0.75), Margin, _y, Margin + SignW, _y);
+            _y += bh + 4;
+            _gfx.DrawLine(new XPen(XColors.Gray, 0.75), bx, _y, bx + bw, _y);
             _y += 6;
         }
 

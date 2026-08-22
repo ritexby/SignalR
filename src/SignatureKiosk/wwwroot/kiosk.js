@@ -133,6 +133,10 @@
     slides.images = images;
     slides.interval = Math.max(1, (payload && payload.intervalSec) || 6) * 1000;
     slides.index = 0;
+    // Список рекламы доступен наружу, чтобы его можно было проверить тестом, а не по картинке
+    // на экране: в каждый момент видна только одна, а важен весь список.
+    window.__slidesForTest = slides.images.slice();
+    setTimeout(watchPush, 0);
 
     el.slideA.classList.remove("show");
     el.slideB.classList.remove("show");
@@ -156,6 +160,7 @@
     if (slides.images.length < 2) return;
     slides.index = (slides.index + 1) % slides.images.length;
     var url = slides.images[slides.index];
+    watchPush();
     var incoming = slides.front === "A" ? el.slideB : el.slideA;
     var outgoing = slides.front === "A" ? el.slideA : el.slideB;
     incoming.src = url;
@@ -179,6 +184,7 @@
     doc.checks = {};
     doc.picks = {};          // группа -> ключ выбранного варианта ("" = ничего не выбрано)
     doc.signs = {};          // имя поля подписи -> картинка в виде data URL
+    doc.signThumbs = {};     // и её уменьшенная копия, только для наблюдателя
     doc.codes = {};          // имя поля сканирования -> { code, format, label }
     doc.pagePads = {};       // имя поля подписи -> перо, чтобы очистить и восстановить
     doc.pad = null;
@@ -227,7 +233,7 @@
   function clearDocState() {
     endDocSession();
     doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {}; doc.picks = {};
-    doc.signs = {}; doc.codes = {}; doc.pagePads = {};
+    doc.signs = {}; doc.signThumbs = {}; doc.codes = {}; doc.pagePads = {};
     doc.pad = null; doc.finalInk = ""; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
     el.docBody.innerHTML = ""; el.docFooter.innerHTML = "";
     el.docTitle.textContent = ""; el.docProgress.textContent = "";
@@ -259,7 +265,14 @@
     return out;
   }
 
+  // «Не» переворачивает ответ части целиком. Считать это должен тот же код, что и обычную часть,
+  // иначе планшет и сервер разошлись бы в понимании одного и того же условия.
   function partHolds(cond) {
+    var ok = partValue(cond);
+    return cond.not ? !ok : ok;
+  }
+
+  function partValue(cond) {
     var val = String(liveValue(cond.field) || "").trim().toLowerCase();
     var target = String(cond.value || "").trim().toLowerCase();
     switch (cond.op) {
@@ -272,16 +285,35 @@
     }
   }
 
-  function condHolds(cond) {
-    var parts = condParts(cond);
+  // Наборы условия: само оно со своим «и» и всё, что присоединено через «или». Хватает одного
+  // набора, выполненного целиком.
+  function condGroups(cond) {
+    var out = [];
+    if (!cond) return out;
+    out.push(cond);
+    ((cond && cond.or) || []).forEach(function (alt) { if (alt) out.push(alt); });
+    return out;
+  }
+
+  function groupHolds(group) {
+    var parts = condParts(group);
     for (var i = 0; i < parts.length; i++) if (!partHolds(parts[i])) return false;
     return true;
+  }
+
+  function condHolds(cond) {
+    if (!cond) return true;
+    var groups = condGroups(cond);
+    for (var i = 0; i < groups.length; i++) if (groupHolds(groups[i])) return true;
+    return false;
   }
 
   function dependsOn(key) {
     var uses = false;
     function check(c) {
-      condParts(c).forEach(function (part) { if (part.field === key) uses = true; });
+      condGroups(c).forEach(function (group) {
+        condParts(group).forEach(function (part) { if (part.field === key) uses = true; });
+      });
     }
     (doc.config.pages || []).forEach(function (p) {
       check(p.visibleWhen);
@@ -431,11 +463,42 @@
   //
   // Планшет молчит, пока за ним никто не смотрит: сервер включает и выключает рассказ.
   // Связь односторонняя: отсюда наверх уходит только состояние, а обратно не приходит ничего.
-  var watch = { on: false, timer: null, lastSign: "" };
+  var watch = { on: false, timer: null };
+
+  // Наблюдателю уходит уменьшенная копия подписи, а не оригинал. Подпись с настоящего планшета
+  // весит сотни килобайт, а сообщение хаба ограничено по размеру, и превышение рвёт соединение:
+  // планшет переподключается, получает документ заново и возвращает клиента на первую страницу
+  // прямо посреди подписания. Оригинал подписи при этом не трогается: он уходит на сервер
+  // обычным запросом и в полном качестве.
+  var WATCH_THUMB_W = 320;      // ширина копии для наблюдателя
+  var WATCH_THUMB_MAX = 24000;  // и жёсткий предел веса: что не влезло, не отправляется вовсе
+  function padThumb(canvas) {
+    if (!canvas || !canvas.width || !canvas.height) return "";
+    try {
+      var k = Math.min(1, WATCH_THUMB_W / canvas.width);
+      var c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(canvas.width * k));
+      c.height = Math.max(1, Math.round(canvas.height * k));
+      var g = c.getContext("2d");
+      // На белом, а не на прозрачном: JPEG прозрачности не знает, а он вчетверо легче PNG.
+      g.fillStyle = "#ffffff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(canvas, 0, 0, c.width, c.height);
+      var out = c.toDataURL("image/jpeg", 0.6);
+      return out.length > WATCH_THUMB_MAX ? "" : out;
+    } catch (e) { return ""; }
+  }
 
   function watchState() {
     var screen = doc.screens[doc.index];
     var out = { mode: doc.config ? "document" : "slides" };
+    if (out.mode === "slides") {
+      // Реклама тоже показывается наблюдателю: оператору важно видеть, что на экране идёт
+      // именно то, что он поставил. Уходит только адрес картинки, сама она у админки уже есть.
+      out.slide = slides.images[slides.index] || "";
+      out.slideIndex = slides.index + 1;
+      out.slideCount = slides.images.length;
+      return out;
+    }
     if (scan && scan.active) {
       // Про камеру говорим словами: у наблюдателя никакой камеры не открывается и разрешения
       // не спрашивается, он видит только, что клиент подносит код.
@@ -454,7 +517,7 @@
     // Подписи идут картинками только когда они уже готовы: пока клиент ведёт линию, штрихи
     // догоняют отдельным потоком, иначе на каждое движение уходил бы целый PNG.
     var signs = {};
-    Object.keys(doc.signs || {}).forEach(function (k) { if (doc.signs[k]) signs[k] = doc.signs[k]; });
+    Object.keys(doc.signThumbs || {}).forEach(function (k) { if (doc.signThumbs[k]) signs[k] = doc.signThumbs[k]; });
     out.signs = signs;
     if (screen.type === "signature") out.finalInk = doc.finalInk || "";
     out.missing = screen.type === "page"
@@ -471,8 +534,14 @@
     watch.timer = setTimeout(function () {
       watch.timer = null;
       if (!watch.on || !conn) return;
-      try { conn.invoke("ReportScreen", watchState()).catch(function () { /* смотреть перестали */ }); }
-      catch (e) { /* соединение уже закрыто */ }
+      try {
+        var st = watchState();
+        // Последняя защита: если сообщение всё-таки распухло, картинки выбрасываются целиком.
+        // Наблюдение не должно ронять связь ни при каких обстоятельствах: разрыв посреди
+        // подписания возвращает клиента на первую страницу.
+        if (JSON.stringify(st).length > 28000) { st.signs = {}; st.finalInk = ""; st.tooBig = true; }
+        conn.invoke("ReportScreen", st).catch(function () { /* смотреть перестали */ });
+      } catch (e) { /* соединение уже закрыто */ }
     }, 120);
   }
 
@@ -532,9 +601,21 @@
       if (ia === "right") fig.style.textAlign = "right";
       else if (ia === "center") fig.style.textAlign = "center";
       else if (ia === "justify") fig.style.textAlign = "left";
+      // Обтекание: картинка встаёт сбоку, а текст следующих абзацев идёт рядом с ней.
+      var wrap = (b && b.wrap || "").toLowerCase();
+      if (wrap === "left" || wrap === "right") {
+        var зазор = Math.max(0, Math.min(60, parseInt(b.wrapGap, 10) || 0));
+        fig.className = "doc-image doc-image-wrap";
+        fig.style.cssFloat = wrap;
+        fig.style.width = Math.min(Math.max(parseInt(b.imageWidth, 10) || 100, 10), 70) + "%";
+        fig.style.textAlign = "";
+        fig.style.margin = wrap === "left"
+          ? "0 " + зазор + "px " + зазор + "px 0"
+          : "0 0 " + зазор + "px " + зазор + "px";
+      }
       var im = document.createElement("img"); im.src = b.imageUrl;
       var w = Math.min(Math.max(parseInt(b.imageWidth, 10) || 100, 10), 100);
-      im.style.width = w + "%";
+      im.style.width = (wrap === "left" || wrap === "right") ? "100%" : (w + "%");
       fig.appendChild(im); parent.appendChild(fig);
     } else {
       var text = document.createElement("div"); text.className = "doc-text";
@@ -712,6 +793,22 @@
       }
       var wrap = document.createElement("div");
       wrap.className = "sign-wrap page-sign-wrap";
+      // Размер и положение места подписи заданы у поля, в точках, как и в PDF. На экране
+      // подписи размер не применяется: там поле занимает весь экран, в этом и смысл отдельного
+      // экрана, а сжимать его до полоски значило бы отменить его назначение.
+      var экран = (page.kind || "").toLowerCase() === "signature";
+      if (!экран) {
+        var ш = Math.max(60, Math.min(495, parseInt(sig.width, 10) || 280));
+        var в = Math.max(40, Math.min(300, parseInt(sig.height, 10) || 100));
+        // Точка листа на планшете шире точки PDF: доля от ширины текста на A4 (495 точек)
+        // сохраняет пропорцию, а не привязывает поле к бумажным миллиметрам.
+        wrap.style.width = Math.round(ш / 495 * 1000) / 10 + "%";
+        wrap.style.height = Math.round(в * 1.9) + "px";
+        var са = (sig.align || "").toLowerCase();
+        if (са === "right") { wrap.style.marginLeft = "auto"; wrap.style.marginRight = "0"; }
+        else if (са === "center") { wrap.style.marginLeft = "auto"; wrap.style.marginRight = "auto"; }
+        else { wrap.style.marginLeft = "0"; wrap.style.marginRight = "auto"; }
+      }
       var canvas = document.createElement("canvas");
       wrap.appendChild(canvas);
       var line = document.createElement("div"); line.className = "sign-line"; wrap.appendChild(line);
@@ -722,7 +819,12 @@
       clear.className = "btn btn-ghost page-sign-clear"; clear.type = "button"; clear.textContent = "Очистить";
       clear.addEventListener("click", function () {
         var pad = doc.pagePads[sig.key];
-        if (pad) { pad.clear(); doc.signs[sig.key] = ""; wrap.classList.remove("has-ink"); updateFooter(); }
+        if (pad) {
+          pad.clear(); doc.signs[sig.key] = ""; doc.signThumbs[sig.key] = "";
+          wrap.classList.remove("has-ink"); updateFooter();
+          // Иначе у наблюдателя осталась бы подпись, которой уже нет.
+          watchPush();
+        }
       });
       box.appendChild(clear);
 
@@ -744,7 +846,8 @@
       var saved = doc.signs[sig.key];
       if (saved) { try { pad.fromDataURL(saved); wrap.classList.add("has-ink"); } catch (e) { /* не восстановилась */ } }
       pad.addEventListener("endStroke", function () {
-        doc.signs[sig.key] = pad.isEmpty() ? "" : pad.toDataURL("image/png");
+          doc.signs[sig.key] = pad.isEmpty() ? "" : pad.toDataURL("image/png");
+        doc.signThumbs[sig.key] = pad.isEmpty() ? "" : padThumb(canvas);
         watchPush();
         wrap.classList.toggle("has-ink", !pad.isEmpty());
         if (!pad.isEmpty()) clearMiss(wrap.closest(".page-sign"));
@@ -901,7 +1004,7 @@
       // Итоговая подпись уходит наблюдателю такой, какая она уже нарисована. Не на каждое
       // движение пера, а по концу штриха: так линия появляется у оператора почти сразу, а
       // канал не забивается сотней картинок в секунду.
-      doc.finalInk = doc.pad.isEmpty() ? "" : doc.pad.toDataURL("image/png");
+      doc.finalInk = doc.pad.isEmpty() ? "" : padThumb(canvas);
       watchPush();
     });
     sizeCanvas();
@@ -918,16 +1021,26 @@
     doc.idleMs = 0;                 // no idle timer on the thank-you screen (a touch must not re-arm it)
     el.docProgress.textContent = "";
     var thanks = (doc.config && doc.config.thankYouText) || "Спасибо!";
+    var runs = labelRuns(doc.config && doc.config.thankYouRuns, thanks);
+    var align = (doc.config && doc.config.thankYouAlign) || "";
+    var blocks = (doc.config && doc.config.thankYouBlocks) || [];
+    var держать = (doc.config && doc.config.thankYouSec) || 6;
     // PRIVACY: the title may contain the signer's data (for example "Согласие {{ФИО}}"), so it is
     // wiped as soon as signing is done, together with the resolved document held in memory. Only
-    // the thank-you text survives on screen.
+    // the thank-you page survives on screen: она собрана оператором и личных данных не несёт.
     el.docTitle.textContent = "";
-    doc.config = { thankYouText: thanks, pages: [] };
+    doc.config = { thankYouText: thanks, thankYouRuns: runs, thankYouBlocks: blocks,
+      thankYouAlign: align, thankYouSec: держать, pages: [] };
     doc.checks = {};
     var body = document.createElement("div");
     body.className = "thankyou";
     var mark = document.createElement("div"); mark.className = "mark"; body.appendChild(mark);
-    var h = document.createElement("h2"); h.textContent = thanks; body.appendChild(h);
+    var h = document.createElement("h2");
+    if (align === "center" || align === "right" || align === "justify") h.style.textAlign = align;
+    appendRuns(h, runs);
+    body.appendChild(h);
+    // Страница благодарности собирается как обычная: текст и картинки с тем же оформлением.
+    blocks.forEach(function (b) { appendBlock(body, b); });
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
     el.docFooter.innerHTML = "";
@@ -938,7 +1051,7 @@
       doc.thankTimer = null;
       if (conn) conn.invoke("FinishDocument").catch(function () { clearDocState(); showLayer("slides"); });
       else { clearDocState(); showLayer("slides"); }
-    }, 6000);
+    }, Math.max(2, Math.min(60, держать)) * 1000);
   }
 
   function renderFooter(opts) {
@@ -960,7 +1073,13 @@
     if (opts.clear) {
       var clear = document.createElement("button");
       clear.className = "btn btn-ghost"; clear.textContent = "Очистить";
-      clear.addEventListener("click", function () { if (doc.pad) { doc.pad.clear(); updateFooter(); } });
+      clear.addEventListener("click", function () {
+        if (!doc.pad) return;
+        doc.pad.clear();
+        doc.finalInk = "";
+        updateFooter();
+        watchPush();
+      });
       el.docFooter.appendChild(clear);
     }
     if (opts.next) {
@@ -1444,7 +1563,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "6.0";
+  var APP_VERSION = "6.4";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {
@@ -1461,13 +1580,28 @@
     return /\b401\b|\b403\b|unauthorized|forbidden/i.test(String(e.message || e));
   }
 
+  // Задержки между попытками вернуться на связь. Двести планшетов теряют её одновременно:
+  // погасла точка доступа, перезапустилась служба. С одинаковыми задержками они и возвращаются
+  // одновременно, все двести в одну и ту же секунду, и служба получает залп подключений ровно
+  // тогда, когда сама только встала. Поэтому к каждой задержке добавляется случайная надбавка
+  // до половины её длины: возвращение растягивается, а не бьёт одним ударом.
+  var RETRY_STEPS = [0, 2000, 5000, 10000, 15000, 30000];
+  var connectTries = 0;
+  function retryDelay(attempt) {
+    var base = RETRY_STEPS[Math.min(attempt, RETRY_STEPS.length - 1)];
+    return base + Math.floor(Math.random() * (base / 2 + 500));
+  }
+
   function connect() {
     var token = getToken();
     if (!token) { showEnroll(""); return; }
 
     conn = new signalR.HubConnectionBuilder()
       .withUrl("/hub/kiosk", { accessTokenFactory: function () { return getToken() || ""; } })
-      .withAutomaticReconnect([0, 2000, 5000, 10000, 15000, 30000])
+      // Своё правило, а не список задержек: список в SignalR исчерпывается, и после последней
+      // попытки планшет перестаёт пытаться совсем. Планшет в киоске никто не перезагружает
+      // руками, поэтому пытаться он должен без конца.
+      .withAutomaticReconnect({ nextRetryDelay: function (ctx) { return retryDelay(ctx.previousRetryCount); } })
       .configureLogging(signalR.LogLevel.Warning)
       .build();
 
@@ -1483,17 +1617,23 @@
     conn.onreconnecting(function () { showStatus("Соединение потеряно. Переподключение…"); });
     conn.onreconnected(function () { hideStatus(); register(); });
     conn.onclose(function () {
-      if (getToken()) { showStatus("Нет связи с сервером. Переподключение…"); setTimeout(connect, 4000); }
+      if (getToken()) { showStatus("Нет связи с сервером. Переподключение…"); setTimeout(connect, retryDelay(1)); }
       else showEnroll("");
     });
 
     showStatus("Подключение к серверу…");
     conn.start()
-      .then(function () { hideStatus(); return register(); })
+      .then(function () { hideStatus(); connectTries = 0; return register(); })
       .catch(function (e) {
         conn = null;
         if (isAuthError(e)) { clearToken(); showEnroll("Планшет не авторизован. Введите новый код активации."); }
-        else { showStatus("Нет связи с сервером. Повтор через 4 с…"); setTimeout(connect, 4000); }
+        else {
+          // Служба не поднялась: повторять чаще с каждым разом бессмысленно, а всем парком в
+          // одну секунду тем более. Пауза растёт до полуминуты и у каждого планшета своя.
+          var пауза = retryDelay(connectTries++);
+          showStatus("Нет связи с сервером. Повтор через " + Math.round(пауза / 1000) + " с…");
+          setTimeout(connect, пауза);
+        }
       });
   }
 

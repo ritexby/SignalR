@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using System.Linq;
 
 namespace SignatureKiosk.Models;
@@ -119,6 +120,14 @@ public class ImageInfo
     public string FileName { get; set; } = "";
     public string OriginalName { get; set; } = "";
     public DateTime UploadedUtc { get; set; }
+    /// <summary>
+    /// С какого дня показывать эту картинку в рекламе, включительно. Пусто означает «с самого
+    /// начала». Дата, а не время: реклама живёт днями, а не минутами, и час начала показа никому
+    /// не нужен. Хранится как yyyy-MM-dd, чтобы не зависеть от часового пояса читающего.
+    /// </summary>
+    public string? ShowFrom { get; set; }
+    /// <summary>По какой день показывать, включительно. Пусто означает «без конца».</summary>
+    public string? ShowTo { get; set; }
 }
 
 // ---------- Signing document ----------
@@ -210,6 +219,23 @@ public class VisibleWhen
     /// скобки оператору не нужны и понятной формой на экране не показываются.
     /// </summary>
     public List<VisibleWhen>? And { get; set; }
+
+    /// <summary>
+    /// Другие наборы условий: содержимое показывается, если целиком выполнен хотя бы один из
+    /// них («Пол равно Ж И возраст меньше 14» ИЛИ «представитель отмечен»). Каждый набор здесь
+    /// это своя часть со своим списком «и». Вложенности нет: любое условие раскладывается в
+    /// «или» из «и», а скобки оператору на экране показать нечем.
+    /// </summary>
+    public List<VisibleWhen>? Or { get; set; }
+
+    /// <summary>
+    /// Отрицание этой части: содержимое показывается, когда она НЕ выполнена. В паре с «и» это
+    /// и есть «и не» («Пол равно Ж И НЕ представитель отмечен»), в паре с «или» это «или не», а
+    /// на первой части просто «не». Отдельной пометкой, а не отдельными операциями: «ни одно из»
+    /// и «не в окне годовщины» иначе выразить нечем, а у остальных сравнений обратное уже есть.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Not { get; set; }
 }
 
 /// <summary>A block inside a page: either rich text (Runs) or an image (ImageUrl). Shown only when
@@ -224,6 +250,17 @@ public class DocBlock
     public string? Align { get; set; }
     public string? ImageUrl { get; set; }        // "/media/{file}" when this block is an image
     public int ImageWidth { get; set; } = 100;   // image width as a percent of the content width (10..100)
+    /// <summary>
+    /// Обтекание картинки текстом: "left" картинка слева и текст справа от неё, "right" наоборот.
+    /// Пусто означает картинку отдельной строкой, как было всегда. Работает одинаково на планшете,
+    /// в предпросмотре и в PDF.
+    /// </summary>
+    public string? Wrap { get; set; }
+    /// <summary>
+    /// Отступ от картинки до обтекающего текста, в точках. Ноль означает вплотную, и это почти
+    /// всегда плохо читается, поэтому по умолчанию небольшой отступ.
+    /// </summary>
+    public int WrapGap { get; set; } = 10;
     public VisibleWhen? VisibleWhen { get; set; }
     // Место элемента внутри страницы. Блоки текста, чекбоксы и группы стоят в одном общем порядке,
     // поэтому номер сквозной для всех трёх видов. -1 означает "не задан": так выглядят документы,
@@ -290,6 +327,21 @@ public class DocumentConfig
     /// На подпись, которой задано своё место на листе, не влияет: у неё свой прямоугольник.
     /// </summary>
     public int PdfSignatureScale { get; set; } = 100;
+
+    /// <summary>
+    /// Экран благодарности как обычная страница: заголовок, текст и картинки с тем же
+    /// оформлением, что и везде. Пусто означает старый вид, где показывалась одна строка
+    /// ThankYouText: документы, собранные раньше, продолжают работать как работали.
+    /// </summary>
+    public List<TextRun> ThankYouRuns { get; set; } = new();
+    public string? ThankYouAlign { get; set; }
+    public List<DocBlock> ThankYouBlocks { get; set; } = new();
+
+    /// <summary>
+    /// Сколько секунд держать экран благодарности, прежде чем вернуться к рекламе. Меньше двух
+    /// секунд человек не успевает прочитать, больше минуты планшет впустую занят.
+    /// </summary>
+    public int ThankYouSec { get; set; } = 6;
 }
 
 /// <summary>
@@ -499,6 +551,17 @@ public class SignatureRecord
 /// </summary>
 public class DocSignature
 {
+    /// <summary>
+    /// Ширина места под подпись, в точках. Те же единицы, что и у высоты, и те же, что в PDF:
+    /// оператор задаёт размер один раз и получает ровно его и на бумаге, и на экране. Обычные
+    /// 280 на 100 это размер, с которого всё начиналось, поэтому старые документы не меняются.
+    /// </summary>
+    public int Width { get; set; } = 280;
+    /// <summary>Высота места под подпись, в точках. Меньше сорока расписаться уже негде.</summary>
+    public int Height { get; set; } = 100;
+    /// <summary>Где стоит место под подпись: left, center, right. Пусто означает по левому краю.</summary>
+    public string? Align { get; set; }
+
     /// <summary>Имя для API и для записи подписи. Пустое имя получает номер при сохранении.</summary>
     public string Key { get; set; } = "";
     /// <summary>Надпись над полем: что именно человек подписывает.</summary>
@@ -641,6 +704,8 @@ public record EnrollRequest(string? Code);
 public record CreateEnrollmentDto(string? Name, string? WorkstationId, List<string>? GroupIds, int? TtlMinutes);
 public record DeviceUpdateDto(string? Name, List<string>? GroupIds, string? WorkstationId);
 public record GroupDto(string? Name);
+/// <summary>Сроки показа картинки в рекламе. Пустая дата снимает ограничение с этой стороны.</summary>
+public record ImageDatesDto(string? ShowFrom, string? ShowTo);
 public record WorkstationDto(string? ExternalId, string? Name, string? Location);
 public record ApiKeyDto(string? Label);
 
