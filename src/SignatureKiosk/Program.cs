@@ -1010,8 +1010,13 @@ admin.MapGet("/schedule", () => Results.Ok(new
 {
     rules = storage.GetScheduleRules(),
     // Часы сервера: оператор задаёт время по ним, и это должно быть видно, а не подразумеваться.
+    // Дата здесь же и по той же причине. Сутки везде считаются по этим часам: и расписание, и
+    // возраст, и окно вокруг годовщины. Если пояс сервера не тот, в котором живёт оператор, окно
+    // открывается и закрывается со сдвигом, и выглядит это как ошибка на день в счёте дней.
+    serverDate = DateTime.Now.ToString("yyyy-MM-dd"),
     serverTime = DateTime.Now.ToString("HH:mm"),
-    serverZone = TimeZoneInfo.Local.StandardName
+    serverZone = TimeZoneInfo.Local.StandardName,
+    serverOffset = TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).ToString()
 }));
 
 admin.MapPut("/schedule", (List<ScheduleRule>? rules) => Results.Ok(new { rules = storage.SaveScheduleRules(rules) }));

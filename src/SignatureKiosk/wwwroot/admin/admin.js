@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "6.4";
+  var APP_VERSION = "6.5";
 
   var state = {
     slidesTarget: "all",   // кому идёт реклама: all / group:{id} / device:{id} / devices
@@ -166,20 +166,11 @@
     var raw = (location.hash || "").replace(/^#/, "");
     var name = "";
     try { name = decodeURIComponent(raw); } catch (e) { name = raw; }
-    // Ссылка вида #watch=WS-204 открывает наблюдение за нужным планшетом сразу. Вкладка при
-    // этом остаётся списком планшетов: закрыв окно, оператор видит, за чем смотрел.
+    // Ссылка вида #watch=WS-204 открывает окно наблюдения за нужным планшетом. Это окно целиком
+    // занято экраном планшета: оператор нажал «смотреть экран планшета» и в новом окне ждёт
+    // экран планшета, а не админку со списком.
     var m = /^watch=(.+)$/.exec(name);
-    if (m) {
-      openTab("devices", false);
-      // Ждём и список планшетов, и живое соединение: без него наблюдение не начнётся.
-      var ждём = setInterval(function () {
-        if (!hub || hub.state !== "Connected") return;
-        clearInterval(ждём);
-        watchByName(m[1]);
-      }, 200);
-      setTimeout(function () { clearInterval(ждём); }, 15000);
-      return;
-    }
+    if (m) { watchSoloStart(m[1]); return; }
     if (name && openTab(name, false)) return;
     openTab("slides", true);
   }
@@ -4311,12 +4302,30 @@
   var SCH_DAYS = [["Пн", 1], ["Вт", 2], ["Ср", 3], ["Чт", 4], ["Пт", 5], ["Сб", 6], ["Вс", 7]];
   var schActions = [];
 
+  // Смещение пояса из вида «03:00:00» в вид «+3». Оператору нужна разница с UTC, а не
+  // продолжительность с точностью до секунды.
+  function смещение(текст) {
+    var m = /^(-)?(\d+):(\d+)/.exec(String(текст || ""));
+    if (!m) return "";
+    var знак = m[1] ? "-" : "+";
+    var ч = parseInt(m[2], 10), мин = parseInt(m[3], 10);
+    return знак + ч + (мин ? ":" + String(мин).padStart(2, "0") : "");
+  }
+
   function loadSchedule() {
     return apiJson("/schedule/actions").then(function (list) { schActions = list || []; })
       .then(function () { return apiJson("/schedule"); })
       .then(function (data) {
+        // Часы сервера целиком: дата, время и пояс. По этим суткам считается не только
+        // расписание, но и возраст, и окно вокруг годовщины. Пояс сервера, не совпадающий с тем,
+        // в котором живёт оператор, сдвигает границы окна на несколько часов, и выглядит это как
+        // ошибка на день в счёте дней. Пусть будет видно, а не подразумевается.
         var t = $("schServerTime");
-        if (t) t.textContent = "сейчас " + (data.serverTime || "-");
+        if (t) {
+          var зона = data.serverZone ? (data.serverZone + (data.serverOffset ? ", UTC" + смещение(data.serverOffset) : "")) : "";
+          t.textContent = "часы сервера: " + (data.serverDate || "-") + " " + (data.serverTime || "-") +
+            (зона ? " (" + зона + ")" : "");
+        }
         renderSchedule((data && data.rules) || []);
       });
   }
@@ -5366,7 +5375,7 @@
   //
   // Ничего не сохраняется: поток живёт, пока открыто окно, и не оставляет следов ни на сервере,
   // ни здесь.
-  var watch = { deviceId: null, name: "", doc: null, mode: "", state: null, node: null };
+  var watch = { deviceId: null, name: "", doc: null, mode: "", state: null, node: null, solo: false };
 
   // Ссылка вида /admin/#watch=WS-204 открывает наблюдение сразу за нужным планшетом. Так внешняя
   // система, отправившая документ, может дать оператору прямую ссылку рядом со своим заказом, не
@@ -5385,6 +5394,111 @@
       if (!dev.online) { toast("Планшет «" + dev.name + "» не на связи: смотреть нечего"); return; }
       openWatch(dev);
     }).catch(function () { toast("Не удалось найти планшет"); });
+  }
+
+  // Окно, открытое ссылкой #watch=, показывает только экран планшета. Раньше в нём открывалась
+  // вкладка «Планшеты», а наблюдение всплывало поверх неё окошком. Пока планшет был на связи,
+  // это ещё сходило за задуманное, но стоило ему быть офлайн, и окошко не появлялось вовсе:
+  // оператор получал новое окно со списком планшетов и мимолётной всплывашкой, которую успевал
+  // не заметить, и не понимал, почему экрана нет.
+  //
+  // Теперь окно ждёт планшет само. Не на связи это не отказ: планшет мог перезагружаться или
+  // только что получить документ, поэтому окно так и говорит и продолжает ждать, а экран
+  // появляется сам, как только планшет отзовётся.
+  var СОЛО_ОПРОС = 3000;
+  function watchSoloStart(искомое) {
+    if (watch.solo) return;              // окно уже в этом виде, второй раз перестраивать нечего
+    watch.solo = true;
+    document.body.classList.add("watch-solo");
+    // Панели закрываются и в разметке, а не только правилом оформления: иначе в окне остаётся
+    // открытой вкладка, которая просто не видна, и она продолжает подгружать свои данные.
+    document.querySelectorAll(".panel").forEach(function (p) { p.classList.add("hidden"); });
+    document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("active"); });
+
+    var корень = el("div", "watch watch-solo-page");
+    var шапка = el("div", "watch-head");
+    var заголовок = el("h3", null, "Экран планшета");
+    шапка.appendChild(заголовок);
+    var метка = el("span", "watch-live", "поиск планшета…");
+    шапка.appendChild(метка);
+    корень.appendChild(шапка);
+    корень.appendChild(el("p", "sig-meta", "Здесь видно то же, что видит клиент. Окно только для просмотра: изменить отсюда ничего нельзя, на планшет не уходит ничего, и запись не ведётся."));
+
+    var рамка = el("div", "watch-frame");
+    watch.node = el("div", "watch-screen");
+    рамка.appendChild(watch.node);
+    корень.appendChild(рамка);
+
+    var низ = el("div", "modal-actions");
+    var закрыть = el("button", "btn btn-ghost", "Закрыть окно");
+    закрыть.addEventListener("click", function () {
+      window.close();
+      // Закрыть удаётся только окну, которое открыла сама страница. Ссылку могли открыть и
+      // руками в обычной вкладке: там браузер закрытие запрещает, и кнопка выглядела бы
+      // сломанной. Тогда возвращаемся в админку к списку планшетов, а не оставляем оператора
+      // в окне, из которого нет выхода.
+      setTimeout(function () {
+        if (window.closed) return;
+        location.hash = "#devices";
+        location.reload();
+      }, 300);
+    });
+    низ.appendChild(закрыть);
+    корень.appendChild(низ);
+
+    var место = document.querySelector(".content");
+    if (место) место.appendChild(корень);
+    watchSay("Ищем планшет…");
+
+    var q = String(искомое || "").trim().toLowerCase();
+    var идёт = false;
+    function попытка() {
+      if (watch.deviceId || идёт) return;         // уже смотрим или ответ ещё не пришёл
+      идёт = true;
+      apiJson("/devices").then(function (list) {
+        идёт = false;
+        if (watch.deviceId) return;
+        var dev = (list || []).filter(function (d) {
+          return (d.workstation && String(d.workstation.externalId || "").toLowerCase() === q)
+            || String(d.name || "").toLowerCase() === q
+            || String(d.id || "").toLowerCase() === q;
+        })[0];
+        if (!dev) {
+          метка.textContent = "планшет не найден";
+          метка.className = "watch-live off";
+          watchSay("Планшет «" + искомое + "» не найден. Возможно, он удалён или в ссылке другое имя.");
+          return;
+        }
+        заголовок.textContent = "Экран планшета: " + (dev.name || dev.id);
+        if (!dev.online) {
+          метка.textContent = "планшет не на связи";
+          метка.className = "watch-live off";
+          watchSay("Планшет «" + (dev.name || dev.id) + "» сейчас не на связи. Экран появится сам, как только планшет отзовётся.");
+          return;
+        }
+        // Планшет нашёлся и на связи: с этого мгновения окно смотрит за ним, а опрос списка
+        // больше ничего не решает.
+        watch.deviceId = dev.id;
+        watch.name = dev.name || dev.id;
+        watch.doc = null; watch.state = null;
+        метка.textContent = "наблюдение";
+        метка.className = "watch-live";
+        watchSay("Подключение к планшету…");
+        watchStart();
+      }).catch(function () {
+        идёт = false;
+        watchSay("Не удалось прочитать список планшетов. Пробуем ещё раз…");
+      });
+    }
+
+    // Связь нужна и для самого наблюдения: без живого соединения планшету не сказать, что за
+    // ним смотрят. Поэтому первая попытка ждёт соединения, а дальше опрос идёт по кругу.
+    var ждём = setInterval(function () {
+      if (!hub || hub.state !== "Connected") return;
+      clearInterval(ждём);
+      попытка();
+      setInterval(попытка, СОЛО_ОПРОС);
+    }, 200);
   }
 
   // Наблюдение открывается отдельным окном браузера, а не поверх админки: оператору обычно надо

@@ -816,3 +816,12 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 /* Планшет пропал: метка «наблюдение» гаснет, чтобы застывшая картинка не читалась как поломка. */
 .watch-live.off { background: #6b7280; }
 .watch-live.off::before { animation: none; }
+
+/* Окно, открытое ссылкой #watch=. Оно целиком занято экраном планшета: вкладки, выход и панели
+   админки в нём не нужны и только отвлекают от того, ради чего окно открыли. */
+body.watch-solo .tabs,
+body.watch-solo #logout,
+body.watch-solo .content > .panel { display: none; }
+body.watch-solo .content { padding-top: 12px; }
+.watch-solo-page { max-width: 1100px; margin: 0 auto; }
+.watch-solo-page .watch-frame { min-height: 60vh; }
