@@ -610,7 +610,7 @@ public class StorageService
                 Directory.CreateDirectory(DocumentsDir);
                 Write(path, doc);
             }
-            TouchDocument(info?.Id ?? DefaultIdNoLock(), doc.Title);
+            TouchDocument(info?.Id ?? DefaultIdNoLock(), doc.Title, doc.Kind);
         }
     }
 
@@ -621,15 +621,21 @@ public class StorageService
         return def?.Id ?? "main";
     }
 
-    /// <summary>Отметить время правки. Название документа не трогается: его задаёт оператор
-    /// в библиотеке, а заголовок внутри документа это другое и может отличаться.</summary>
-    private void TouchDocument(string id, string? title)
+    /// <summary>
+    /// Отметить правку документа в списке. Название берётся из заголовка самого документа: два
+    /// имени у одной вещи это путаница, из-за которой на закладке было написано одно, а в поле
+    /// «Заголовок документа» другое. Заголовок оператор видит и правит, значит он и есть имя.
+    /// Вид повторяется здесь же, чтобы список рисовался, не читая тексты всех документов.
+    /// </summary>
+    private void TouchDocument(string id, string? title, string? kind = null)
     {
         var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
         var info = lib.Documents.FirstOrDefault(d => d.Id == id);
         if (info is null) return;
         info.UpdatedUtc = DateTime.UtcNow;
-        if (string.IsNullOrWhiteSpace(info.Name) && !string.IsNullOrWhiteSpace(title)) info.Name = title!;
+        info.Kind = kind;
+        // Пустой заголовок имя не затирает: документ без заголовка остался бы безымянным.
+        if (!string.IsNullOrWhiteSpace(title)) info.Name = title!.Trim();
         Write(LibraryPath, lib);
     }
 
@@ -655,9 +661,17 @@ public class StorageService
                 IsDefault = false,
                 UpdatedUtc = DateTime.UtcNow
             };
-            // Копия делается с уже сохранённого документа: так новый документ начинается не с
-            // пустого листа, а с готового, и это самый частый способ завести второй.
-            var текст = string.IsNullOrWhiteSpace(copyOfId) ? DefaultDocument() : GetDocumentNoLock(copyOfId!);
+            // Копия делается с уже сохранённого документа. А новый начинается чистым: одна пустая
+            // страница и заголовок, который оператор только что ввёл. Прежде новый заводился
+            // копией образцового согласия, и человек, нажавший «Новый документ», получал чужой
+            // готовый текст про обработку персональных данных и не понимал, откуда он взялся.
+            var текст = string.IsNullOrWhiteSpace(copyOfId)
+                ? new DocumentConfig
+                {
+                    Title = info.Name,
+                    Pages = new List<DocPage> { new() { HeadingRuns = new List<TextRun> { new() { Text = "Страница 1" } } } }
+                }
+                : GetDocumentNoLock(copyOfId!);
             var path = DocFilePath(info.Id);
             if (path is null) return (null, "Не удалось создать документ.");
             Directory.CreateDirectory(DocumentsDir);

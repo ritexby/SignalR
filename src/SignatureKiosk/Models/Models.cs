@@ -420,6 +420,12 @@ public class DocumentInfo
     public string Name { get; set; } = "";
     /// <summary>Этот документ показывается, когда запрос пришёл без кода.</summary>
     public bool IsDefault { get; set; }
+    /// <summary>
+    /// Вид документа, повторённый из него самого: "info" или пусто. Хранится здесь, чтобы
+    /// список документов открывался, не читая тексты всех. Правда лежит в самом документе, а
+    /// это отражение, которое обновляется при каждом сохранении.
+    /// </summary>
+    public string? Kind { get; set; }
     public DateTime UpdatedUtc { get; set; }
 }
 

@@ -887,9 +887,6 @@ body.watch-solo .content { padding-top: 12px; }
   background: #fee2e2; color: #b91c1c; padding: 4px 8px; border-radius: 6px; margin-bottom: 6px; font-weight: 600;
 }
 
-/* Переключатель документов над редактором. */
-.doc-library { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
-.doc-picker { padding: 8px 10px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; min-width: 260px; font-weight: 600; }
 
 /* Признак «сохранять в PDF». Снятый должен быть заметен: по нему видно, чего не окажется в
    подписанной бумаге. Недоступный переключатель бледнеет, но остаётся на месте с объяснением. */
@@ -898,5 +895,58 @@ body.watch-solo .content { padding-top: 12px; }
 .pdf-flag input:disabled { cursor: not-allowed; }
 .pdf-flag:has(input:disabled) { color: #8a94a6; }
 
-.doc-kind { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted, #6b7280); }
-.doc-kind select { padding: 8px 10px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; }
+
+/* ---- Закладки документов ----
+   Ряд закладок, как листы в книге. Активная сливается с полотном ниже, остальные отступают:
+   так видно, где ты находишься, без единого слова. Ряд не переносится на вторую строку, а
+   прокручивается вбок: перенос дёргал бы всю вёрстку при каждом добавлении документа. */
+.doc-tabs { display: flex; align-items: flex-end; gap: 4px; overflow-x: auto; overflow-y: hidden;
+  border-bottom: 2px solid var(--border, #e5e7eb); padding: 0 4px; margin: 0 0 14px; scrollbar-width: thin; }
+.doc-tab { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; max-width: 320px;
+  padding: 9px 12px; border: 1px solid transparent; border-bottom: none;
+  border-radius: 10px 10px 0 0; background: transparent; color: var(--muted, #6b7280);
+  font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: -2px; }
+.doc-tab:hover { background: #f3f4f6; color: var(--text, #111827); }
+.doc-tab.on { background: #fff; color: var(--text, #111827); border-color: var(--border, #e5e7eb);
+  border-bottom: 2px solid #fff; cursor: default; }
+.doc-tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-tab svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.doc-tab-mark { color: #16a34a; }
+.doc-tab-kind { color: #6b7280; }
+.doc-tab.on .doc-tab-kind { color: #4f46e5; }
+/* Точка несохранённого: та же условность, что в редакторах кода. */
+.doc-tab-dot { color: #b45309; font-size: 18px; line-height: 1; margin-left: -2px; }
+.doc-tab-menu { padding: 0 2px; color: #9ca3af; font-size: 16px; line-height: 1; }
+.doc-tab:hover .doc-tab-menu, .doc-tab.on .doc-tab-menu { color: var(--text, #111827); }
+.doc-tab-add { color: #16a34a; font-weight: 700; }
+.doc-tab-add:hover { background: #ecfdf5; color: #15803d; }
+.doc-tabs-hint { flex: 0 0 auto; align-self: center; margin-left: 10px; padding-bottom: 6px;
+  font-size: 12px; color: #9ca3af; }
+
+/* Меню закладки. Ставится поверх страницы по координатам самой закладки. */
+.doc-menu { position: absolute; z-index: 60; min-width: 260px; display: flex; flex-direction: column;
+  align-items: stretch; gap: 2px; padding: 8px; background: #fff; border: 1px solid var(--border, #e5e7eb);
+  border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.16); }
+.doc-menu .btn { justify-content: flex-start; }
+.doc-menu-head { padding: 4px 8px 8px; font-size: 12px; color: #9ca3af;
+  border-bottom: 1px solid var(--border, #e5e7eb); margin-bottom: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-menu-note { padding: 6px 8px; font-size: 12px; color: #9ca3af; }
+
+/* Свёрнутая справка о тегах: раскрывается по нажатию и не занимает четверть экрана всегда. */
+.tags-box > summary { cursor: pointer; font-weight: 600; }
+.tags-box > summary::marker { color: #16a34a; }
+.tags-box[open] > summary { margin-bottom: 8px; }
+
+/* Кнопки панели документа собраны в группы разной природы. Зазор между группами больше, чем
+   внутри: глаз сам читает их как три набора, а не как ряд из семи. */
+.tb-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.toolbar-actions { gap: 16px; }
+/* Сохранение единственное здесь меняет документ на сервере, поэтому обведено. */
+.tb-group-save { padding: 2px; border: 1px dashed var(--line, #e5e7eb); border-radius: 10px; }
+
+/* Завершающие экраны в оглавлении: это не страницы, и выглядеть как страницы они не должны. */
+.toc-fixed-list { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line, #e5e7eb); }
+.toc-fixed-title { padding: 0 8px 6px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .04em; color: #9ca3af; }
+.toc-fixed-note { padding: 4px 8px 0; font-size: 11px; color: #9ca3af; }

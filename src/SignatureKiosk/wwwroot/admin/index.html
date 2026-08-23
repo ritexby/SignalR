@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v6.9</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v7.0</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -66,10 +66,15 @@
 
       <!-- Document -->
       <section class="panel hidden" data-panel="document">
+        <!-- Закладки документов стоят самыми первыми: сначала видно, ГДЕ ты находишься и что
+             документов несколько, и только потом что с этим документом делать. Прежде
+             переключатель был выпадающим списком ниже панели кнопок, и о существовании других
+             документов не догадывался никто. -->
+        <div id="docTabs" class="doc-tabs" role="tablist" aria-label="Документы"></div>
         <div class="panel-head">
-          <h2>Документ для подписанта</h2>
+          <h2 id="docHeading">Документ для подписанта</h2>
         </div>
-        <p class="hint">Документ показывается только на один выбранный планшет (вместе с его персональными данными). Реклама (вкладка «Слайды») настраивается отдельно и может идти на все планшеты, группу или один - это независимо.</p>
+        <p class="hint" id="docHint">Документ показывается только на один выбранный планшет (вместе с его персональными данными). Реклама (вкладка «Слайды») настраивается отдельно и может идти на все планшеты, группу или один - это независимо.</p>
         <div class="toolbar">
           <label class="target-inline">Планшет:
             <select id="docTarget"></select>
@@ -84,31 +89,39 @@
           <!-- Пометка стоит слева, где есть свободное место: внутри ряда кнопок она раздвигала
                его и «Отправить на планшет» уезжала на вторую строку. -->
           <span id="docDirty" class="dirty-mark hidden">есть несохранённые изменения</span>
+          <!-- Кнопки собраны в три группы разной природы, а не в один ряд из семи. Слева
+               проверить и посмотреть, посередине сохранить, справа работа с планшетом.
+               Сохранение выделено рамкой: это единственное здесь действие, которое меняет
+               документ на сервере. -->
           <div class="toolbar-actions">
-            <button id="checkDoc" class="btn btn-ghost" data-icon="shield" title="Найти ошибки в документе до того, как он попадёт к клиенту">Проверить</button>
-            <button id="previewDoc" class="btn btn-ghost" data-icon="eye" title="Посмотреть, как документ будет выглядеть на планшете, с тестовыми значениями тегов">Предпросмотр</button>
-            <button id="pdfLayout" class="btn btn-ghost" data-icon="page" title="Показать листы будущего PDF и расставить на них подписи мышью">PDF</button>
-            <button id="apiTest" class="btn btn-ghost" data-icon="send" title="Вставить запрос, как будто он пришёл по API, и выполнить его целиком">API</button>
-            <span class="tb-sep"></span>
-            <button id="saveDocument" class="btn btn-ghost" data-icon="save">Сохранить</button>
-            <span class="tb-sep"></span>
-            <button id="showSlides" class="btn btn-ghost" data-icon="back"
-                    title="Вернуть выбранный планшет к показу рекламы и стереть на нём данные подписанта">Вернуть рекламу</button>
-            <button id="showDocument" class="btn btn-primary" data-icon="send"
-                    title="Показать документ на выбранном планшете. Документ всегда уходит только на один планшет">Отправить на планшет</button>
+            <div class="tb-group" role="group" aria-label="Проверка и просмотр">
+              <button id="checkDoc" class="btn btn-ghost" data-icon="shield" title="Найти ошибки в документе до того, как он попадёт к клиенту">Проверить</button>
+              <button id="previewDoc" class="btn btn-ghost" data-icon="eye" title="Посмотреть, как документ будет выглядеть на планшете, с тестовыми значениями тегов">Предпросмотр</button>
+              <button id="pdfLayout" class="btn btn-ghost" data-icon="page" title="Показать листы будущего PDF и расставить на них подписи мышью">PDF</button>
+              <button id="apiTest" class="btn btn-ghost" data-icon="send" title="Вставить запрос, как будто он пришёл по API, и выполнить его целиком">API</button>
+            </div>
+            <div class="tb-group tb-group-save" role="group" aria-label="Сохранение">
+              <button id="saveDocument" class="btn btn-ghost" data-icon="save" title="Записать документ на сервер">Сохранить</button>
+            </div>
+            <div class="tb-group" role="group" aria-label="Планшет">
+              <button id="showSlides" class="btn btn-ghost" data-icon="back"
+                      title="Вернуть выбранный планшет к показу рекламы и стереть на нём данные подписанта">Вернуть рекламу</button>
+              <button id="showDocument" class="btn btn-primary" data-icon="send"
+                      title="Показать документ на выбранном планшете. Документ всегда уходит только на один планшет">Отправить на планшет</button>
+            </div>
           </div>
         </div>
         <div id="docNoDevices" class="note-box note-warn hidden">
           Планшетов пока нет, поэтому отправить документ некуда. Заведите планшет на вкладке «Планшеты»: там создаётся код активации, который вводится на планшете один раз. Документ можно готовить и без планшета, а также посмотреть в предпросмотре.
         </div>
-        <div class="note-box">
+        <details class="note-box tags-box">
+          <summary>Подстановка данных и список тегов, которые принимает API</summary>
           <div>Подстановка данных: пишите в тексте <code>{{ФИО}}</code>, <code>{{ДР}}</code>, <code>{{Адрес регистрации}}</code> - при показе через API на их место подставляются значения. Можно использовать в заголовках, тексте, пунктах чекбоксов и в условиях показа. Регистр не важен: <code>{{ПОЛ}}</code> и <code>{{Пол}}</code> это один тег. <b>Список ниже не ограничение:</b> в запросе можно прислать поле с любым именем, и если такой тег стоит в тексте, он заполнится. Список это то, что уже согласовано и предлагается в подсказках.</div>
           <div id="docPlaceholders" class="placeholders"></div>
-        </div>
+        </details>
         <div class="doc-layout">
         <aside id="docToc" class="doc-toc"></aside>
         <div class="doc-editor">
-          <div id="docLibrary" class="doc-library"></div>
           <label class="field">Заголовок документа
             <input id="docTitle" type="text" />
           </label>

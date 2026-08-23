@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "6.9";
+  var APP_VERSION = "7.0";
 
   var state = {
     slidesTarget: "all",   // кому идёт реклама: all / group:{id} / device:{id} / devices
@@ -557,83 +557,163 @@
   // между ними, заводит новые и задаёт коды, которыми документ вызывается из внешней системы.
   var docList = [];
 
+  // Закладки документов, как листы в книге: видно, что документов несколько, в каком ты сейчас,
+  // и что рядом есть плюс. Выпадающий список этого не показывал вовсе: он выглядел настройкой,
+  // а не местом, где ты находишься.
   function renderLibrary() {
-    var host = $("docLibrary");
+    var host = $("docTabs");
     if (!host) return;
     host.innerHTML = "";
 
-    var сел = el("select", "doc-picker"); сел.setAttribute("data-role", "docpicker");
     docList.forEach(function (d) {
-      var подпись = d.name + " (" + d.code + ")" + (d.isDefault ? " по умолчанию" : "");
-      сел.appendChild(new Option(подпись, d.id));
+      var таб = el("button", "doc-tab"); таб.type = "button";
+      таб.setAttribute("role", "tab");
+      таб.setAttribute("data-role", "doctab");
+      таб.setAttribute("data-id", d.id);
+      var свой = d.id === state.docId;
+      таб.classList.toggle("on", свой);
+      таб.setAttribute("aria-selected", свой ? "true" : "false");
+
+      // Основной документ помечается значком, а не словами «по умолчанию»: раньше они слипались
+      // с названием и читались как его часть.
+      if (d.isDefault) {
+        var дом = icon("check", "doc-tab-mark");
+        дом.setAttribute("title", "Основной: показывается, когда запрос пришёл без кода");
+        таб.appendChild(дом);
+      }
+      // Вид документа виден с одного взгляда: подписной или только показ.
+      var инфо = свой ? String((state.doc && state.doc.kind) || "") === "info" : d.kind === "info";
+      var видЗнак = icon(инфо ? "eye" : "pen", "doc-tab-kind");
+      видЗнак.setAttribute("title", инфо ? "Только показ, без подписи" : "Подписной документ");
+      таб.appendChild(видЗнак);
+
+      // У открытого документа имя берётся из его заголовка: он мог быть только что изменён и
+      // ещё не сохранён, а закладка обязана показывать то, что оператор видит перед собой.
+      var имяТаба = свой && state.doc && String(state.doc.title || "").trim()
+        ? String(state.doc.title).trim() : (d.name || d.code);
+      таб.appendChild(el("span", "doc-tab-name", имяТаба));
+      // Несохранённое видно прямо на закладке, как в редакторах кода.
+      if (свой && dirty) таб.appendChild(el("span", "doc-tab-dot", "•"));
+      таб.title = d.name + "\nКод для API: " + d.code + (d.isDefault ? "\nОсновной документ" : "");
+      таб.addEventListener("click", function () {
+        if (свой) { docMenu(таб, d); return; }   // повторное нажатие на своей закладке открывает меню
+        switchDoc(d.id);
+      });
+      // Меню закладки: всё, что делают с самим документом, живёт здесь, а не в общем ряду кнопок,
+      // где непонятно, к чему оно относится: к документу или к странице.
+      var меню = el("span", "doc-tab-menu"); меню.textContent = "⋯";
+      меню.title = "Действия с документом";
+      меню.addEventListener("click", function (e) {
+        e.stopPropagation();
+        if (!свой) { switchDoc(d.id); return; }
+        docMenu(таб, d);
+      });
+      таб.appendChild(меню);
+      host.appendChild(таб);
     });
-    сел.value = state.docId || (docList[0] || {}).id || "";
-    сел.title = "Какой документ вы правите. Внешняя система вызывает его кодом в скобках.";
-    сел.addEventListener("change", function () { switchDoc(сел.value); });
-    host.appendChild(сел);
 
-    var текущий = docList.filter(function (d) { return d.id === state.docId; })[0];
+    var плюс = el("button", "doc-tab doc-tab-add"); плюс.type = "button";
+    плюс.appendChild(icon("plus"));
+    плюс.appendChild(el("span", null, "Документ"));
+    плюс.title = "Завести ещё один документ";
+    плюс.addEventListener("click", function () { docMetaDialog(null, null); });
+    host.appendChild(плюс);
 
-    // Для чего документ. Подписной заканчивается подписью, записью и PDF. Информационный
-    // существует, чтобы показать клиенту присланное внешней системой, и не оставляет следов.
-    var видL = el("label", "doc-kind", "Вид");
-    var вид = el("select"); вид.setAttribute("data-role", "dockind");
-    вид.appendChild(new Option("подписной", ""));
-    вид.appendChild(new Option("информационный, без подписи", "info"));
-    вид.value = String((state.doc && state.doc.kind) || "");
-    вид.title = "Информационный документ показывают и возвращают рекламу: ни подписи, ни записи, ни PDF.";
-    вид.addEventListener("change", function () {
+    // Пока документ один, о библиотеке никто не догадается: подсказка говорит это словами и
+    // исчезает, как только документов становится больше.
+    if (docList.length < 2) {
+      var подсказка = el("span", "doc-tabs-hint",
+        "документов может быть несколько, каждый вызывается из внешней системы по своему коду");
+      host.appendChild(подсказка);
+    }
+
+    // Заголовок и описание меняются вместе с видом: у документа, который только показывают,
+    // «Документ для подписанта» это неправда.
+    syncDocHeading();
+    // Своя закладка должна быть на виду: после переключения или создания она может оказаться за
+    // краем прокрутки.
+    var своя = host.querySelector(".doc-tab.on");
+    if (своя && своя.scrollIntoView) своя.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  // Заголовок правят в поле редактора, и закладка должна показывать его сразу: ждать
+  // сохранения значит держать на закладке вчерашнее имя.
+  (function () {
+    var поле = $("docTitle");
+    if (!поле) return;
+    поле.addEventListener("input", function () {
+      var своя = document.querySelector(".doc-tab.on .doc-tab-name");
+      if (своя) своя.textContent = поле.value.trim() || "без заголовка";
+    });
+  })();
+
+  function syncDocHeading() {
+    var инфо = state.doc && String(state.doc.kind || "") === "info";
+    var h = $("docHeading");
+    if (h) h.textContent = инфо ? "Документ для показа" : "Документ для подписанта";
+    var hint = $("docHint");
+    if (hint) {
+      hint.textContent = инфо
+        ? "Этот документ не подписывают: его показывают клиенту и возвращают рекламу. Ни записи, ни PDF после него не остаётся. Показывается только на один выбранный планшет."
+        : "Документ показывается только на один выбранный планшет (вместе с его персональными данными). Реклама (вкладка «Слайды») настраивается отдельно и может идти на все планшеты, группу или один - это независимо.";
+    }
+  }
+
+  // Меню закладки: переименование, вид, копия, основной, удаление.
+  function docMenu(anchor, d) {
+    closeDocMenu();
+    var m = el("div", "doc-menu"); m.setAttribute("data-role", "docmenu");
+    var инфо = String((state.doc && state.doc.kind) || "") === "info";
+
+    function пункт(значок, текст, действие, опасный) {
+      var b = iconBtn(значок, текст, "btn-ghost btn-sm" + (опасный ? " btn-danger" : ""));
+      b.addEventListener("click", function () { closeDocMenu(); действие(); });
+      m.appendChild(b);
+    }
+
+    m.appendChild(el("div", "doc-menu-head", d.name + " · код " + d.code));
+
+    пункт("pen", инфо ? "Сделать подписным" : "Сделать документом только для показа", function () {
       if (!state.doc) return;
-      state.doc.kind = вид.value || null;
-      // Сохраняем сразу: вид меняет весь смысл документа, и сервер может отказать, если на
-      // страницах есть поля подписи. Отказ должен прийти сейчас, а не через полчаса правок.
-      saveDoc().then(function () { renderDoc(); renderLibrary(); }).catch(function () {
-        // Сервер отказал и объяснил почему: возвращаем переключатель на место.
-        state.doc.kind = вид.value === "info" ? null : "info";
-        вид.value = String(state.doc.kind || "");
+      var прежний = state.doc.kind || null;
+      state.doc.kind = инфо ? null : "info";
+      saveDoc().then(function () { renderDoc(); return loadLibrary(); }).catch(function () {
+        state.doc.kind = прежний;   // сервер отказал и объяснил почему
       });
     });
-    видL.appendChild(вид);
-    host.appendChild(видL);
-
-    var добавить = iconBtn("plus", "Новый", "btn-ghost btn-sm");
-    добавить.title = "Завести новый документ";
-    добавить.addEventListener("click", function () { docMetaDialog(null, null); });
-    host.appendChild(добавить);
-
-    var копия = iconBtn("copy", "Копия", "btn-ghost btn-sm");
-    копия.title = "Завести новый документ копией этого";
-    копия.addEventListener("click", function () { docMetaDialog(null, state.docId); });
-    host.appendChild(копия);
-
-    var правка = iconBtn("settings", "Код и название", "btn-ghost btn-sm");
-    правка.addEventListener("click", function () { docMetaDialog(текущий, null); });
-    host.appendChild(правка);
-
-    if (текущий && !текущий.isDefault) {
-      var поумолч = iconBtn("check", "Сделать основным", "btn-ghost btn-sm");
-      поумолч.title = "Этот документ будет показываться, когда запрос пришёл без кода";
-      поумолч.addEventListener("click", function () {
-        apiSend("/documents/" + encodeURIComponent(state.docId) + "/default", "POST", {})
+    пункт("settings", "Код для API", function () { docMetaDialog(d, null); });
+    пункт("copy", "Создать копию", function () { docMetaDialog(null, d.id); });
+    if (!d.isDefault) {
+      пункт("check", "Сделать основным", function () {
+        apiSend("/documents/" + encodeURIComponent(d.id) + "/default", "POST", {})
           .then(function () { return loadLibrary(); })
           .then(function () { toast("Документ показывается по умолчанию"); })
           .catch(function () { /* уже показано */ });
       });
-      host.appendChild(поумолч);
-
-      var удалить = iconBtn("trash", "Удалить", "btn-danger btn-sm");
-      удалить.addEventListener("click", function () {
-        // Подтверждение спрашивается так же, как у остальных удалений в админке.
-        if (!confirm("Удалить документ «" + текущий.name + "»?\n\n" +
+      пункт("trash", "Удалить документ", function () {
+        if (!confirm("Удалить документ «" + d.name + "»?\n\n" +
           "Подписи, собранные по нему, останутся: у каждой записи своя копия документа.")) return;
-        api("/documents/" + encodeURIComponent(state.docId), { method: "DELETE" })
+        api("/documents/" + encodeURIComponent(d.id), { method: "DELETE" })
           .then(function () { state.docId = ""; return loadLibrary(); })
           .then(function () { return loadDoc(); })
           .then(function () { renderLibrary(); toast("Документ удалён"); })
           .catch(function () { /* уже показано */ });
-      });
-      host.appendChild(удалить);
+      }, true);
+    } else {
+      m.appendChild(el("div", "doc-menu-note",
+        "Основной документ нельзя удалить: он показывается, когда запрос пришёл без кода. Сначала назначьте основным другой."));
     }
+
+    document.body.appendChild(m);
+    var r = anchor.getBoundingClientRect();
+    m.style.left = Math.min(r.left, window.innerWidth - m.offsetWidth - 12) + "px";
+    m.style.top = (r.bottom + window.scrollY + 4) + "px";
+    setTimeout(function () { document.addEventListener("click", closeDocMenu, { once: true }); }, 0);
+  }
+
+  function closeDocMenu() {
+    var m = document.querySelector('[data-role="docmenu"]');
+    if (m) m.remove();
   }
 
   function loadLibrary() {
@@ -676,26 +756,27 @@
     var отмена = iconBtn("back", "Остаться", "btn-ghost");
     отмена.addEventListener("click", function () {
       closeModal();
-      var сел = document.querySelector('[data-role="docpicker"]');
-      if (сел) сел.value = state.docId;
+      renderLibrary();   // закладки перерисовываются: своя остаётся выделенной
     });
     c.appendChild(сохранить); c.appendChild(без); c.appendChild(отмена);
     openModal(c);
   }
 
-  // Код и название: у нового документа спрашиваются при заведении, у существующего правятся.
+  // Код документа. Имя документа это его заголовок, который оператор видит и правит в самом
+  // редакторе: два поля для одного имени однажды разъезжаются, и на закладке оказывается
+  // написано не то, что в документе. Поле названия остаётся только для документа без заголовка.
   function docMetaDialog(текущий, копияИз) {
     var c = el("div");
-    c.appendChild(el("h3", null, текущий ? "Код и название документа"
+    c.appendChild(el("h3", null, текущий ? "Код документа для API"
       : копияИз ? "Новый документ копией этого" : "Новый документ"));
     c.appendChild(el("p", "sig-meta",
-      "Код это имя, которым документ вызывается из внешней системы. Латиница, цифры, дефис. " +
-      "Название видите только вы."));
+      "Код это имя, которым документ вызывается из внешней системы: латиница, цифры, дефис. " +
+      "Название на закладке берётся из заголовка документа и меняется вместе с ним."));
     var кодL = el("label", "field", "Код для API");
     var код = el("input"); код.type = "text"; код.placeholder = "например: SOGLASIE";
     код.value = текущий ? текущий.code : "";
     кодL.appendChild(код); c.appendChild(кодL);
-    var имяL = el("label", "field", "Название");
+    var имяL = el("label", "field", "Название, пока у документа нет заголовка");
     var имя = el("input"); имя.type = "text"; имя.placeholder = "например: Согласие на обработку данных";
     имя.value = текущий ? текущий.name : "";
     имяL.appendChild(имя); c.appendChild(имяL);
@@ -2775,14 +2856,25 @@
     });
     toc.appendChild(list);
 
-    // Экран подписи и «Спасибо» клиент тоже видит, поэтому в оглавлении они есть.
-    var fixed = el("div", "toc-list");
-    [["pen", "Подпись"], ["tick", "Спасибо"]].forEach(function (pair) {
+    // Завершающие экраны клиент тоже видит, поэтому в оглавлении они есть. Но это не страницы:
+    // их нельзя удалить, переставить и открыть на правку. Раньше они стояли в одном ряду с
+    // обычными и выглядели как страницы, которые почему-то не нажимаются. Теперь отделены
+    // чертой и подписаны, чем они являются.
+    var инфо = state.doc && String(state.doc.kind || "") === "info";
+    var fixed = el("div", "toc-list toc-fixed-list");
+    fixed.appendChild(el("div", "toc-fixed-title", "Завершающие экраны"));
+    var экраны = инфо ? [["tick", "Спасибо"]] : [["pen", "Подпись"], ["tick", "Спасибо"]];
+    экраны.forEach(function (pair) {
       var row = el("div", "toc-fixed");
       row.appendChild(icon(pair[0]));
       row.appendChild(el("span", null, pair[1]));
+      row.title = pair[1] === "Подпись"
+        ? "Экран подписи. Ставится системой в конце документа, его нельзя переставить или удалить."
+        : "Экран прощания. Показывается после подписания и сам возвращает планшет к рекламе.";
       fixed.appendChild(row);
     });
+    // У документа только для показа экрана подписи нет вовсе: показывать там нечего.
+    if (инфо) fixed.appendChild(el("div", "toc-fixed-note", "Этот документ не подписывают: экрана подписи у него нет."));
     toc.appendChild(fixed);
 
     var actions = el("div", "toc-actions");
@@ -3687,10 +3779,6 @@
 
   function collectDoc() {
     выброшеноПустых = 0;
-    // Вид документа берётся из переключателя, если он на экране: иначе сохранение из другого
-    // места документа затирало бы его прежним значением.
-    var видЭл = document.querySelector('[data-role="dockind"]');
-    if (видЭл) state.doc.kind = видЭл.value || null;
     state.doc.title = $("docTitle").value; state.doc.signPrompt = $("signPrompt").value;
     state.doc.idleReturnSec = parseInt($("idleReturn").value, 10) || 0;
     var pages = [];
@@ -3842,6 +3930,16 @@
     }
     var mark = $("docDirty");
     if (mark) mark.classList.toggle("hidden", !dirty);
+    // Точка на своей закладке. Меняется только она: перестраивать весь ряд на каждое нажатие
+    // клавиши значило бы дёргать закладки под курсором оператора.
+    var своя = document.querySelector(".doc-tab.on");
+    if (своя) {
+      var точка = своя.querySelector(".doc-tab-dot");
+      if (dirty && !точка) {
+        var т = el("span", "doc-tab-dot", "•");
+        своя.insertBefore(т, своя.querySelector(".doc-tab-menu"));
+      } else if (!dirty && точка) точка.remove();
+    }
   }
 
   function saveDraft() {
