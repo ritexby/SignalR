@@ -260,3 +260,30 @@ html, body {
 .checks, .group, .page-sign, .scan-inline { clear: both; }
 .doc-text::after { content: ""; display: block; clear: none; }
 h2 { clear: both; }
+
+/* Горизонтальная черта между частями документа. */
+.doc-divider { border-top: 1px solid #cbd5e1; margin: 14px 0; }
+
+/* Списки: отступ слева под маркер, пункты не слипаются. */
+.doc-list { margin: 8px 0 8px 22px; padding: 0; }
+.doc-list li { margin: 4px 0; line-height: 1.45; }
+
+/* Таблица. Ширина не выходит за экран, а длинная таблица прокручивается сама, не растягивая
+   страницу вбок: горизонтальная прокрутка всей страницы на планшете мешает листать документ. */
+.doc-table-wrap { overflow-x: auto; margin: 10px 0; }
+.doc-table { border-collapse: collapse; width: 100%; }
+.doc-table th, .doc-table td { border: 1px solid #cbd5e1; padding: 8px 10px; text-align: left; vertical-align: top; }
+.doc-table th { background: #f1f5f9; font-weight: 700; }
+
+/* Поле ввода на странице. */
+.page-input { margin: 12px 0; }
+.page-input-title { display: block; font-weight: 600; margin-bottom: 6px; }
+.page-input-field { width: 100%; box-sizing: border-box; padding: 14px 12px; font-size: 1.05rem;
+  border: 2px solid #b9c2d0; border-radius: 10px; background: #fff; }
+.page-input-field:focus { outline: none; border-color: #16a34a; box-shadow: 0 0 0 4px rgba(22,163,74,.15); }
+.page-input.bad .page-input-field { border-color: #dc2626; }
+.page-input-hint { min-height: 1.1em; margin-top: 4px; color: #dc2626; font-size: .9rem; }
+.page-input.miss .page-input-field { border-color: #dc2626; }
+
+/* Кнопка «отметить всё» над длинным списком пунктов. */
+.check-all { margin: 6px 0 2px; }

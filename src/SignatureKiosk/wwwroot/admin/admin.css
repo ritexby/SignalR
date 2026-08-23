@@ -825,3 +825,78 @@ body.watch-solo .content > .panel { display: none; }
 body.watch-solo .content { padding-top: 12px; }
 .watch-solo-page { max-width: 1100px; margin: 0 auto; }
 .watch-solo-page .watch-frame { min-height: 60vh; }
+
+/* Поле ввода в списке элементов страницы: та же строка, что у сканирования и подписи. */
+.input-item .cb-row { align-items: center; }
+
+/* Черта и разрыв страницы: одна строка, править нечего, кроме условия. */
+.special-name { flex: 1; color: var(--muted, #64748b); }
+
+/* Панель оформления блока: плашка, рамка, отступ, межстрочный, список в одну строку. */
+.block-style { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0; }
+.block-style input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid #b9c2d0; border-radius: 6px; }
+
+/* Редактор таблицы: ячейки сеткой, ширины столбцов сверху. */
+.block-table { margin: 8px 0; }
+.table-grid { display: grid; gap: 4px; align-items: center; margin: 8px 0; overflow-x: auto; }
+.table-cell, .table-width { padding: 6px 8px; border: 1px solid #b9c2d0; border-radius: 6px; min-width: 80px; }
+.table-cell-head { background: #f1f5f9; font-weight: 700; }
+.table-width { background: #fbfdff; color: #64748b; }
+.table-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* Правила отметок у страницы. */
+.rules-panel { margin: 10px 0; padding: 10px; border: 1px dashed #cbd5e1; border-radius: 8px; }
+.rules-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.rule-row { display: flex; align-items: center; gap: 8px; }
+.rule-text { flex: 1; }
+.rules-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.rule-picks { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; max-height: 320px; overflow-y: auto; }
+
+/* Маркер в панели оформления текста: кружок с обводкой, чтобы светлый цвет был виден на белом. */
+.rt-swatch-mark { border: 1px solid #b9c2d0; border-radius: 4px; }
+/* Свой размер шрифта в точках. */
+.rt-pt input { width: 52px; padding: 3px 5px; border: 1px solid #b9c2d0; border-radius: 6px; }
+/* Пометка «по часам сервера» вместо списка тегов у условий по моменту показа. */
+.cond-clock-note { color: #6366f1; font-weight: 600; }
+/* Настройки колонтитула в окне раскладки PDF. */
+.pdfl-footer { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.pdfl-footer-title { color: var(--muted, #64748b); }
+
+/* Прожектор условий: панель тестовых значений над списком страниц. */
+/* Выключенный прожектор не должен занимать место и притягивать взгляд: это одна строка с
+   переключателем. Рамка и плашка появляются только когда он включён и действительно меняет вид
+   страниц. Без этого он отодвигал весь список страниц почти на восемьдесят пикселей вниз. */
+.spotlight { padding: 0; margin-bottom: 6px; }
+.spotlight.spot-active { border: 1px dashed #6366f1; border-radius: 8px; padding: 10px; margin-bottom: 10px; background: #fbfbff; }
+.spotlight-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.spotlight-fields { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.spotlight-fields .field-sm input, .spotlight-fields .field-sm select { min-width: 130px; }
+.spotlight-note { margin-top: 6px; }
+
+/* Погашенное: клиент этого при заданных значениях не увидит. Не скрывается совсем, иначе
+   оператор не понял бы, куда делся элемент, и не смог бы его поправить. */
+.pages-editor.spot-on .spot-off { opacity: .32; filter: grayscale(1); position: relative; }
+.pages-editor.spot-on .spot-off::after {
+  content: "не покажется"; position: absolute; top: 4px; right: 6px;
+  background: #64748b; color: #fff; font-size: .72rem; padding: 1px 6px; border-radius: 999px;
+}
+/* Страница, от которой ничего не осталось: клиент увидит пустой экран. */
+.pages-editor.spot-on .spot-empty { outline: 2px solid #dc2626; outline-offset: 2px; }
+.pages-editor.spot-on .spot-empty::before {
+  content: "при этих значениях страница пустая"; display: block;
+  background: #fee2e2; color: #b91c1c; padding: 4px 8px; border-radius: 6px; margin-bottom: 6px; font-weight: 600;
+}
+
+/* Переключатель документов над редактором. */
+.doc-library { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.doc-picker { padding: 8px 10px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; min-width: 260px; font-weight: 600; }
+
+/* Признак «сохранять в PDF». Снятый должен быть заметен: по нему видно, чего не окажется в
+   подписанной бумаге. Недоступный переключатель бледнеет, но остаётся на месте с объяснением. */
+.pdf-flag { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 13px; }
+.pdf-flag input:not(:checked) + * , .pdf-flag:has(input:not(:checked)) { color: #b45309; font-weight: 600; }
+.pdf-flag input:disabled { cursor: not-allowed; }
+.pdf-flag:has(input:disabled) { color: #8a94a6; }
+
+.doc-kind { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted, #6b7280); }
+.doc-kind select { padding: 8px 10px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; }

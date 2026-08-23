@@ -360,12 +360,15 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         // править, пока человек подписывал, и в запись легло бы не то, что он видел и подписал.
         DocumentConfig resolvedDoc;
         Dictionary<string, string>? recordFields;
+        string? кодДокумента = null, названиеДокумента = null;
         var session = string.IsNullOrEmpty(state.SessionId) ? null : storage.GetDocSession(deviceId);
         if (session is not null && session.SessionId == state.SessionId)
         {
             resolvedDoc = session.Document;
             DocumentTemplating.ApplyMarks(resolvedDoc, finalStates, finalGroups);
             recordFields = session.RecordFields;
+            кодДокумента = session.DocumentCode;
+            названиеДокумента = session.DocumentName;
         }
         else
         {
@@ -383,6 +386,12 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups);
         if (recordFields is { Count: 0 }) recordFields = null;
 
+        // Информационный документ не подписывают: на планшете экрана подписи нет вовсе, и запрос
+        // сюда означает либо сломанную страницу, либо чужой запрос. Записи о согласии из него
+        // быть не должно: согласия никто не давал.
+        if (DocumentTemplating.IsInfo(resolvedDoc))
+            return Results.BadRequest(new { error = "Этот документ информационный: его не подписывают." });
+
         // Обязательное должно быть заполнено. Это проверяет и страница планшета, но полагаться
         // на одну её нельзя: сломанная или подделанная страница прислала бы запись о согласии
         // без самого согласия, и запись выглядела бы подлинной. Отказ сессию не трогает: клиент
@@ -396,7 +405,23 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
             return Results.BadRequest(new { error = "Не заполнено обязательное: " + missing });
         }
 
-        var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, recordFields, extraSignatures);
+        // Поля ввода и правила отметок: то же самое, что проверяет страница планшета. Значения
+        // проверяются по снимку, а не по текущему шаблону: поле могли добавить только что.
+        var finalInputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var inp in sub.Inputs ?? new List<SubmittedInput>())
+        {
+            var k = DocumentTemplating.CleanKey(inp?.Key);
+            if (k.Length > 0) finalInputs[k] = (inp!.Value ?? "").Trim();
+        }
+        var broken = DocumentTemplating.BrokenRuleOrInput(resolvedDoc, finalStates, finalInputs);
+        if (broken is not null)
+        {
+            cleared = true;
+            return Results.BadRequest(new { error = broken });
+        }
+
+        var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, recordFields, extraSignatures,
+            кодДокумента, названиеДокумента);
 
         // The record is safely stored: from here the signer's data may leave the tablet.
         ClearSession();
@@ -760,28 +785,71 @@ admin.MapGet("/field-schema", () => Results.Ok(new
     })
 }));
 
+// ---- Библиотека документов ----
+// Документов может быть несколько. Адресуются они кодом: его пишет оператор, им пользуется
+// внешняя система. Текст документа читается и пишется теми же методами, что и раньше, просто
+// с указанием, какой именно: без указания берётся тот, что назначен по умолчанию.
+
+admin.MapGet("/documents", () => Results.Ok(storage.GetDocuments()));
+
+admin.MapPost("/documents", (DocumentMetaDto? dto) =>
+{
+    var (info, error) = storage.AddDocument(dto?.Code, dto?.Name, dto?.CopyOfId);
+    return error is not null ? Results.BadRequest(new { error }) : Results.Ok(info);
+});
+
+admin.MapPut("/documents/{id}", (string id, DocumentMetaDto? dto) =>
+{
+    var error = storage.UpdateDocumentMeta(id, dto?.Code, dto?.Name);
+    return error is not null ? Results.BadRequest(new { error }) : Results.Ok(new { ok = true });
+});
+
+admin.MapPost("/documents/{id}/default", (string id) =>
+{
+    var error = storage.SetDefaultDocument(id);
+    return error is not null ? Results.BadRequest(new { error }) : Results.Ok(new { ok = true });
+});
+
+admin.MapDelete("/documents/{id}", (string id) =>
+{
+    var error = storage.DeleteDocument(id);
+    return error is not null ? Results.BadRequest(new { error }) : Results.Ok(new { ok = true });
+});
+
 // Версия документа едет заголовком, а не в теле: тело остаётся самим документом, и ни админка,
 // ни внешние системы, ни экспорт с импортом форму ответа не меняют.
-admin.MapGet("/document", (HttpContext ctx) =>
+admin.MapGet("/document", (HttpContext ctx, string? id) =>
 {
-    ctx.Response.Headers["X-Doc-Rev"] = storage.GetDocumentRev();
-    return Results.Ok(storage.GetDocument());
+    // Какой документ читать, говорит запрос. Без указания это документ по умолчанию: так
+    // работает всё, написанное до появления библиотеки.
+    var док = id is null ? storage.DefaultDocumentInfo() : storage.GetDocumentInfo(id);
+    if (док is null) return Results.NotFound(new { error = "Документ не найден." });
+    ctx.Response.Headers["X-Doc-Rev"] = storage.GetDocumentRev(док.Id);
+    ctx.Response.Headers["X-Doc-Id"] = док.Id;
+    return Results.Ok(storage.GetDocument(док.Id));
 });
-admin.MapPut("/document", (DocumentConfig? doc, HttpContext ctx) =>
+admin.MapPut("/document", (DocumentConfig? doc, HttpContext ctx, string? id) =>
 {
     if (doc is null) return Results.BadRequest(new { error = "document required" });
+    var док = id is null ? storage.DefaultDocumentInfo() : storage.GetDocumentInfo(id);
+    if (док is null) return Results.NotFound(new { error = "Документ не найден." });
     // Две открытые админки правят один документ: без сверки версий вторая молча затирала бы
     // работу первой, и никто бы об этом не узнал. Сверка по желанию отправителя: админка шлёт
     // версию, от которой правила, а внешняя система и импорт не шлют ничего и работают как
     // работали, перезаписью целиком.
     var baseRev = ctx.Request.Headers["X-Doc-Rev"].ToString();
-    if (baseRev.Length > 0 && baseRev != storage.GetDocumentRev())
+    if (baseRev.Length > 0 && baseRev != storage.GetDocumentRev(док.Id))
         return Results.Json(new
         {
             error = "Документ уже изменён в другом окне или другим оператором. " +
                     "Возьмите свежую версию, иначе чужая работа будет затёрта."
         }, statusCode: StatusCodes.Status409Conflict);
     DocumentTemplating.Sanitize(doc);
+    if (DocumentTemplating.IsInfo(doc))
+    {
+        var почемуНельзя = DocumentTemplating.WhyNotInfo(doc);
+        if (почемуНельзя is not null) return Results.BadRequest(new { error = почемуНельзя });
+    }
     var badImages = DocumentTemplating.UnsupportedImages(doc);
     if (badImages.Count > 0)
         return Results.BadRequest(new
@@ -789,8 +857,8 @@ admin.MapPut("/document", (DocumentConfig? doc, HttpContext ctx) =>
             error = "Эти картинки нельзя использовать в документе: их не удастся вложить в PDF. " +
                     "Подойдут PNG, JPG или BMP. Проблемные файлы: " + string.Join(", ", badImages)
         });
-    storage.SaveDocument(doc);
-    ctx.Response.Headers["X-Doc-Rev"] = storage.GetDocumentRev();
+    storage.SaveDocument(док.Id, doc);
+    ctx.Response.Headers["X-Doc-Rev"] = storage.GetDocumentRev(док.Id);
     return Results.Ok(new { ok = true });
 });
 
@@ -801,7 +869,7 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
 {
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
-    var doc = dto?.Document ?? storage.GetDocument();
+    var doc = dto?.Document ?? storage.GetDocument(dto?.DocumentId);
     DocumentTemplating.Sanitize(doc);
     var badDate = DocumentTemplating.ValidateAgeFields(doc, dto?.Fields);
     if (badDate is not null) return Results.BadRequest(new { error = badDate });
@@ -826,7 +894,9 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
         if (key.Length > 0) selections[key] = DocumentTemplating.CleanKey(g.Selected);
     }
 
-    var resolved = DocumentTemplating.Resolve(doc, dto?.Fields, extra, selections, states);
+    var badPreviewImage = KioskCoordinator.ParseApiImages(dto?.Images, out var картинкиПред);
+    if (badPreviewImage is not null) return Results.BadRequest(new { error = badPreviewImage });
+    var resolved = DocumentTemplating.Resolve(doc, dto?.Fields, extra, selections, states, null, null, картинкиПред);
     return Results.Ok(new
     {
         document = resolved,
@@ -855,7 +925,7 @@ admin.MapGet("/devices/{id}/screen", (string id, KioskCoordinator coord) =>
 // с ним. Рисовать PDF в браузере для этого не нужно.
 admin.MapPost("/document/pdf-layout", (PreviewDto? dto, PdfService pdf) =>
 {
-    var doc = dto?.Document ?? storage.GetDocument();
+    var doc = dto?.Document ?? storage.GetDocument(dto?.DocumentId);
     DocumentTemplating.Sanitize(doc);
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
@@ -1153,7 +1223,10 @@ admin.MapDelete("/scans/{id}", (string id) =>
 // ---- Document backup: import a template file back ----
 // Файл экспорта собирает сама админка: в него должны попадать и несохранённые правки редактора,
 // поэтому серверной выгрузки нет. Импорт проверяет заголовок файла, чтобы не подсунули чужой JSON.
-admin.MapPost("/document/import", (DocumentBackup? backup) =>
+// Импорт заводит НОВЫЙ документ, а не затирает открытый. С библиотекой затирание означало бы
+// «принёс шаблон от коллеги, потерял свой»: файл шаблона это отдельный документ, а не замена
+// всему. Код нового документа берётся из запроса, а без него сочиняется из названия файла.
+admin.MapPost("/document/import", (DocumentBackup? backup, string? code, string? title) =>
 {
     var doc = backup?.Document;
     if (backup is null || doc is null || !string.Equals(backup.Kind, DocumentBackup.KindValue, StringComparison.Ordinal))
@@ -1188,8 +1261,19 @@ admin.MapPost("/document/import", (DocumentBackup? backup) =>
         catch (Exception ex) { app.Logger.LogWarning(ex, "Картинка {File} из файла шаблона не восстановлена", name); }
     }
 
-    storage.SaveDocument(doc);
-    return Results.Ok(new { ok = true, pages = doc.Pages.Count, images = restored });
+    // Код должен быть свободным. Занятый не подменяется молча: это и есть тот самый случай,
+    // когда чужая работа затирается без спроса.
+    var желаемый = StorageService.CleanDocCode(code);
+    if (желаемый.Length == 0) желаемый = StorageService.CleanDocCode(doc.Title);
+    if (желаемый.Length == 0) желаемый = "import";
+    var свободный = желаемый;
+    var n = 2;
+    while (storage.FindByCode(свободный) is not null) свободный = желаемый + "-" + n++;
+
+    var (info, error) = storage.AddDocument(свободный, string.IsNullOrWhiteSpace(title) ? doc.Title : title, null);
+    if (error is not null) return Results.BadRequest(new { error });
+    storage.SaveDocument(info!.Id, doc);
+    return Results.Ok(new { ok = true, pages = doc.Pages.Count, images = restored, id = info.Id, code = info.Code });
 });
 
 // A document is ALWAYS shown on exactly one tablet (never all/group), so the signer's
@@ -1201,15 +1285,20 @@ admin.MapPost("/show-document", async (ShowDocumentDto dto, KioskCoordinator coo
         return Results.BadRequest(new { error = "Документ показывается только на один планшет. Выберите планшет." });
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
-    var badDate = DocumentTemplating.ValidateAgeFields(storage.GetDocument(), dto?.Fields);
+    var (док, badCode) = PickDocument(dto?.DocumentCode);
+    if (badCode is not null) return Results.BadRequest(new { error = badCode });
+    var шаблон = storage.GetDocument(док!.Id);
+    var badDate = DocumentTemplating.ValidateAgeFields(шаблон, dto?.Fields);
     if (badDate is not null) return Results.BadRequest(new { error = badDate });
     // Документ без страниц показывать нечего: планшет останется с тем же экраном, а оператор
     // будет думать, что отправка не сработала. Молча делать ничего хуже, чем сказать почему.
-    if (storage.GetDocument().Pages.Count == 0)
-        return Results.BadRequest(new { error = "В документе нет ни одной страницы: показывать нечего. Добавьте страницу на вкладке «Документ»." });
-    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups);
-    var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
-    return Results.Ok(new { ok = true, missingPlaceholders = missing });
+    if (шаблон.Pages.Count == 0)
+        return Results.BadRequest(new { error = "В документе «" + док.Name + "» нет ни одной страницы: показывать нечего. Добавьте страницу на вкладке «Документ»." });
+    var badImage = KioskCoordinator.ParseApiImages(dto?.Images, out var картинки);
+    if (badImage is not null) return Results.BadRequest(new { error = badImage });
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups, картинки, док);
+    var missing = DocumentTemplating.Missing(шаблон, dto?.Fields);
+    return Results.Ok(new { ok = true, document = док.Code, missingPlaceholders = missing });
 });
 
 admin.MapPost("/show-slides", async (TargetDto dto, KioskCoordinator coord) =>
@@ -1227,7 +1316,7 @@ admin.MapPost("/show-slides", async (TargetDto dto, KioskCoordinator coord) =>
 admin.MapGet("/signatures", (int? limit) =>
     Results.Ok(storage.ListSignatures(Math.Clamp(limit ?? 200, 1, 1000)).Select(r => new
     {
-        r.Id, r.CreatedUtc, r.DocumentTitle, r.DeviceId, r.DeviceName, r.WorkstationName,
+        r.Id, r.CreatedUtc, r.DocumentTitle, r.DocumentCode, r.DocumentName, r.DeviceId, r.DeviceName, r.WorkstationName,
         checkedCount = r.Items.Count(i => i is { Checked: true }), totalCount = r.Items.Count
     })));
 
@@ -1313,6 +1402,15 @@ ext.MapGet("/devices", () =>
     }));
 });
 
+// Какие документы есть в библиотеке. Без этого интегратор узнаёт коды из переписки, и связь
+// ломается при первом же переименовании.
+ext.MapGet("/documents", () => Results.Ok(storage.GetDocuments().Select(d => new
+{
+    code = d.Code,
+    name = d.Name,
+    isDefault = d.IsDefault
+})));
+
 ext.MapGet("/workstations", () =>
     Results.Ok(storage.GetWorkstations().Select(w => new { w.Id, w.ExternalId, w.Name, w.Location })));
 
@@ -1360,6 +1458,21 @@ ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto)
 }
 
 // A single device id from an admin target ("device:{id}" or a bare id); null for all/group/unknown.
+// Документ из библиотеки по коду. Кода нет: берётся тот, что назначен по умолчанию, и всё
+// написанное до библиотеки работает как работало. Код есть, но такого документа нет: отказ с
+// именем кода. Молча подставить документ по умолчанию было бы худшим из решений: внешняя система
+// опечаталась, а человек подписал не то, и запись при этом выглядит подлинной.
+(DocumentInfo? Doc, string? Error) PickDocument(string? code)
+{
+    var c = (code ?? "").Trim();
+    if (c.Length == 0) return (storage.DefaultDocumentInfo(), null);
+    var found = storage.FindByCode(c);
+    if (found is null)
+        return (null, "Документ с кодом «" + c + "» не найден. Доступные коды: " +
+                      string.Join(", ", storage.GetDocuments().Select(d => d.Code)) + ".");
+    return (found, null);
+}
+
 string? DeviceFromTarget(string? target)
 {
     if (string.IsNullOrWhiteSpace(target)) return null;
@@ -1373,18 +1486,23 @@ ext.MapPost("/show-document", async (ExtShowDocumentDto dto, KioskCoordinator co
 {
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
-    var badDate = DocumentTemplating.ValidateAgeFields(storage.GetDocument(), dto?.Fields);
+    var (док, badCode) = PickDocument(dto?.DocumentCode);
+    if (badCode is not null) return Results.BadRequest(new { error = badCode });
+    var шаблон = storage.GetDocument(док!.Id);
+    var badDate = DocumentTemplating.ValidateAgeFields(шаблон, dto?.Fields);
     if (badDate is not null) return Results.BadRequest(new { error = badDate });
     // Тот же случай, что и в админке: показывать нечего, и внешняя система должна узнать это
     // сразу, а не гадать, почему на планшете ничего не изменилось.
-    if (storage.GetDocument().Pages.Count == 0)
-        return Results.BadRequest(new { error = "В документе нет ни одной страницы: показывать нечего." });
+    if (шаблон.Pages.Count == 0)
+        return Results.BadRequest(new { error = "В документе «" + док.Name + "» нет ни одной страницы: показывать нечего." });
     var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
     if (deviceId is null)
         return Results.Json(new { error }, statusCode: status);
-    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups);
-    var missing = DocumentTemplating.Missing(storage.GetDocument(), dto?.Fields);
-    return Results.Ok(new { ok = true, deviceId, missingPlaceholders = missing });
+    var badImage = KioskCoordinator.ParseApiImages(dto?.Images, out var картинки);
+    if (badImage is not null) return Results.BadRequest(new { error = badImage });
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups, картинки, док);
+    var missing = DocumentTemplating.Missing(шаблон, dto?.Fields);
+    return Results.Ok(new { ok = true, deviceId, document = док.Code, missingPlaceholders = missing });
 });
 
 // Ask a tablet to scan a barcode / QR code and WAIT for the result, returning the code in the

@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "6.6";
+  var APP_VERSION = "6.9";
 
   var state = {
     slidesTarget: "all",   // кому идёт реклама: all / group:{id} / device:{id} / devices
@@ -138,6 +138,8 @@
   }
 
   function loadTab(name) {
+    // Библиотека нужна вкладке документа: без неё переключатель пуст, а сохранять некуда.
+    if (name === "document" && !docList.length) loadLibrary().catch(function () { /* уже показано */ });
     if (name === "signatures") loadSignatures();
     if (name === "document") maybeOfferDraft();
     var content = document.querySelector(".content");
@@ -438,18 +440,31 @@
     "text1", "text2", "text3", "text4", "text5", "text6", "text7", "text8", "text9", "text10"];
   // Curated colour palette (matches the tablet and the PDF renderer).
   var RT_COLORS = ["#1a1c22", "#16a34a", "#dc2626", "#2563eb", "#ea580c", "#7c3aed", "#0d9488", "#6b7280"];
+  // Цвета маркера: светлые, чтобы чёрный текст поверх оставался читаемым и на экране, и на бумаге.
+  var RT_MARKS = ["#fde68a", "#bbf7d0", "#bfdbfe", "#fecaca"];
   // Возраст считается из даты рождения: внешняя система присылает только ДР, а документу нужно
   // знать, младше ли человек четырнадцати, чтобы показать блок для законных представителей.
   // Две операции, а не четыре: «младше N» и «N и старше» делят людей ровно надвое.
   var COND_OPS = [["eq", "равно"], ["ne", "не равно"], ["empty", "пусто"], ["notempty", "не пусто"],
     ["in", "одно из (через запятую)"], ["agelt", "возраст меньше, лет"], ["agege", "возраст от, лет"],
-    ["annivwithin", "до годовщины не больше, дней"]];
+    ["annivwithin", "до годовщины не больше, дней"],
+    ["numlt", "число меньше"], ["numge", "число от"], ["numin", "число в промежутке (от..до)"],
+    ["dow", "день недели (1 пн … 7 вс, через запятую)"], ["daterange", "в промежутке дат (от..до)"],
+    ["timerange", "во время суток (ЧЧ:ММ..ЧЧ:ММ)"]];
+  // Условия по моменту показа считаются по часам сервера, а не по значению тега: поле у них
+  // служебное, и выбирать его оператору незачем.
+  var CLOCK_OPS = ["dow", "daterange", "timerange"];
+  var TODAY_FIELD = "@сегодня";
+  function isClockOp(op) { return CLOCK_OPS.indexOf(op) >= 0; }
   // Как читается сравнение под пометкой «не». Не «не равно X», а сразу обратное словами: у
   // сравнений обратное есть у всех, кроме «одно из» и «до годовщины», и для них оно тут и
   // появляется. Иначе свёрнутая строка звучала бы как «не «Пол» равно Ж».
   var COND_OPS_NOT = {
     eq: "не равно", ne: "равно", empty: "не пусто", notempty: "пусто",
-    in: "ни одно из"
+    in: "ни одно из",
+    numlt: "число от", numge: "число меньше",
+    numin: "число вне промежутка", dow: "не в этот день недели",
+    daterange: "вне промежутка дат", timerange: "вне этого времени суток"
   };
   var AGE_OPS = ["agelt", "agege"];
   // Условие по сроку: сколько дней между сегодняшним днём и годовщиной даты из тега. Считается
@@ -518,11 +533,14 @@
   }
   var OTHER_OPTION = "\u0000other";   // cannot collide with a real tag or value
 
-  function loadDoc() {
-    return api("/document").then(function (r) {
+  function loadDoc(id) {
+    var путь = id ? "/document?id=" + encodeURIComponent(id) : "/document";
+    return api(путь).then(function (r) {
       // Версия, от которой оператор правит. Уедет с сохранением, и сервер откажет, если
       // документ уже переписали из другого окна.
       state.docRev = r.headers.get("X-Doc-Rev") || "";
+      // Какой именно документ открыт: от него зависит и ключ черновика, и адрес сохранения.
+      state.docId = r.headers.get("X-Doc-Id") || id || "";
       return r.json();
     }).then(function (d) {
       state.doc = d; renderDoc(); docLoaded = true;
@@ -533,6 +551,178 @@
   }
 
   var docLoaded = false;
+
+  // ---------------- Библиотека документов ----------------
+  // Документов может быть несколько: согласие, договор, анкета. Здесь оператор переключается
+  // между ними, заводит новые и задаёт коды, которыми документ вызывается из внешней системы.
+  var docList = [];
+
+  function renderLibrary() {
+    var host = $("docLibrary");
+    if (!host) return;
+    host.innerHTML = "";
+
+    var сел = el("select", "doc-picker"); сел.setAttribute("data-role", "docpicker");
+    docList.forEach(function (d) {
+      var подпись = d.name + " (" + d.code + ")" + (d.isDefault ? " по умолчанию" : "");
+      сел.appendChild(new Option(подпись, d.id));
+    });
+    сел.value = state.docId || (docList[0] || {}).id || "";
+    сел.title = "Какой документ вы правите. Внешняя система вызывает его кодом в скобках.";
+    сел.addEventListener("change", function () { switchDoc(сел.value); });
+    host.appendChild(сел);
+
+    var текущий = docList.filter(function (d) { return d.id === state.docId; })[0];
+
+    // Для чего документ. Подписной заканчивается подписью, записью и PDF. Информационный
+    // существует, чтобы показать клиенту присланное внешней системой, и не оставляет следов.
+    var видL = el("label", "doc-kind", "Вид");
+    var вид = el("select"); вид.setAttribute("data-role", "dockind");
+    вид.appendChild(new Option("подписной", ""));
+    вид.appendChild(new Option("информационный, без подписи", "info"));
+    вид.value = String((state.doc && state.doc.kind) || "");
+    вид.title = "Информационный документ показывают и возвращают рекламу: ни подписи, ни записи, ни PDF.";
+    вид.addEventListener("change", function () {
+      if (!state.doc) return;
+      state.doc.kind = вид.value || null;
+      // Сохраняем сразу: вид меняет весь смысл документа, и сервер может отказать, если на
+      // страницах есть поля подписи. Отказ должен прийти сейчас, а не через полчаса правок.
+      saveDoc().then(function () { renderDoc(); renderLibrary(); }).catch(function () {
+        // Сервер отказал и объяснил почему: возвращаем переключатель на место.
+        state.doc.kind = вид.value === "info" ? null : "info";
+        вид.value = String(state.doc.kind || "");
+      });
+    });
+    видL.appendChild(вид);
+    host.appendChild(видL);
+
+    var добавить = iconBtn("plus", "Новый", "btn-ghost btn-sm");
+    добавить.title = "Завести новый документ";
+    добавить.addEventListener("click", function () { docMetaDialog(null, null); });
+    host.appendChild(добавить);
+
+    var копия = iconBtn("copy", "Копия", "btn-ghost btn-sm");
+    копия.title = "Завести новый документ копией этого";
+    копия.addEventListener("click", function () { docMetaDialog(null, state.docId); });
+    host.appendChild(копия);
+
+    var правка = iconBtn("settings", "Код и название", "btn-ghost btn-sm");
+    правка.addEventListener("click", function () { docMetaDialog(текущий, null); });
+    host.appendChild(правка);
+
+    if (текущий && !текущий.isDefault) {
+      var поумолч = iconBtn("check", "Сделать основным", "btn-ghost btn-sm");
+      поумолч.title = "Этот документ будет показываться, когда запрос пришёл без кода";
+      поумолч.addEventListener("click", function () {
+        apiSend("/documents/" + encodeURIComponent(state.docId) + "/default", "POST", {})
+          .then(function () { return loadLibrary(); })
+          .then(function () { toast("Документ показывается по умолчанию"); })
+          .catch(function () { /* уже показано */ });
+      });
+      host.appendChild(поумолч);
+
+      var удалить = iconBtn("trash", "Удалить", "btn-danger btn-sm");
+      удалить.addEventListener("click", function () {
+        // Подтверждение спрашивается так же, как у остальных удалений в админке.
+        if (!confirm("Удалить документ «" + текущий.name + "»?\n\n" +
+          "Подписи, собранные по нему, останутся: у каждой записи своя копия документа.")) return;
+        api("/documents/" + encodeURIComponent(state.docId), { method: "DELETE" })
+          .then(function () { state.docId = ""; return loadLibrary(); })
+          .then(function () { return loadDoc(); })
+          .then(function () { renderLibrary(); toast("Документ удалён"); })
+          .catch(function () { /* уже показано */ });
+      });
+      host.appendChild(удалить);
+    }
+  }
+
+  function loadLibrary() {
+    return apiJson("/documents").then(function (list) {
+      docList = list || [];
+      if (!state.docId) {
+        var поумолч = docList.filter(function (d) { return d.isDefault; })[0] || docList[0];
+        if (поумолч) state.docId = поумолч.id;
+      }
+      renderLibrary();
+    });
+  }
+
+  // Переключение документа: несохранённые правки нельзя терять молча, это та же потеря работы,
+  // что и закрытая вкладка, только браузер о ней не предупреждает.
+  function switchDoc(id) {
+    if (!id || id === state.docId) return;
+    function перейти() {
+      state.docId = id;
+      loadDoc(id).then(function () { renderLibrary(); });
+    }
+    if (!dirty) { перейти(); return; }
+    var c = el("div");
+    c.appendChild(el("h3", null, "Есть несохранённые правки"));
+    c.appendChild(el("p", "sig-meta",
+      "Вы правили этот документ и не сохранили. Правки останутся в черновике этого браузера " +
+      "и вернутся, когда вы снова его откроете."));
+    var сохранить = iconBtn("save", "Сохранить и перейти", "btn-primary");
+    сохранить.addEventListener("click", function () {
+      closeModal();
+      saveDoc().then(перейти).catch(function () { /* уже показано */ });
+    });
+    var без = iconBtn("right", "Перейти без сохранения", "btn-ghost");
+    без.addEventListener("click", function () {
+      closeModal();
+      saveDraft();
+      dirty = false; syncDirty();
+      перейти();
+    });
+    var отмена = iconBtn("back", "Остаться", "btn-ghost");
+    отмена.addEventListener("click", function () {
+      closeModal();
+      var сел = document.querySelector('[data-role="docpicker"]');
+      if (сел) сел.value = state.docId;
+    });
+    c.appendChild(сохранить); c.appendChild(без); c.appendChild(отмена);
+    openModal(c);
+  }
+
+  // Код и название: у нового документа спрашиваются при заведении, у существующего правятся.
+  function docMetaDialog(текущий, копияИз) {
+    var c = el("div");
+    c.appendChild(el("h3", null, текущий ? "Код и название документа"
+      : копияИз ? "Новый документ копией этого" : "Новый документ"));
+    c.appendChild(el("p", "sig-meta",
+      "Код это имя, которым документ вызывается из внешней системы. Латиница, цифры, дефис. " +
+      "Название видите только вы."));
+    var кодL = el("label", "field", "Код для API");
+    var код = el("input"); код.type = "text"; код.placeholder = "например: SOGLASIE";
+    код.value = текущий ? текущий.code : "";
+    кодL.appendChild(код); c.appendChild(кодL);
+    var имяL = el("label", "field", "Название");
+    var имя = el("input"); имя.type = "text"; имя.placeholder = "например: Согласие на обработку данных";
+    имя.value = текущий ? текущий.name : "";
+    имяL.appendChild(имя); c.appendChild(имяL);
+    var ok = iconBtn("check", текущий ? "Сохранить" : "Завести", "btn-primary");
+    ok.addEventListener("click", function () {
+      var тело = { code: код.value, name: имя.value };
+      if (текущий) {
+        apiSend("/documents/" + encodeURIComponent(текущий.id), "PUT", тело)
+          .then(function () { closeModal(); return loadLibrary(); })
+          .then(function () { toast("Сохранено"); })
+          .catch(function () { /* уже показано */ });
+      } else {
+        тело.copyOfId = копияИз || null;
+        apiSend("/documents", "POST", тело)
+          .then(function (r) { return r.json(); })
+          .then(function (созданный) {
+            closeModal();
+            state.docId = созданный.id;
+            return loadLibrary().then(function () { return loadDoc(созданный.id); });
+          })
+          .then(function () { renderLibrary(); toast("Документ заведён"); })
+          .catch(function () { /* уже показано */ });
+      }
+    });
+    c.appendChild(ok);
+    openModal(c);
+  }
   var draftOffered = false;
 
   function maybeOfferDraft() {
@@ -577,6 +767,8 @@
         if (r.italic) sty.push("font-style:italic");
         if (r.color && /^#[0-9a-fA-F]{6}$/.test(r.color)) sty.push("color:" + r.color);
         var cls = r.size === "l" ? "rt-l" : r.size === "h" ? "rt-h" : "";
+        if (r.mark && /^#[0-9a-fA-F]{6}$/.test(r.mark)) sty.push("background-color:" + r.mark);
+        if (r.sizePt >= 8 && r.sizePt <= 40) sty.push("font-size:" + r.sizePt + "pt");
         return br + "<span" + (cls ? ' class="' + cls + '"' : "") + (sty.length ? ' style="' + sty.join(";") + '"' : "") + ">" + escapeHtml(seg) + "</span>";
       }).join("");
     }).join("");
@@ -588,13 +780,22 @@
       if (!text) return;
       var last = runs[runs.length - 1];
       var color = f.color || null, size = f.size || null;
-      if (last && !!last.bold === !!f.bold && !!last.italic === !!f.italic && (last.color || null) === color && (last.size || null) === size) last.text += text;
-      else runs.push({ text: text, bold: !!f.bold, italic: !!f.italic, color: color, size: size });
+      var mark = f.mark || null, sizePt = f.sizePt || 0;
+      if (last && !!last.bold === !!f.bold && !!last.italic === !!f.italic && (last.color || null) === color
+          && (last.size || null) === size && (last.mark || null) === mark && (last.sizePt || 0) === sizePt) last.text += text;
+      else {
+        var кусок = { text: text, bold: !!f.bold, italic: !!f.italic, color: color, size: size };
+        // Пустые свойства не пишутся: документ, где маркера нет, должен лежать в файле точно
+        // так же, как лежал раньше, иначе сравнение выгрузок покажет изменения на ровном месте.
+        if (mark) кусок.mark = mark;
+        if (sizePt) кусок.sizePt = sizePt;
+        runs.push(кусок);
+      }
       atStart = false;
     }
     function nl(f) { push("\n", f); atStart = true; }
     function derive(elm, f) {
-      var g = { bold: f.bold, italic: f.italic, color: f.color, size: f.size }, t = elm.tagName;
+      var g = { bold: f.bold, italic: f.italic, color: f.color, size: f.size, mark: f.mark, sizePt: f.sizePt }, t = elm.tagName;
       if (t === "B" || t === "STRONG") g.bold = true;
       if (t === "I" || t === "EM") g.italic = true;
       var st = elm.style;
@@ -602,6 +803,17 @@
         if (st.fontWeight === "bold" || parseInt(st.fontWeight, 10) >= 600) g.bold = true;
         if (st.fontStyle === "italic") g.italic = true;
         if (st.color) { if (st.color === "inherit") g.color = null; else { var hx = rgbToHex(st.color); if (hx) g.color = hx; } }
+        // Выделение маркером. «transparent» это снятое выделение, а не цвет.
+        if (st.backgroundColor && st.backgroundColor !== "transparent") {
+          var hm = rgbToHex(st.backgroundColor);
+          if (hm) g.mark = hm;
+        }
+        // Свой размер в точках. Записывается стилем, а не классом: ступеней всего три, а
+        // размеров нужно сколько угодно.
+        if (st.fontSize && /pt$/.test(st.fontSize)) {
+          var pt = parseInt(st.fontSize, 10);
+          if (pt >= 8 && pt <= 40) g.sizePt = pt;
+        }
       }
       if (elm.classList) {
         if (elm.classList.contains("rt-h")) g.size = "h";
@@ -629,8 +841,15 @@
           walk(ch, derive(ch, f));
         }
       }
-    })(root, { bold: false, italic: false, color: null, size: null });
-    return runs.map(function (r) { return { text: r.text, bold: r.bold || undefined, italic: r.italic || undefined, color: r.color || undefined, size: r.size || undefined }; });
+    })(root, { bold: false, italic: false, color: null, size: null, mark: null, sizePt: 0 });
+    // Пустые свойства не пишутся: документ без оформления должен лежать в файле так же, как
+    // лежал раньше. Перечисление поимённое, поэтому новое свойство надо добавлять и сюда:
+    // маркер и свой размер один раз уже потерялись именно на этой строке.
+    return runs.map(function (r) {
+      return { text: r.text, bold: r.bold || undefined, italic: r.italic || undefined,
+        color: r.color || undefined, size: r.size || undefined,
+        mark: r.mark || undefined, sizePt: r.sizePt || undefined };
+    });
   }
 
   // ---------- Вставка из буфера ----------
@@ -818,6 +1037,18 @@
         inner.style.color = "";
         if (!inner.className && !inner.getAttribute("style")) unwrap(inner);
       });
+    // Маркер и свой размер снимаются с вложенных кусков так же, как цвет: иначе выделение
+    // ложится поверх старого, и вложенные обёртки копятся с каждым нажатием.
+    if (kind === "mark")
+      span.querySelectorAll("span").forEach(function (inner) {
+        inner.style.backgroundColor = "";
+        if (!inner.className && !inner.getAttribute("style")) unwrap(inner);
+      });
+    if (kind === "sizept")
+      span.querySelectorAll("span").forEach(function (inner) {
+        inner.style.fontSize = "";
+        if (!inner.className && !inner.getAttribute("style")) unwrap(inner);
+      });
     s.removeAllRanges(); var nr = document.createRange(); nr.selectNodeContents(span); s.addRange(nr);
     ed.dispatchEvent(new Event("input", { bubbles: true }));
   }
@@ -932,6 +1163,53 @@
       bar.appendChild(sw);
     });
     bar.appendChild(tbBtn("○", "Цвет по умолчанию", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.style.color = "inherit"; }, "color"); })));
+
+    // Выделение маркером: тот же приём, что и с цветом букв, но красится фон. Цвета мягкие:
+    // маркер должен выделять, а не закрашивать текст до нечитаемости.
+    RT_MARKS.forEach(function (c) {
+      var sw = el("button", "rt-swatch rt-swatch-mark"); sw.type = "button";
+      sw.style.background = c; sw.title = "Выделить фоном";
+      sw.addEventListener("mousedown", function (e) { e.preventDefault(); });
+      sw.addEventListener("click", function (e) {
+        e.preventDefault();
+        if (rtTarget) wrapSelection(rtTarget, function (s) { s.style.backgroundColor = c; }, "mark");
+      });
+      bar.appendChild(sw);
+    });
+    bar.appendChild(tbBtn("⌫", "Убрать выделение фоном", rtCommand(function (ed) {
+      wrapSelection(ed, function (s) { s.style.backgroundColor = "transparent"; }, "mark");
+    })));
+
+    // Свой размер в точках: ступеней «обычный, крупный, огромный» хватает не всегда, а мелкий
+    // шрифт сноски или крупный заголовок раздела задаются именно числом.
+    // Размер в точках нельзя сделать кнопкой: число надо ввести, а ввод требует перевести в
+    // поле курсор, и выделение текста при этом пропадает. Поэтому выделение запоминается в тот
+    // момент, когда оператор только тянется к полю, и восстанавливается перед применением.
+    var ptWrap = el("span", "rt-pt");
+    var pt = el("input"); pt.type = "number"; pt.min = "8"; pt.max = "40"; pt.placeholder = "пт";
+    pt.title = "Свой размер в точках: выделите текст и введите число";
+    var ptRange = null, ptEd = null;
+    function запомнитьВыделение() {
+      var s = window.getSelection();
+      if (!rtTarget || !s.rangeCount) return;
+      var r = s.getRangeAt(0);
+      if (r.collapsed || !rtTarget.contains(r.commonAncestorContainer)) return;
+      ptRange = r.cloneRange(); ptEd = rtTarget;
+    }
+    // И мышью, и с клавиатуры: до поля можно дойти табуляцией.
+    pt.addEventListener("mousedown", запомнитьВыделение);
+    pt.addEventListener("focus", запомнитьВыделение);
+    pt.addEventListener("change", function () {
+      if (!ptRange || !ptEd) return;
+      var s = window.getSelection();
+      s.removeAllRanges(); s.addRange(ptRange);
+      var n = parseInt(pt.value, 10);
+      if (n >= 8 && n <= 40) wrapSelection(ptEd, function (sp) { sp.style.fontSize = n + "pt"; }, "sizept");
+      else wrapSelection(ptEd, function (sp) { sp.style.fontSize = ""; }, "sizept");
+      ptRange = null;
+    });
+    ptWrap.appendChild(pt);
+    bar.appendChild(ptWrap);
     ALIGNS.forEach(function (a) {
       var b = iconBtn(a[1], "", "rt-btn"); b.type = "button"; b.title = a[2];
       b.setAttribute("data-align-btn", a[0]);
@@ -1148,8 +1426,10 @@
         var known = fieldValues(f);
         if (dk.checks.indexOf(f) >= 0) known = ["true", "false"];
         else if (Object.prototype.hasOwnProperty.call(dk.groups, f)) known = dk.groups[f].slice();
-        // У возраста значение это число лет: список значений тега тут ни при чём.
-        if (isDateOp(op.value)) known = null;
+        // У возраста значение это число лет: список значений тега тут ни при чём. То же у
+        // числовых сравнений и у условий по моменту показа: там значение это число, промежуток
+        // или перечень дней недели.
+        if (isDateOp(op.value) || isClockOp(op.value) || op.value === "numlt" || op.value === "numge" || op.value === "numin") known = null;
         // «одно из» принимает список через запятую, одним выбором его не выразить.
         var listable = known && op.value !== "in";
         valSel.innerHTML = "";
@@ -1170,6 +1450,22 @@
         }
         valSel.style.display = listable ? "" : "none";
         val.style.display = (!listable || valSel.value === OTHER_OPTION) ? "" : "none";
+      }
+
+      // Часы сервера вместо тега: у условий по моменту показа выбирать нечего, и список тегов
+      // только сбивал бы с толку. Само поле при этом всё равно уедет служебным: сервер его
+      // подменяет, что бы ни пришло.
+      function syncClock() {
+        var часы = isClockOp(op.value);
+        fld.style.display = часы ? "none" : "";
+        fldOther.style.display = часы ? "none" : (fld.value === OTHER_OPTION ? "" : "none");
+        var метка = row.querySelector('[data-role="clocknote"]');
+        if (часы && !метка) {
+          метка = el("span", "cond-clock-note", "по часам сервера");
+          метка.setAttribute("data-role", "clocknote");
+          метка.title = "Считается по дате и времени сервера, а не по значению тега";
+          row.insertBefore(метка, op);
+        } else if (!часы && метка) метка.remove();
       }
 
       function syncRow() {
@@ -1230,6 +1526,8 @@
         syncValues(null);
       }
       syncRow();
+      syncClock();
+      op.addEventListener("change", syncClock);
 
       [fld, fldOther, op, val, valSel, valAfter].forEach(function (e) {
         e.addEventListener("change", function () { badge.textContent = describe(); });
@@ -1290,6 +1588,23 @@
         // Обратное к «меньше N» это «от N», и наоборот: отдельной формулировки не нужно.
         var меньше = (c.op === "agelt") !== не;
         return "возраст по «" + c.field + "» " + (меньше ? "меньше " : "от ") + (c.value || "?") + " лет";
+      }
+      if (c.op === "numlt" || c.op === "numge")
+        return "«" + c.field + "» " + (не === (c.op === "numlt") ? "не меньше " : (c.op === "numlt" ? "меньше " : "от ")) + (c.value || "?");
+      if (c.op === "numin") {
+        var гр = String(c.value || "").split("..");
+        return "«" + c.field + "» " + (не ? "вне промежутка " : "в промежутке ") + (гр[0] || "?") + ".." + (гр[1] || "?");
+      }
+      if (c.op === "dow") {
+        var дни = { "1": "пн", "2": "вт", "3": "ср", "4": "чт", "5": "пт", "6": "сб", "7": "вс" };
+        var сп = String(c.value || "").split(",").map(function (x) { return дни[x.trim()] || x.trim(); })
+          .filter(function (x) { return x.length; }).join(", ");
+        return (не ? "сегодня не " : "сегодня ") + (сп || "?");
+      }
+      if (c.op === "daterange" || c.op === "timerange") {
+        var г2 = String(c.value || "").split("..");
+        var что = c.op === "daterange" ? "дата" : "время";
+        return (не ? что + " вне " : что + " в промежутке ") + (г2[0] || "?") + ".." + (г2[1] || "?");
       }
       if (c.op === "annivwithin") {
         var что = "годовщины";
@@ -1388,10 +1703,14 @@
     var sel = row.querySelector('[data-role="cfieldsel"]');
     var other = row.querySelector('[data-role="cfield"]');
     var field = (sel && sel.value && sel.value !== OTHER_OPTION ? sel.value : (other ? other.value : "")).trim();
-    if (!field) return null;
+    var opEl = row.querySelector('[data-role="cop"]');
+    if (!field && !isClockOp((opEl && opEl.value) || "")) return null;
     var op = row.querySelector('[data-role="cop"]');
     var not = row.querySelector('[data-role="cnot"]');
-    var part = { field: field, op: (op && op.value) || "eq", value: (readRowValue(row) || "").trim() };
+    var вид = (op && op.value) || "eq";
+    // У условий по моменту показа поле служебное: тег тут ни при чём, значение берётся из часов
+    // сервера. Иначе строка без выбранного тега считалась бы незаполненной и не сохранялась.
+    var part = { field: isClockOp(вид) ? TODAY_FIELD : field, op: вид, value: (readRowValue(row) || "").trim() };
     // Пометка пишется только когда она стоит: без этого каждое условие таскало бы «not: false»,
     // и сравнение сохранённого с прежним видом показывало бы изменения там, где их нет.
     if (not && not.getAttribute("aria-pressed") === "true") part.not = true;
@@ -1440,6 +1759,7 @@
     add(page.groups, 2);
     add(page.signatures, 3);
     add(page.scans, 4);
+    add(page.inputs, 5);
     items.sort(function (a, b) { return (a.ord - b.ord) || (a.kind - b.kind) || (a.index - b.index); });
     return items;
   }
@@ -1548,11 +1868,141 @@
     return t.length > (max || 90) ? t.slice(0, max || 90) + "…" : t;
   }
 
+  // Редактор таблицы. Правится прямо ячейками: переносить сюда возможности табличного
+  // процессора незачем, документ это не расчёт, а текст в клетках.
+  function tableEditor(t) {
+    var wrap = el("div", "block-table");
+    wrap.setAttribute("data-role", "blocktable");
+    var данные = t && t.rows && t.rows.length
+      ? t.rows.map(function (r) { return (r || []).slice(); })
+      : [["", ""], ["", ""]];
+    var шапкаЕсть = !t || t.headerRow !== false;
+    var ширины = (t && t.widths) ? t.widths.slice() : [];
+
+    var шапкаLabel = el("label", "check-inline");
+    var шапкаCb = el("input"); шапкаCb.type = "checkbox"; шапкаCb.checked = шапкаЕсть;
+    шапкаCb.setAttribute("data-role", "tblhead");
+    шапкаLabel.appendChild(шапкаCb);
+    шапкаLabel.appendChild(document.createTextNode(" Первая строка это шапка"));
+    wrap.appendChild(шапкаLabel);
+
+    var холст = el("div", "table-grid");
+    wrap.appendChild(холст);
+
+    function столбцов() { return данные.length ? данные[0].length : 0; }
+
+    function собрать() {
+      // Данные читаются из полей перед каждой перестройкой: иначе набранное в ячейках
+      // терялось бы при добавлении строки.
+      var поля = холст.querySelectorAll('[data-cell]');
+      поля.forEach(function (i) {
+        var rc = i.getAttribute("data-cell").split(":");
+        var r = parseInt(rc[0], 10), c = parseInt(rc[1], 10);
+        if (данные[r]) данные[r][c] = i.value;
+      });
+      var шп = холст.querySelectorAll('[data-width]');
+      шп.forEach(function (i, ci) { ширины[ci] = parseInt(i.value, 10) || 0; });
+    }
+
+    function нарисовать() {
+      холст.innerHTML = "";
+      var cols = столбцов();
+      холст.style.gridTemplateColumns = "repeat(" + cols + ", 1fr) auto";
+
+      // Строка ширин: пусто означает поровну.
+      for (var c = 0; c < cols; c++) {
+        var w = el("input", "table-width"); w.type = "number"; w.min = "5"; w.max = "90";
+        w.placeholder = "%"; w.setAttribute("data-width", String(c));
+        if (ширины[c] > 0) w.value = ширины[c];
+        w.title = "Ширина столбца в процентах. Пусто у всех означает поровну.";
+        холст.appendChild(w);
+      }
+      холст.appendChild(el("span"));
+
+      данные.forEach(function (row, ri) {
+        row.forEach(function (cell, ci) {
+          var i = el("input", "table-cell"); i.type = "text";
+          i.value = cell == null ? "" : cell;
+          i.setAttribute("data-cell", ri + ":" + ci);
+          if (шапкаCb.checked && ri === 0) i.classList.add("table-cell-head");
+          холст.appendChild(i);
+        });
+        var del = el("button", "btn btn-danger btn-sm", "×"); del.type = "button";
+        del.title = "Убрать строку";
+        del.addEventListener("click", function () {
+          собрать();
+          if (данные.length <= 1) return;
+          данные.splice(ri, 1); нарисовать(); markDirty();
+        });
+        холст.appendChild(del);
+      });
+    }
+
+    var кнопки = el("div", "table-actions");
+    var плюсСтрока = iconBtn("plus", "Строка", "btn-ghost btn-sm");
+    плюсСтрока.addEventListener("click", function () {
+      собрать();
+      данные.push(new Array(столбцов()).fill(""));
+      нарисовать(); markDirty();
+    });
+    var плюсСтолбец = iconBtn("plus", "Столбец", "btn-ghost btn-sm");
+    плюсСтолбец.addEventListener("click", function () {
+      собрать();
+      if (столбцов() >= 8) { toast("Больше восьми столбцов не читается ни на планшете, ни на бумаге", true); return; }
+      данные.forEach(function (r) { r.push(""); });
+      нарисовать(); markDirty();
+    });
+    var минусСтолбец = iconBtn("trash", "Убрать столбец", "btn-ghost btn-sm");
+    минусСтолбец.addEventListener("click", function () {
+      собрать();
+      if (столбцов() <= 1) return;
+      данные.forEach(function (r) { r.pop(); });
+      ширины.pop();
+      нарисовать(); markDirty();
+    });
+    кнопки.appendChild(плюсСтрока); кнопки.appendChild(плюсСтолбец); кнопки.appendChild(минусСтолбец);
+    wrap.appendChild(кнопки);
+
+    шапкаCb.addEventListener("change", function () { собрать(); нарисовать(); });
+    // Чтение наружу: собрать текущее состояние и отдать готовую таблицу.
+    wrap.__read = function () {
+      собрать();
+      var заданы = ширины.filter(function (w) { return w > 0; }).length === столбцов();
+      return { headerRow: шапкаCb.checked, rows: данные.map(function (r) { return r.slice(); }),
+        widths: заданы ? ширины.slice(0, столбцов()) : [] };
+    };
+    нарисовать();
+    return wrap;
+  }
+
   function blockCard(b) {
     b = b || {};
     var bc = el("div", "block-card page-item"); bc.setAttribute("data-role", "blockcard");
     bc.setAttribute("data-kind", "block");
+
+    // Черта и разрыв страницы это не блоки с содержимым: у них нечего править, кроме условия.
+    // Отдельная карточка на одну строку честнее, чем пустой редактор текста с надписью.
+    if (b.kind === "divider" || b.kind === "pagebreak") {
+      bc.setAttribute("data-mode", "special");
+      bc.setAttribute("data-special", b.kind);
+      var row = el("div", "cb-row");
+      var h2 = el("span", "drag-handle"); h2.appendChild(icon("grip"));
+      h2.title = "Перетащите, чтобы изменить порядок";
+      row.appendChild(h2);
+      row.appendChild(icon(b.kind === "divider" ? "layout" : "page", "item-icon"));
+      row.appendChild(el("span", "special-name", b.kind === "divider"
+        ? "Горизонтальная черта"
+        : "Разрыв страницы в PDF (на планшете не виден)"));
+      var c2 = conditionEditor(b.visibleWhen, "blockcond"); c2.classList.add("cond-inline"); row.appendChild(c2);
+      var d2 = el("button", "btn btn-danger", "×");
+      d2.addEventListener("click", function () { removeItem(bc); });
+      row.appendChild(d2);
+      bc.appendChild(row);
+      return bc;
+    }
+
     var isImage = !!b.imageUrl;
+    var isTable = !!(b.table && b.table.rows);
 
     var modeBar = el("div", "block-mode");
     var handle = el("span", "drag-handle");
@@ -1562,7 +2012,8 @@
     var seg = el("div", "seg");
     var btnText = iconBtn("text", "Текст", "btn-sm"); btnText.type = "button";
     var btnImg = iconBtn("image", "Картинка", "btn-sm"); btnImg.type = "button";
-    seg.appendChild(btnText); seg.appendChild(btnImg);
+    var btnTable = iconBtn("list", "Таблица", "btn-sm"); btnTable.type = "button";
+    seg.appendChild(btnText); seg.appendChild(btnImg); seg.appendChild(btnTable);
     modeBar.appendChild(seg);
     bc.appendChild(modeBar);
 
@@ -1574,6 +2025,15 @@
     if (b.imageUrl) { img.src = b.imageUrl; } else { img.style.display = "none"; }
     img.style.width = (b.imageWidth || 100) + "%";
     if (b.imageUrl) bc.setAttribute("data-imgurl", b.imageUrl);
+    // Картинка может приходить из заказа: оператор задаёт имя тега, а на его место встаёт то,
+    // что прислала внешняя система. Выбранная здесь картинка остаётся запасной и показывается,
+    // когда заказ картинку не принёс.
+    var тегLabel = el("label", "field-sm", "Имя тега картинки из API");
+    var тег = el("input"); тег.type = "text"; тег.placeholder = "например: ПЕЧАТЬ";
+    тег.value = b.imageTag || ""; тег.setAttribute("data-role", "blockimgtag");
+    тег.title = "Оставьте пустым, если картинка всегда одна и та же. Заданный тег означает, что картинку пришлёт внешняя система.";
+    тегLabel.appendChild(тег);
+
     var pick = el("button", "btn btn-ghost btn-sm", "Выбрать картинку"); pick.type = "button";
     pick.addEventListener("click", function () {
       openImagePicker(function (url) { img.src = url; img.style.display = ""; bc.setAttribute("data-imgurl", url); });
@@ -1584,7 +2044,7 @@
     var wVal = el("span", "img-wval", wRange.value + "%");
     wRange.addEventListener("input", function () { wVal.textContent = wRange.value + "%"; img.style.width = wRange.value + "%"; });
     wLabel.appendChild(wRange); wLabel.appendChild(wVal);
-    imgWrap.appendChild(img); imgWrap.appendChild(pick); imgWrap.appendChild(wLabel);
+    imgWrap.appendChild(img); imgWrap.appendChild(pick); imgWrap.appendChild(тегLabel); imgWrap.appendChild(wLabel);
 
     // Обтекание: картинка встаёт сбоку, а текст следующих абзацев идёт рядом с ней. Пункты,
     // группы и подпись рядом не встают: они и так узкие, а рядом с картинкой превратились бы
@@ -1619,16 +2079,84 @@
     обтекание();
     bc.appendChild(imgWrap);
 
+    // Редактор таблицы строится только тогда, когда блок действительно становится таблицей.
+    // Держать его скрытым в каждом текстовом блоке значило бы носить в разметке по лишнему
+    // редактору на блок: и память, и путаница при поиске элементов.
+    var tableHost = el("div", "block-table-host");
+    bc.appendChild(tableHost);
+    var tableWrap = null;
+    function таблицаНужна() {
+      if (!tableWrap) { tableWrap = tableEditor(b.table); tableHost.appendChild(tableWrap); }
+      return tableWrap;
+    }
+
+    // Оформление блока: плашка, рамка, отступ, межстрочный, список. Одна панель на всё, как и
+    // у остального оформления: пятнадцать отдельных полей когда-то уже пробовали.
+    var стиль = el("div", "block-style");
+    var спLabel = el("label", "field-sm", "Список");
+    var сп = el("select"); сп.setAttribute("data-role", "blocklistmode");
+    [["", "нет"], ["bullet", "маркированный"], ["number", "нумерованный"]]
+      .forEach(function (o) { сп.appendChild(new Option(o[1], o[0])); });
+    сп.value = b.list || "";
+    сп.title = "Каждая строка блока станет пунктом списка";
+    спLabel.appendChild(сп); стиль.appendChild(спLabel);
+
+    var фонLabel = el("label", "field-sm", "Фон");
+    var фон = el("input"); фон.type = "color"; фон.setAttribute("data-role", "blockbg");
+    фон.value = b.bg || "#ffffff";
+    var фонВкл = el("input"); фонВкл.type = "checkbox"; фонВкл.setAttribute("data-role", "blockbgon");
+    фонВкл.checked = !!b.bg;
+    фонВкл.title = "Залить блок плашкой";
+    фонLabel.appendChild(фонВкл); фонLabel.appendChild(фон); стиль.appendChild(фонLabel);
+
+    var рамLabel = el("label", "field-sm", "Рамка");
+    var рам = el("input"); рам.type = "color"; рам.setAttribute("data-role", "blockborder");
+    рам.value = b.borderColor || "#94a3b8";
+    var рамВкл = el("input"); рамВкл.type = "checkbox"; рамВкл.setAttribute("data-role", "blockborderon");
+    рамВкл.checked = !!b.borderColor;
+    рамLabel.appendChild(рамВкл); рамLabel.appendChild(рам); стиль.appendChild(рамLabel);
+
+    var отсLabel = el("label", "field-sm", "Отступ, точек");
+    var отс = el("input"); отс.type = "number"; отс.min = "0"; отс.max = "40";
+    отс.value = b.pad || 0; отс.setAttribute("data-role", "blockpad");
+    отсLabel.appendChild(отс); стиль.appendChild(отсLabel);
+
+    var межLabel = el("label", "field-sm", "Межстрочный, %");
+    var меж = el("input"); меж.type = "number"; меж.min = "100"; меж.max = "250"; меж.step = "10";
+    меж.value = b.lineHeight || ""; меж.placeholder = "обычный";
+    меж.setAttribute("data-role", "blocklh");
+    межLabel.appendChild(меж); стиль.appendChild(межLabel);
+    bc.appendChild(стиль);
+
     function setMode(m) {
       bc.setAttribute("data-mode", m);
       textWrap.style.display = m === "text" ? "" : "none";
       imgWrap.style.display = m === "image" ? "" : "none";
+      if (m === "table") таблицаНужна();
+      tableHost.style.display = m === "table" ? "" : "none";
+      // Список это про текст, а плашка про всё, кроме картинки: у картинки она рисовала бы
+      // пустую коробку вокруг снимка.
+      спLabel.style.display = m === "text" ? "" : "none";
+      стиль.style.display = m === "image" ? "none" : "";
       btnText.classList.toggle("mode-on", m === "text");
       btnImg.classList.toggle("mode-on", m === "image");
+      btnTable.classList.toggle("mode-on", m === "table");
     }
     btnText.addEventListener("click", function () { setMode("text"); });
     btnImg.addEventListener("click", function () { setMode("image"); });
-    setMode(isImage ? "image" : "text");
+    btnTable.addEventListener("click", function () { setMode("table"); });
+    setMode(isTable ? "table" : isImage ? "image" : "text");
+
+    // Признак «в PDF» у блока. Ограничений тут нет: текст, картинка и таблица сами по себе
+    // ничего не подтверждают, поэтому исключить можно любой блок.
+    var вPdfБлок = el("label", "check-inline pdf-flag");
+    var вPdfБлокCb = el("input"); вPdfБлокCb.type = "checkbox";
+    вPdfБлокCb.checked = b.inPdf !== false;
+    вPdfБлокCb.setAttribute("data-role", "blockinpdf");
+    вPdfБлок.title = "Снимите, если этот блок нужен только на экране. В записи он останется, в PDF не попадёт.";
+    вPdfБлок.appendChild(вPdfБлокCb);
+    вPdfБлок.appendChild(document.createTextNode(" Сохранять в PDF"));
+    bc.appendChild(вPdfБлок);
 
     bc.appendChild(el("div", "sub-label", "Условие показа блока"));
     bc.appendChild(conditionEditor(b.visibleWhen, "blockcond"));
@@ -1646,11 +2174,58 @@
   // Один блок текста или картинки. Возвращает null, если в нём нечего сохранять.
   function readBlockCard(bc) {
     var cond = readCondition(bc.querySelector('[data-role="blockcond"]'));
-    if (bc.getAttribute("data-mode") === "image") {
+    var вPdf = (bc.querySelector('[data-role="blockinpdf"]') || {}).checked !== false;
+    // Признак дописывается тому, что вернёт разбор ниже: он одинаков для всех видов блока, а
+    // видов у него три, и повторять присвоение в каждой ветке значит однажды забыть в одной.
+    function сПризнаком(блок) {
+      if (блок && !вPdf) блок.inPdf = false;
+      return блок;
+    }
+    var режим = bc.getAttribute("data-mode");
+
+    // Черта и разрыв: у них нет содержимого, только вид и условие.
+    if (режим === "special") {
+      var спец = { kind: bc.getAttribute("data-special") || "divider" };
+      if (cond) спец.visibleWhen = cond;
+      return сПризнаком(спец);
+    }
+
+    // Оформление блока. Считается один раз и приклеивается к любому виду, кроме картинки.
+    function оформление(blk) {
+      var фонВкл = bc.querySelector('[data-role="blockbgon"]');
+      var фон = bc.querySelector('[data-role="blockbg"]');
+      if (фонВкл && фонВкл.checked && фон) blk.bg = фон.value;
+      var рамВкл = bc.querySelector('[data-role="blockborderon"]');
+      var рам = bc.querySelector('[data-role="blockborder"]');
+      if (рамВкл && рамВкл.checked && рам) blk.borderColor = рам.value;
+      var отс = parseInt((bc.querySelector('[data-role="blockpad"]') || {}).value, 10);
+      if (отс > 0) blk.pad = отс;
+      var меж = parseInt((bc.querySelector('[data-role="blocklh"]') || {}).value, 10);
+      if (меж >= 100) blk.lineHeight = меж;
+      return сПризнаком(blk);
+    }
+
+    if (режим === "table") {
+      var tw = bc.querySelector('[data-role="blocktable"]');
+      var t = tw && tw.__read ? tw.__read() : null;
+      // Совсем пустая таблица не хранится: это заготовка, а не содержимое.
+      if (!t || !t.rows.length || t.rows.every(function (r) { return r.every(function (c) { return !String(c || "").trim(); }); })) {
+        if (!cond) { выброшеноПустых++; return null; }
+        t = null;
+      }
+      var blkT = оформление({ table: t });
+      if (cond) blkT.visibleWhen = cond;
+      return сПризнаком(blkT.table ? blkT : null);
+    }
+
+    if (режим === "image") {
       var url = bc.getAttribute("data-imgurl");
-      if (!url) return null;
+      var имяТега = ((bc.querySelector('[data-role="blockimgtag"]') || {}).value || "").trim();
+      // Блок с тегом живёт и без выбранной картинки: её пришлёт внешняя система.
+      if (!url && !имяТега) { выброшеноПустых++; return null; }
       var w = parseInt((bc.querySelector('[data-role="blockimgw"]') || {}).value, 10) || 100;
-      var blk = { imageUrl: url, imageWidth: w };
+      var blk = { imageUrl: url || null, imageWidth: w };
+      if (имяТега) blk.imageTag = имяТега;
       var обт = (bc.querySelector('[data-role="blockwrap"]') || {}).value || "";
       if (обт === "left" || обт === "right") {
         blk.wrap = обт;
@@ -1661,15 +2236,17 @@
       // края. Выравнивание берётся из того же поля, что и у текста этого блока.
       var ia = alignOf(bc.querySelector('[data-role="blockbody"]'));
       if (ia) blk.align = ia;
-      if (cond) blk.visibleWhen = cond; return blk;
+      if (cond) blk.visibleWhen = cond; return сПризнаком(blk);
     }
     var ed = bc.querySelector('[data-role="blockbody"]');
     var runs = ed ? editorToRuns(ed) : [];
     var hasText = runs.some(function (r) { return (r.text || "").trim().length; });
-    if (!hasText && !cond) return null;
-    var blk2 = { runs: runs };
+    if (!hasText && !cond) { выброшеноПустых++; return null; }
+    var blk2 = оформление({ runs: runs });
+    var сп = (bc.querySelector('[data-role="blocklistmode"]') || {}).value || "";
+    if (сп === "bullet" || сп === "number") blk2.list = сп;
     var al = alignOf(ed); if (al) blk2.align = al;
-    if (cond) blk2.visibleWhen = cond; return blk2;
+    if (cond) blk2.visibleWhen = cond; return сПризнаком(blk2);
   }
 
   function readCheckboxRow(r) {
@@ -2127,7 +2704,11 @@
         ["Чекбокс", function () { place(checkboxRow({ label: "", required: true })); }],
         ["Двойные зависимые чекбоксы", function () { place(groupCard({ options: [{ key: "", label: "" }, { key: "", label: "" }] })); }],
         ["Поле подписи", function () { place(signatureRow({ label: "", required: true })); }],
-        ["Сканирование кода", function () { place(scanRow({ label: "", required: true })); }]
+        ["Сканирование кода", function () { place(scanRow({ label: "", required: true })); }],
+        ["Поле ввода", function () { place(inputRow({ label: "", required: true, type: "text" })); }],
+        ["Таблица", function () { place(blockCard({ table: { headerRow: true, rows: [["", ""], ["", ""]] } })); }],
+        ["Горизонтальная черта", function () { place(blockCard({ kind: "divider" })); }],
+        ["Разрыв страницы в PDF", function () { place(blockCard({ kind: "pagebreak" })); }]
       ]);
       opts.forEach(function (o) {
         var b = iconBtn("plus", o[0], "btn-sm");
@@ -2221,7 +2802,220 @@
   // изменение внутри страницы разворачивало бы обратно всё, что оператор свернул.
   var collapsedPages = {};
 
+  // ---------- Прожектор условий ----------
+  // Условия видно только словами, а увидеть их итог можно было лишь в предпросмотре, отдельным
+  // окном. Прожектор показывает итог прямо в редакторе: оператор задаёт тестовые значения, и
+  // всё, что при них не покажется клиенту, гаснет на своём месте. Ничего не сохраняется и не
+  // меняется в документе: это способ смотреть, а не править.
+  var прожектор = { вкл: false, значения: {} };
+
+  // Значение имени для прожектора. Тег берётся из заданных значений, чекбокс и группа из них же:
+  // оператор задаёт «как будто клиент отметил вот это».
+  function прожекторЗначение(имя) {
+    var v = прожектор.значения[имя];
+    return v == null ? "" : String(v);
+  }
+
+  // Выполняется ли условие при заданных значениях. Считает тем же кодом, что и планшет: своя
+  // копия однажды разошлась бы с ним, и прожектор врал бы уверенно.
+  function прожекторДержит(cond) {
+    if (!cond) return true;
+    return condGroups(cond).some(function (g) {
+      return condParts(g).every(function (part) {
+        var ok = прожекторЧасть(part);
+        return part.not ? !ok : ok;
+      });
+    });
+  }
+
+  function прожекторЧасть(c) {
+    if (c.op === "minchecked") {
+      var надо = parseInt(c.value, 10);
+      if (!(надо >= 1)) return false;
+      var есть = String(c.field || "").split(",").map(function (x) { return x.trim(); })
+        .filter(function (x) { return x.length; })
+        .filter(function (k) { return прожекторЗначение(k).trim().toLowerCase() === "true"; }).length;
+      return есть >= надо;
+    }
+    // Условия по часам сервера прожектор не вычисляет: у него нет часов службы, а гадать по
+    // часам браузера значит показывать не то, что увидит клиент. Такие части считаются
+    // выполненными, и рядом об этом сказано.
+    if (isClockOp(c.op)) return true;
+    var val = прожекторЗначение(c.field).trim().toLowerCase();
+    var target = String(c.value || "").trim().toLowerCase();
+    if (c.op === "numlt" || c.op === "numge" || c.op === "numin") {
+      var n = parseFloat(val.replace(",", "."));
+      if (!isFinite(n)) return false;
+      if (c.op === "numin") {
+        var гр = target.split("..");
+        var a = parseFloat(String(гр[0]).replace(",", ".")), b = parseFloat(String(гр[1] || "").replace(",", "."));
+        return isFinite(a) && isFinite(b) && n >= a && n <= b;
+      }
+      var lim = parseFloat(target.replace(",", "."));
+      if (!isFinite(lim)) return false;
+      return c.op === "numlt" ? n < lim : n >= lim;
+    }
+    if (c.op === "agelt" || c.op === "agege") {
+      var лет = возрастПоДате(val);
+      var предел = parseInt(target, 10);
+      if (лет == null || !(предел >= 0)) return false;
+      return c.op === "agelt" ? лет < предел : лет >= предел;
+    }
+    if (c.op === "annivwithin") return true;   // срок считается от сегодняшнего дня службы
+    switch (c.op) {
+      case "ne": return val !== target;
+      case "empty": return val.length === 0;
+      case "notempty": return val.length > 0;
+      case "in": return target.split(",").map(function (x) { return x.trim(); })
+        .filter(function (x) { return x.length; }).indexOf(val) >= 0;
+      default: return val === target;
+    }
+  }
+
+  function возрастПоДате(текст) {
+    var m = /^(\d{2})[.\/-](\d{2})[.\/-](\d{4})$/.exec(текст) || null;
+    var d = m ? new Date(+m[3], +m[2] - 1, +m[1]) : new Date(текст);
+    if (isNaN(d.getTime())) return null;
+    var сейчас = new Date();
+    var лет = сейчас.getFullYear() - d.getFullYear();
+    var м = сейчас.getMonth() - d.getMonth();
+    if (м < 0 || (м === 0 && сейчас.getDate() < d.getDate())) лет--;
+    return лет;
+  }
+
+  // Погасить всё, что при заданных значениях клиент не увидит. Работает по уже нарисованному
+  // редактору, поэтому ничего не пересобирает и не теряет несохранённых правок.
+  function прожекторПрименить() {
+    var wrap = $("pagesEditor");
+    if (!wrap) return;
+    wrap.classList.toggle("spot-on", прожектор.вкл);
+    wrap.querySelectorAll(".spot-off").forEach(function (n) { n.classList.remove("spot-off"); });
+    wrap.querySelectorAll(".spot-empty").forEach(function (n) { n.classList.remove("spot-empty"); });
+    if (!прожектор.вкл) return;
+
+    collectDoc();
+    var карточки = wrap.querySelectorAll('[data-role="pagecard"]');
+    (state.doc.pages || []).forEach(function (page, pi) {
+      var card = карточки[pi];
+      if (!card) return;
+      var видна = прожекторДержит(page.visibleWhen);
+      card.classList.toggle("spot-off", !видна);
+      // Элементы страницы гаснут по отдельности: страница может быть видна, а половина её
+      // содержимого нет.
+      var узлы = card.querySelectorAll('[data-role="itemlist"] > .page-item');
+      var виднохоть = false;
+      pageOrder(page, page.blocks).forEach(function (it, i) {
+        var node = узлы[i];
+        if (!node) return;
+        var ok = видна && прожекторДержит(it.item.visibleWhen);
+        node.classList.toggle("spot-off", !ok);
+        if (ok) виднохоть = true;
+      });
+      // Страница, от которой при этих значениях не осталось ничего, помечается отдельно: клиент
+      // увидит пустой экран, и это почти всегда недосмотр.
+      if (видна && узлы.length && !виднохоть) card.classList.add("spot-empty");
+    });
+  }
+
+  function прожекторПанель() {
+    var box = el("div", "spotlight");
+    var шапка = el("div", "spotlight-head");
+    var вкл = el("label", "check-inline");
+    var cb = el("input"); cb.type = "checkbox"; cb.setAttribute("data-role", "spoton");
+    вкл.appendChild(cb);
+    вкл.appendChild(document.createTextNode(" Показать, что увидит клиент при этих значениях"));
+    шапка.appendChild(вкл);
+    var сброс = el("button", "btn btn-ghost btn-sm", "Сбросить"); сброс.type = "button";
+    сброс.addEventListener("click", function () {
+      прожектор.значения = {};
+      нарисоватьПоля();
+      прожекторПрименить();
+    });
+    шапка.appendChild(сброс);
+    box.appendChild(шапка);
+
+    var поля = el("div", "spotlight-fields");
+    box.appendChild(поля);
+    var примечание = el("div", "spotlight-note sig-meta");
+    box.appendChild(примечание);
+
+    function нарисоватьПоля() {
+      поля.innerHTML = "";
+      collectDoc();
+      var имена = previewFields();
+      var dk = docKeys();
+      // Чекбоксы и группы это тоже имена: условие может смотреть и на них.
+      dk.checks.forEach(function (k) { if (имена.indexOf(k) < 0) имена.push(k); });
+      Object.keys(dk.groups).forEach(function (k) { if (имена.indexOf(k) < 0) имена.push(k); });
+      if (!имена.length) {
+        поля.appendChild(el("div", "sig-meta", "В документе нет ни одного условия и ни одного тега."));
+        return;
+      }
+      имена.forEach(function (имя) {
+        var l = el("label", "field-sm", имя);
+        var есть = dk.checks.indexOf(имя) >= 0;
+        var варианты = Object.prototype.hasOwnProperty.call(dk.groups, имя) ? dk.groups[имя] : null;
+        var i;
+        if (есть || варианты) {
+          i = el("select");
+          i.appendChild(new Option("не задано", ""));
+          (есть ? ["true", "false"] : варианты).forEach(function (v) { i.appendChild(new Option(v, v)); });
+        } else {
+          i = el("input"); i.type = "text"; i.placeholder = "значение";
+        }
+        i.value = прожектор.значения[имя] || "";
+        i.addEventListener("change", function () {
+          прожектор.значения[имя] = i.value;
+          прожекторПрименить();
+        });
+        i.addEventListener("input", function () {
+          прожектор.значения[имя] = i.value;
+          прожекторПрименить();
+        });
+        l.appendChild(i);
+        поля.appendChild(l);
+      });
+      // Условия по моменту показа прожектор не считает: у браузера свои часы, а решает служба.
+      var часовые = false;
+      (state.doc.pages || []).forEach(function (page) {
+        function смотреть(c) {
+          condGroups(c).forEach(function (g) {
+            condParts(g).forEach(function (part) { if (isClockOp(part.op)) часовые = true; });
+          });
+        }
+        смотреть(page.visibleWhen);
+        (page.blocks || []).forEach(function (b) { смотреть(b.visibleWhen); });
+        (page.checkboxes || []).forEach(function (c) { смотреть(c.visibleWhen); });
+        (page.groups || []).forEach(function (g) { смотреть(g.visibleWhen); });
+        (page.inputs || []).forEach(function (x) { смотреть(x.visibleWhen); });
+      });
+      примечание.textContent = часовые
+        ? "Условия по дню недели, дате и времени здесь считаются выполненными: их решают часы сервера, а не браузера."
+        : "";
+    }
+
+    cb.addEventListener("change", function () {
+      прожектор.вкл = cb.checked;
+      if (прожектор.вкл) нарисоватьПоля();
+      поля.style.display = прожектор.вкл ? "" : "none";
+      примечание.style.display = прожектор.вкл ? "" : "none";
+      // Рамка и плашка только у включённого: выключенный это одна строка, которая не должна
+      // отодвигать список страниц вниз и мозолить глаза.
+      box.classList.toggle("spot-active", прожектор.вкл);
+      прожекторПрименить();
+    });
+    поля.style.display = "none";
+    примечание.style.display = "none";
+    box.__refresh = нарисоватьПоля;
+    return box;
+  }
+
   function renderPages() {
+    // Панель прожектора живёт над списком страниц и переживает перерисовку: она не часть
+    // документа, и пересобирать её на каждую правку значило бы терять заданные значения.
+    var host = $("spotlightHost");
+    if (host && !host.firstChild) host.appendChild(прожекторПанель());
+
     var wrap = $("pagesEditor"); wrap.innerHTML = "";
     (state.doc.pages || []).forEach(function (page, pi) {
       // Подпись и сканирование это отдельные экраны, а не элементы среди текста: клиент на них
@@ -2299,6 +3093,7 @@
           return it.kind === 0 ? blockCard(it.item)
             : it.kind === 1 ? checkboxRow(it.item)
               : it.kind === 2 ? groupCard(it.item)
+                : it.kind === 5 ? inputRow(it.item)
                 : it.kind === 3 ? signatureRow(it.item)
                   : scanRow(it.item);
         });
@@ -2317,11 +3112,42 @@
         body.appendChild(scanRow((page.scans || [])[0] || { label: "", required: true }));
       }
 
+      // Признак «в PDF». Страницу, на которой клиент что-то подтверждает, исключить нельзя:
+      // в бумаге оказалась бы отметка без того, под чем она стоит. Переключатель тогда не
+      // прячется, а гаснет с объяснением: спрятанный оставил бы оператора гадать, куда он делся.
+      var взаимодействие = (page.checkboxes || []).length || (page.groups || []).length ||
+        (page.signatures || []).length || (page.scans || []).length || (page.inputs || []).length;
+      var вPdf = el("label", "check-inline pdf-flag");
+      var вPdfCb = el("input"); вPdfCb.type = "checkbox";
+      вPdfCb.checked = page.inPdf !== false || !!взаимодействие;
+      вPdfCb.setAttribute("data-role", "pageinpdf");
+      if (взаимодействие) {
+        вPdfCb.checked = true;
+        вPdfCb.disabled = true;
+        вPdf.title = "На этой странице клиент что-то подтверждает, поэтому она обязана быть в PDF: " +
+          "иначе в бумаге окажется отметка без того, под чем она стоит.";
+      } else {
+        вPdf.title = "Снимите, если эта страница нужна только на экране: вступление, пояснение, заставка. " +
+          "В записи она останется целиком, в PDF не попадёт.";
+      }
+      вPdf.appendChild(вPdfCb);
+      вPdf.appendChild(document.createTextNode(" Сохранять эту страницу в PDF"));
+      body.appendChild(вPdf);
+
       if (!kind) {
         var dyn = el("label", "check-inline dyn-anchor");
         var dynCb = el("input"); dynCb.type = "checkbox"; dynCb.checked = !!page.includeDynamic; dynCb.setAttribute("data-role", "includedynamic");
         dyn.appendChild(dynCb); dyn.appendChild(document.createTextNode(" Показывать здесь чекбоксы, присланные по API"));
         body.appendChild(dyn);
+
+        var всё = el("label", "check-inline dyn-anchor");
+        var всёCb = el("input"); всёCb.type = "checkbox"; всёCb.checked = !!page.showCheckAll;
+        всёCb.setAttribute("data-role", "checkall");
+        всё.appendChild(всёCb);
+        всё.appendChild(document.createTextNode(" Кнопка «отметить всё» над пунктами (нужна от трёх пунктов)"));
+        body.appendChild(всё);
+
+        body.appendChild(rulesPanel(card, page));
       }
 
       applyCollapsed();
@@ -2329,6 +3155,9 @@
     });
     makeSortable(wrap, ".page-card");
     renderToc();
+    // Список страниц пересобран: подсветку надо наложить заново, иначе она осталась бы на
+    // прежних узлах, которых уже нет.
+    if (прожектор.вкл) прожекторПрименить();
 
     // Signature page: custom content (text / image) on either side of the signature field.
     var signCard = el("div", "page-card sign-page-card");
@@ -2509,6 +3338,192 @@
     return box;
   }
 
+  // Поле ввода: клиент вписывает значение с экранной клавиатуры. Вид значения решает, какую
+  // клавиатуру он увидит и как значение проверится, поэтому он выбирается явно, а не угадывается
+  // по названию поля.
+  var INPUT_TYPES = [["text", "текст"], ["number", "число"], ["date", "дата"], ["phone", "телефон"]];
+
+  function inputRow(inp) {
+    inp = inp || {};
+    var box = el("div", "input-item page-item"); box.setAttribute("data-role", "inputrow");
+    box.setAttribute("data-kind", "input");
+    var row = el("div", "cb-row");
+    var handle = el("span", "drag-handle");
+    handle.appendChild(icon("grip"));
+    handle.title = "Перетащите, чтобы изменить порядок";
+    row.appendChild(handle);
+    row.appendChild(icon("text", "item-icon"));
+    var label = el("input"); label.type = "text"; label.placeholder = "Что вписывают, например: Телефон";
+    label.value = inp.label || ""; label.setAttribute("data-role", "inplabel"); row.appendChild(label);
+    var key = el("input", "cb-key"); key.type = "text"; key.placeholder = "имя для API";
+    key.value = inp.key || ""; key.setAttribute("data-role", "inpkey");
+    key.title = "Имя этого поля. По нему вписанное значение попадает в запись и работает в условиях.";
+    row.appendChild(key);
+    linkAutoKey(label, key, function () {
+      var card = box.closest('[data-role="pagecard"]');
+      return card ? Array.prototype.slice.call(card.querySelectorAll('[data-role="inpkey"]')) : [];
+    });
+    var вид = el("select", "cb-key"); вид.setAttribute("data-role", "inptype");
+    INPUT_TYPES.forEach(function (t) { вид.appendChild(new Option(t[1], t[0])); });
+    вид.value = inp.type || "text";
+    вид.title = "Вид значения: от него зависит клавиатура на планшете и проверка";
+    row.appendChild(вид);
+    var подсказка = el("input"); подсказка.type = "text"; подсказка.className = "cb-key";
+    подсказка.placeholder = "подсказка в поле";
+    подсказка.value = inp.placeholder || ""; подсказка.setAttribute("data-role", "inpph");
+    row.appendChild(подсказка);
+    var reqLabel = el("label"); var req = el("input"); req.type = "checkbox";
+    req.checked = !!inp.required; req.setAttribute("data-role", "inpreq");
+    reqLabel.appendChild(req); reqLabel.appendChild(document.createTextNode(" обязательно")); row.appendChild(reqLabel);
+    var cond = conditionEditor(inp.visibleWhen, "inpcond"); cond.classList.add("cond-inline"); row.appendChild(cond);
+    var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { removeItem(box); }); row.appendChild(del);
+    box.appendChild(row);
+    return box;
+  }
+
+  function readInputRow(box) {
+    if (!box) return null;
+    var label = (box.querySelector('[data-role="inplabel"]') || {}).value || "";
+    var key = (box.querySelector('[data-role="inpkey"]') || {}).value || "";
+    if (!label.trim() && !key.trim()) {
+      if (!readCondition(box.querySelector('[data-role="inpcond"]'))) { выброшеноПустых++; return null; }
+    }
+    var out = {
+      key: key.trim(), label: label,
+      type: (box.querySelector('[data-role="inptype"]') || {}).value || "text",
+      placeholder: (box.querySelector('[data-role="inpph"]') || {}).value || "",
+      required: !!(box.querySelector('[data-role="inpreq"]') || {}).checked
+    };
+    var cond = readCondition(box.querySelector('[data-role="inpcond"]'));
+    if (cond) out.visibleWhen = cond;
+    return out;
+  }
+
+  // Панель правил отметок: список правил словами и кнопки добавления. Правило связывает пункты
+  // между собой, поэтому живёт у страницы, а не у пункта.
+  function rulesPanel(card, page) {
+    var box = el("div", "rules-panel");
+    card.setAttribute("data-check-rules", JSON.stringify(page.checkRules || []));
+
+    function имена() {
+      return Array.prototype.slice.call(card.querySelectorAll('[data-role="cbkey"]'))
+        .map(function (i) { return (i.value || "").trim(); })
+        .filter(function (k) { return k.length; });
+    }
+    function текстПункта(ключ) {
+      var поля = Array.prototype.slice.call(card.querySelectorAll('[data-role="cbkey"]'));
+      for (var i = 0; i < поля.length; i++) {
+        if ((поля[i].value || "").trim() !== ключ) continue;
+        var строка = поля[i].closest(".page-item");
+        var ed = строка && строка.querySelector('[data-role="cblabel"]');
+        var t = ed ? (ed.textContent || "").trim() : "";
+        return t.length ? t : ключ;
+      }
+      return ключ;
+    }
+    function правила() {
+      try { return JSON.parse(card.getAttribute("data-check-rules") || "[]") || []; } catch (e) { return []; }
+    }
+    function записать(list) {
+      card.setAttribute("data-check-rules", JSON.stringify(list));
+      markDirty();
+      нарисовать();
+    }
+
+    var список = el("div", "rules-list");
+    box.appendChild(список);
+
+    function нарисовать() {
+      список.innerHTML = "";
+      var list = правила();
+      if (!list.length) {
+        список.appendChild(el("div", "sig-meta", "Правил нет: пункты не связаны между собой."));
+      }
+      list.forEach(function (r, i) {
+        var строка = el("div", "rule-row");
+        var текст = r.kind === "minchecked"
+          ? "отметить не меньше " + (r.n || 1) + " из: " + (r.keys || []).map(текстПункта).join(", ")
+          : "взаимоисключающие: " + (r.keys || []).map(текстПункта).join(", ");
+        строка.appendChild(el("span", "rule-text", текст));
+        var del = el("button", "btn btn-danger btn-sm", "×");
+        del.type = "button";
+        del.title = "Убрать правило";
+        del.addEventListener("click", function () {
+          var l = правила(); l.splice(i, 1); записать(l);
+        });
+        строка.appendChild(del);
+        список.appendChild(строка);
+      });
+    }
+
+    function добавить(вид) {
+      var доступные = имена();
+      if (доступные.length < 2) {
+        toast("Правилу нужны минимум два названных пункта на этой странице", true);
+        return;
+      }
+      var c = el("div");
+      c.appendChild(el("h3", null, вид === "minchecked" ? "Отметить не меньше N" : "Взаимоисключающие пункты"));
+      c.appendChild(el("p", "sig-meta", вид === "minchecked"
+        ? "Клиент не пройдёт дальше, пока не отметит нужное число пунктов из выбранных."
+        : "Отметка одного из выбранных пунктов снимает остальные."));
+      var поля = el("div", "rule-picks");
+      доступные.forEach(function (k) {
+        var l = el("label", "check-inline");
+        var cb = el("input"); cb.type = "checkbox"; cb.value = k;
+        l.appendChild(cb); l.appendChild(document.createTextNode(" " + текстПункта(k)));
+        поля.appendChild(l);
+      });
+      c.appendChild(поля);
+      var n = null;
+      if (вид === "minchecked") {
+        var nl = el("label", "field-sm", "Сколько отметить");
+        n = el("input"); n.type = "number"; n.min = "1"; n.max = "50"; n.value = "1";
+        nl.appendChild(n); c.appendChild(nl);
+      }
+      var ok = iconBtn("check", "Добавить правило", "btn-primary");
+      ok.addEventListener("click", function () {
+        var keys = Array.prototype.slice.call(поля.querySelectorAll("input:checked")).map(function (i) { return i.value; });
+        if (keys.length < 2) { toast("Выберите хотя бы два пункта", true); return; }
+        var l = правила();
+        l.push({ kind: вид, keys: keys, n: n ? (parseInt(n.value, 10) || 1) : 1 });
+        записать(l);
+        closeModal();
+      });
+      c.appendChild(ok);
+      openModal(c);
+    }
+
+    var кнопки = el("div", "rules-actions");
+    var b1 = iconBtn("plus", "Взаимоисключающие", "btn-ghost btn-sm");
+    b1.addEventListener("click", function () { добавить("exclusive"); });
+    var b2 = iconBtn("plus", "Не меньше N", "btn-ghost btn-sm");
+    b2.addEventListener("click", function () { добавить("minchecked"); });
+    кнопки.appendChild(b1); кнопки.appendChild(b2);
+    box.appendChild(кнопки);
+
+    нарисовать();
+    return box;
+  }
+
+  // Правила отметок страницы. Хранятся в самой карточке строкой JSON: правило это не поле
+  // ввода, а связь между пунктами, и рисовать под него отдельную форму значило бы городить
+  // редактор внутри редактора. Оператор задаёт правило кнопкой, а видит его строкой словами.
+  function readCheckRules(card, checkboxes) {
+    var raw = card.getAttribute("data-check-rules") || "";
+    if (!raw) return [];
+    var rules = [];
+    try { rules = JSON.parse(raw) || []; } catch (e) { return []; }
+    var есть = {};
+    (checkboxes || []).forEach(function (c) { if (c && c.key) есть[c.key] = true; });
+    return rules.filter(function (r) {
+      return r && r.keys && r.keys.filter(function (k) { return есть[k]; }).length >= 2;
+    }).map(function (r) {
+      return { kind: r.kind === "minchecked" ? "minchecked" : "exclusive",
+        keys: r.keys.filter(function (k) { return есть[k]; }), n: parseInt(r.n, 10) || 1 };
+    });
+  }
+
   function readSignatureRow(box) {
     if (!box) return null;
     var label = (box.querySelector('[data-role="siglabel"]') || {}).value || "";
@@ -2672,6 +3687,10 @@
 
   function collectDoc() {
     выброшеноПустых = 0;
+    // Вид документа берётся из переключателя, если он на экране: иначе сохранение из другого
+    // места документа затирало бы его прежним значением.
+    var видЭл = document.querySelector('[data-role="dockind"]');
+    if (видЭл) state.doc.kind = видЭл.value || null;
     state.doc.title = $("docTitle").value; state.doc.signPrompt = $("signPrompt").value;
     state.doc.idleReturnSec = parseInt($("idleReturn").value, 10) || 0;
     var pages = [];
@@ -2680,25 +3699,28 @@
       var headingRuns = hEd ? editorToRuns(hEd) : [];
       var pageCond = readCondition(card.querySelector('[data-role="pagecond"]'));
       var includeDynamic = !!(card.querySelector('[data-role="includedynamic"]') || {}).checked;
+      var pageInPdf = (card.querySelector('[data-role="pageinpdf"]') || {}).checked !== false;
 
       // Блоки текста, чекбоксы и группы лежат в одном списке в том порядке, в каком их
       // расставил оператор. Номер берётся прямо из положения в списке, поэтому на планшете
       // страница выглядит ровно так, как в редакторе.
-      var blocks = [], checkboxes = [], groups = [], signatures = [], scans = [], ord = 0;
+      var blocks = [], checkboxes = [], groups = [], signatures = [], scans = [], inputs = [], ord = 0;
       card.querySelectorAll('[data-role="itemlist"] > .page-item').forEach(function (node) {
         var kind = node.getAttribute("data-kind");
         var got = kind === "block" ? readBlockCard(node)
           : kind === "checkbox" ? readCheckboxRow(node)
             : kind === "group" ? readGroupRow(node)
               : kind === "signature" ? readSignatureRow(node)
-                : kind === "scan" ? readScanRow(node) : null;
+                : kind === "scan" ? readScanRow(node)
+                  : kind === "input" ? readInputRow(node) : null;
         if (!got) return;
         got.ord = ord++;
         if (kind === "block") blocks.push(got);
         else if (kind === "checkbox") checkboxes.push(got);
         else if (kind === "group") groups.push(got);
         else if (kind === "signature") signatures.push(got);
-        else scans.push(got);
+        else if (kind === "scan") scans.push(got);
+        else inputs.push(got);
       });
       var headingAlign = alignOf(hEd);
       // Поле экрана подписи или сканирования стоит вне общего списка: там переставлять его не
@@ -2717,7 +3739,8 @@
         scanOwn.ord = 0; scans = [scanOwn]; signatures = [];
       }
       var page = { heading: "", body: "", kind: pageKind || null, headingRuns: headingRuns, headingAlign: headingAlign, blocks: blocks, checkboxes: checkboxes,
-        groups: groups, signatures: signatures, scans: scans, includeDynamic: includeDynamic };
+        groups: groups, signatures: signatures, scans: scans, inputs: inputs, inPdf: pageInPdf, includeDynamic: includeDynamic,
+        checkRules: readCheckRules(card, checkboxes), showCheckAll: !!(card.querySelector('[data-role="checkall"]') || {}).checked };
       if (pageCond) page.visibleWhen = pageCond;
       pages.push(page);
     });
@@ -2787,7 +3810,13 @@
   // упавший браузер до этого момента уносили с собой всю работу, и ничто об этом не
   // предупреждало. Теперь правки видно в шапке, браузер спрашивает при уходе, а черновик
   // лежит в самом браузере и предлагается к восстановлению.
-  var DRAFT_KEY = "sk_doc_draft";
+  // Черновик хранится под ключом своего документа. Общий ключ означал бы, что переключение
+  // документа предлагает восстановить черновик от другого, и оператор однажды подложил бы текст
+  // договора в согласие.
+  var DRAFT_PREFIX = "sk_doc_draft";
+  function draftKey() {
+    return state.docId ? DRAFT_PREFIX + ":" + state.docId : DRAFT_PREFIX;
+  }
   var dirty = false;
   var draftTimer = null;
 
@@ -2795,7 +3824,14 @@
     if (!dirty) { dirty = true; syncDirty(); }
     clearTimeout(draftTimer);
     draftTimer = setTimeout(saveDraft, 1200);
+    // Прожектор показывает итог условий: правка условия должна сразу менять то, что погашено.
+    // С задержкой, потому что правка идёт по букве, а пересчёт трогает весь список страниц.
+    if (прожектор.вкл) {
+      clearTimeout(прожекторТаймер);
+      прожекторТаймер = setTimeout(прожекторПрименить, 400);
+    }
   }
+  var прожекторТаймер = null;
 
   function syncDirty() {
     var btn = $("saveDocument");
@@ -2811,12 +3847,12 @@
   function saveDraft() {
     try {
       collectDoc();
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ at: Date.now(), doc: state.doc }));
+      localStorage.setItem(draftKey(), JSON.stringify({ at: Date.now(), doc: state.doc }));
     } catch (e) { /* приватный режим или переполнение: черновик просто не сохранится */ }
   }
 
   function dropDraft() {
-    try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* нечего убирать */ }
+    try { localStorage.removeItem(draftKey()); } catch (e) { /* нечего убирать */ }
   }
 
   function saveDoc(поверх) {
@@ -2828,7 +3864,8 @@
     // Версия отправляется, только когда она есть и оператор не решил сохранить поверх: сервер
     // сверит её и откажет, если документ уже переписали из другого окна.
     if (state.docRev && !поверх) headers["X-Doc-Rev"] = state.docRev;
-    return api("/document", { method: "PUT", headers: headers, body: JSON.stringify(state.doc) }).then(function (r) {
+    var путь = state.docId ? "/document?id=" + encodeURIComponent(state.docId) : "/document";
+    return api(путь, { method: "PUT", headers: headers, body: JSON.stringify(state.doc) }).then(function (r) {
       state.docRev = r.headers.get("X-Doc-Rev") || state.docRev;
       dirty = false; syncDirty(); dropDraft();
       // Одно сообщение целиком: предупреждения приклеены к «сохранён», иначе следующее
@@ -2857,7 +3894,7 @@
     var взять = iconBtn("download", "Взять свежий с сервера", "btn-primary");
     взять.addEventListener("click", function () {
       closeModal();
-      loadDoc().then(function () { toast("Загружена свежая версия. Ваши правки можно вернуть из черновика."); });
+      loadDoc(state.docId).then(function () { toast("Загружена свежая версия. Ваши правки можно вернуть из черновика."); });
     });
     var поверх = iconBtn("upload", "Сохранить мою версию поверх", "btn-ghost");
     поверх.title = "Затирает то, что сохранили в другом окне";
@@ -2876,12 +3913,17 @@
     if (!panel) return;
     ["input", "change"].forEach(function (ev) {
       panel.addEventListener(ev, function (e) {
-        if (e.target.closest && e.target.closest(".preview-setup, .preview-wrap")) return;
+        // Предпросмотр и переключатель документов это не правка документа: первый только
+        // смотрит, второй переключает. Без этого выбор документа в списке помечал только что
+        // открытый документ изменённым, и следующее переключение спрашивало о правках,
+        // которых никто не делал.
+        if (e.target.closest && e.target.closest(".preview-setup, .preview-wrap, .doc-library, .spotlight")) return;
         markDirty();
       });
     });
     panel.addEventListener("click", function (e) {
       // Добавление, удаление и перетаскивание тоже меняют документ, а событий ввода не дают.
+      if (e.target.closest && e.target.closest(".doc-library, .spotlight")) return;
       if (e.target.closest && e.target.closest(".insert-chip, .btn-danger, .btn-add, #addPage, .page-toggle, .item-toggle"))
         markDirty();
     });
@@ -2897,7 +3939,7 @@
   /// Черновик предлагается, только если он новее и отличается от того, что на сервере.
   function offerDraft() {
     var raw = null;
-    try { raw = localStorage.getItem(DRAFT_KEY); } catch (e) { return; }
+    try { raw = localStorage.getItem(draftKey()); } catch (e) { return; }
     if (!raw) return;
     var draft = null;
     try { draft = JSON.parse(raw); } catch (e) { dropDraft(); return; }
@@ -3045,6 +4087,26 @@
     signWrap.appendChild(signSel);
     head.appendChild(signWrap);
 
+    // Колонтитул внизу каждого листа. Нужен бумажному архиву: по номеру страницы видно, что
+    // документ не разрознен, а по штрихкоду записи лист находится сканером, не глазами.
+    var ftWrap = el("div", "pdfl-footer");
+    ftWrap.appendChild(el("span", "pdfl-footer-title", "Колонтитул PDF:"));
+    var ftOpts = [
+      ["pdfPageNumbers", "номер страницы"],
+      ["pdfFooterTitle", "название документа"],
+      ["pdfFooterRecordId", "номер записи"],
+      ["pdfFooterBarcode", "штрихкод записи"]
+    ];
+    ftOpts.forEach(function (o) {
+      var l = el("label", "check-inline");
+      var cb = el("input"); cb.type = "checkbox";
+      cb.checked = !!state.doc[o[0]];
+      cb.setAttribute("data-role", "pdf-" + o[0]);
+      l.appendChild(cb); l.appendChild(document.createTextNode(" " + o[1]));
+      ftWrap.appendChild(l);
+    });
+    head.appendChild(ftWrap);
+
     var zoom = el("div", "pdfl-zoom");
     var less = el("button", "btn btn-ghost", "−"); less.title = "Мельче";
     zoomLabel = el("span", null, "100%");
@@ -3071,6 +4133,10 @@
     apply.addEventListener("click", function () {
       state.doc.signaturePlacements = places.map(function (p) {
         return { key: p.key, page: p.page, x: round4(p.x), y: round4(p.y), w: round4(p.w), h: round4(p.h) };
+      });
+      ftOpts.forEach(function (o) {
+        var cb = document.querySelector('[data-role="pdf-' + o[0] + '"]');
+        state.doc[o[0]] = !!(cb && cb.checked);
       });
       state.doc.pdfFontScale = parseInt(scaleSel.value, 10) || 100;
       state.doc.pdfSignatureScale = parseInt(signSel.value, 10) || 100;
@@ -3835,7 +4901,7 @@
   $("importDocFile").addEventListener("change", function () {
     var input = this, file = input.files && input.files[0];
     if (!file) return;
-    if (!confirm("Импорт заменит все текущие страницы документа на страницы из файла. Продолжить?")) { input.value = ""; return; }
+    if (!confirm("Файл будет добавлен в библиотеку новым документом. Открытый документ не изменится. Продолжить?")) { input.value = ""; return; }
     var reader = new FileReader();
     reader.onload = function () {
       var parsed;
@@ -3846,9 +4912,14 @@
       apiSend("/document/import", "POST", parsed)
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          return loadDoc().then(function () {
+          // Импортированный документ сразу открывается: иначе оператор не понимает, куда он
+          // делся, и ищет его в списке.
+          if (j && j.id) state.docId = j.id;
+          return loadLibrary().then(function () { return loadDoc(j && j.id); }).then(function () {
+            renderLibrary();
             var хвост = j && j.images ? (", восстановлено картинок: " + j.images) : "";
-            toast("Импортировано страниц: " + (j && j.pages != null ? j.pages : "") + хвост);
+            toast("Документ добавлен в библиотеку под кодом " + ((j && j.code) || "?") +
+              ". Страниц: " + (j && j.pages != null ? j.pages : "") + хвост);
           });
         })
         .catch(function () { /* already reported by api() */ })

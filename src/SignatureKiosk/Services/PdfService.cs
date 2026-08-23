@@ -84,12 +84,15 @@ public class PdfService
         public XImage? Signature { get; init; }
         public required Dictionary<string, XImage> Images { get; init; }
         public MemoryStream? Stream { get; init; }
+        /// <summary>Потоки картинок из заказа: закрываются вместе с документом, не раньше.</summary>
+        public List<MemoryStream>? Streams { get; init; }
         public void Dispose()
         {
             Flow.Finish();
             Signature?.Dispose();
             foreach (var xi in Images.Values) xi.Dispose();
             Stream?.Dispose();
+            foreach (var s in Streams ?? new List<MemoryStream>()) s.Dispose();
         }
     }
 
@@ -127,36 +130,114 @@ public class PdfService
             w.Gap(12);
         }
 
+        // Вписанное самим клиентом. Отдельным разделом от данных подписанта: одно прислала
+        // внешняя система, другое человек вписал своей рукой, и в подписанном документе это
+        // разные по весу вещи.
+        var вписано = (rec.Inputs ?? new List<SubmittedInput>()).Where(x => x is not null && !string.IsNullOrWhiteSpace(x.Value)).ToList();
+        if (вписано.Count > 0)
+        {
+            w.Line("Заполнено клиентом:", w.H2);
+            w.Gap(3);
+            foreach (var inp in вписано)
+                w.Paragraph((string.IsNullOrWhiteSpace(inp.Label) ? inp.Key : inp.Label) + ": " + inp.Value, w.Body);
+            w.Gap(12);
+        }
+
         // Images referenced by blocks must stay alive until Save (PDFsharp reads them lazily), and
         // each distinct file is decoded ONCE: the same logo repeated across a document used to be
         // decoded per block, which under concurrent signing could take hundreds of MB.
         var keepImages = new Dictionary<string, XImage>(StringComparer.Ordinal);
+        // Потоки картинок, присланных заказом: живут до сохранения вместе с самими картинками.
+        var keepStreams = new List<MemoryStream>();
         var imageBlocks = 0;
         void RenderBlocks(IEnumerable<DocBlock> blocks)
         {
             foreach (var block in blocks)
             {
                 if (block is null) continue;
+                // Блок, помеченный «не в PDF»: клиент его видел, в записи он есть, а в бумаге
+                // не нужен. Пропускается только отрисовка, само содержимое никуда не девается.
+                if (!block.InPdf) continue;
+                if (block.Kind == "divider") { w.ClearWrap(); w.Divider(); continue; }
+                if (block.Kind == "pagebreak") { w.ClearWrap(); w.PageBreak(); continue; }
+                if (block.Table is not null)
+                {
+                    w.ClearWrap();
+                    w.Table(block.Table, block.Bg, block.BorderColor, block.Pad);
+                    continue;
+                }
+                if (block.List is "bullet" or "number" && block.Runs is { Count: > 0 })
+                {
+                    w.ClearWrap();
+                    w.ListBlock(block.Runs, block.List == "number", block);
+                    w.Gap(8);
+                    continue;
+                }
                 if (!string.IsNullOrEmpty(block.ImageUrl))
                 {
                     if (imageBlocks >= MaxImageBlocks) continue;   // bounded work per document
-                    var file = MediaFile(block.ImageUrl);
-                    if (file == null) continue;
-                    if (!keepImages.TryGetValue(file, out var xi))
+                    // Картинка из заказа приходит прямо в документе строкой BASE64: файла для
+                    // неё нет и быть не должно, иначе запись перестала бы быть самодостаточной,
+                    // а собрать PDF заново через год стало бы нечем.
+                    XImage? xi;
+                    string ключ;
+                    if (DocumentTemplating.IsApiImage(block.ImageUrl))
                     {
-                        // Skip an image PDFsharp cannot decode rather than failing the whole PDF.
-                        try { xi = XImage.FromFile(file); }
-                        catch (Exception ex) { _log?.LogWarning(ex, "Skipping undecodable image {File} in PDF", file); continue; }
-                        keepImages[file] = xi;
+                        ключ = "api:" + block.ImageUrl!.Length + ":" + block.ImageUrl!.GetHashCode();
+                        if (!keepImages.TryGetValue(ключ, out xi))
+                        {
+                            var зпт = block.ImageUrl!.IndexOf(',');
+                            if (зпт <= 0) continue;
+                            byte[] байты;
+                            try { байты = Convert.FromBase64String(block.ImageUrl![(зпт + 1)..]); }
+                            catch (FormatException) { continue; }
+                            try
+                            {
+                                // Поток обязан дожить до сохранения: PDFsharp читает байты
+                                // лениво. Он закрывается вместе с собранным документом.
+                                var поток = new MemoryStream(байты, 0, байты.Length, writable: false, publiclyVisible: true);
+                                keepStreams.Add(поток);
+                                xi = XImage.FromStream(поток);
+                            }
+                            catch (Exception ex)
+                            {
+                                _log?.LogWarning(ex, "Картинка из заказа не разобралась и в PDF не попала");
+                                continue;
+                            }
+                            keepImages[ключ] = xi;
+                        }
+                    }
+                    else
+                    {
+                        var file = MediaFile(block.ImageUrl);
+                        if (file == null) continue;
+                        ключ = file;
+                        if (!keepImages.TryGetValue(file, out xi))
+                        {
+                            // Skip an image PDFsharp cannot decode rather than failing the whole PDF.
+                            try { xi = XImage.FromFile(file); }
+                            catch (Exception ex) { _log?.LogWarning(ex, "Skipping undecodable image {File} in PDF", file); continue; }
+                            keepImages[file] = xi;
+                        }
                     }
                     imageBlocks++;
                     // Картинка не встаёт сбоку другой картинки: две обтекаемые подряд означали бы
                     // колонку из картинок и обрывки текста между ними.
                     w.ClearWrap();
-                    w.BlockImage(xi, block.ImageWidth, DocumentTemplating.CleanImageUrl(block.ImageUrl) ?? "",
+                    // В раскладку идёт не сама картинка, а её след: полотно с картинкой на
+                    // мегабайт превратило бы ответ раскладки в мегабайтный же.
+                    w.BlockImage(xi!, block.ImageWidth,
+                        DocumentTemplating.IsApiImage(block.ImageUrl) ? "картинка из заказа"
+                            : DocumentTemplating.CleanImageUrl(block.ImageUrl) ?? "",
                         block.Align, block.Wrap, block.WrapGap);
                 }
-                else if (block.Runs is { Count: > 0 }) { w.Rich(block.Runs, isHeading: false, block.Align); w.Gap(8); }
+                else if (block.Runs is { Count: > 0 })
+                {
+                    // Плашка и рамка рисуются вокруг уже готового текста: высота известна только
+                    // после вёрстки, поэтому сначала считается она, потом кладётся фон под низ.
+                    w.Boxed(block, () => w.Rich(block.Runs, isHeading: false, block.Align));
+                    w.Gap(8);
+                }
             }
         }
 
@@ -235,6 +316,9 @@ public class PdfService
 
         foreach (var page in doc.Pages ?? new List<DocPage>())
         {
+            // Страница, помеченная «не в PDF»: вступительный экран, пояснение, заставка. В
+            // записи она остаётся целиком, в бумагу не идёт.
+            if (!page.InPdf) continue;
             w.ClearWrap();
             var heading = DocumentTemplating.HeadingRuns(page);
             if (heading.Count > 0) { w.Rich(heading, isHeading: true, page.HeadingAlign); w.Gap(2); }
@@ -268,6 +352,21 @@ public class PdfService
                 // Отсканированный код в PDF не печатается: это служебные данные заказа, а не то,
                 // что человек подписывает. В записи подписи он есть, и внешняя система его видит.
                 if (kind == 4) continue;
+                if (kind == 5)
+                {
+                    // Поле ввода печатается там, где стояло на экране: вписанное значение
+                    // относится к соседнему абзацу, а собранное в конец читалось бы про другое.
+                    var inp = page.Inputs[index];
+                    w.ClearWrap();
+                    var значение = (rec.Inputs ?? new List<SubmittedInput>())
+                        .FirstOrDefault(x => x is not null && string.Equals(x.Key, inp.Key, StringComparison.OrdinalIgnoreCase))?.Value;
+                    if (string.IsNullOrWhiteSpace(значение)) значение = inp.Value;
+                    var подпись = string.IsNullOrWhiteSpace(inp.Label) ? inp.Key : inp.Label;
+                    w.Rich(MarkedRuns("", new List<TextRun> { new() { Text = подпись + ": " } }, inp.Required)
+                        .Concat(new[] { new TextRun { Text = string.IsNullOrWhiteSpace(значение) ? "не заполнено" : значение!, Bold = true } })
+                        .ToList(), isHeading: false);
+                    continue;
+                }
 
                 var g = page.Groups[index];
                 SubmittedGroup? sg = null;
@@ -350,7 +449,17 @@ public class PdfService
                 if (stamp is not null) w.StampSignature(pl.Page, pl.X, pl.Y, pl.W, pl.H, stamp);
             }
 
-        return new Built { Flow = w, Signature = img, Images = keepImages, Stream = ms };
+        // Колонтитул последним: к этому моменту страницы свёрстаны и их число известно. В
+        // раскладке его нет: она показывает поток, а колонтитул к потоку не относится.
+        // Плашки перед колонтитулом: обе операции отпускают холст страницы, и порядок между
+        // ними значения не имеет, но обе обязаны идти после конца потока.
+        if (capture is null) w.FlushBoxes();
+        if (capture is null)
+            w.Footer(doc.PdfFooterTitle ? doc.Title : null,
+                doc.PdfFooterRecordId || doc.PdfFooterBarcode ? rec.Id : null,
+                doc.PdfPageNumbers, doc.PdfFooterBarcode);
+
+        return new Built { Flow = w, Signature = img, Images = keepImages, Stream = ms, Streams = keepStreams };
     }
 
     /// <summary>
@@ -448,6 +557,79 @@ public class PdfService
         /// <summary>Release the last page's graphics (call after the document has been saved).</summary>
         public void Finish() => _gfx?.Dispose();
 
+        /// <summary>
+        /// Колонтитул внизу каждой страницы. Рисуется в самом конце: раньше число страниц ещё
+        /// неизвестно, и «страница 2 из ?» пришлось бы дописывать задним числом.
+        /// Штрихкод это Code 39 из номера записи: рисуется полосками прямо здесь, потому что
+        /// заводить ради него библиотеку значит тянуть зависимость ради десяти строк.
+        /// </summary>
+        public void Footer(string? title, string? recordId, bool numbers, bool barcode)
+        {
+            if (!numbers && string.IsNullOrEmpty(title) && string.IsNullOrEmpty(recordId) && !barcode) return;
+            _gfx?.Dispose();
+            _gfx = null!;
+            var всего = _doc.PageCount;
+            for (var i = 0; i < всего; i++)
+            {
+                var page = _doc.Pages[i];
+                using var g = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Append);
+                var y = page.Height.Point - Margin + 14;
+                var слева = new List<string>();
+                if (!string.IsNullOrEmpty(title)) слева.Add(title!);
+                if (!string.IsNullOrEmpty(recordId)) слева.Add("Запись " + recordId);
+                if (слева.Count > 0)
+                    g.DrawString(string.Join("     ", слева), Small, XBrushes.Gray, new XPoint(Margin, y));
+                if (numbers)
+                {
+                    var текст = "Страница " + (i + 1) + " из " + всего;
+                    var w = g.MeasureString(текст, Small).Width;
+                    g.DrawString(текст, Small, XBrushes.Gray, new XPoint(Margin + _contentW - w, y));
+                }
+                if (barcode && !string.IsNullOrEmpty(recordId))
+                    DrawCode39(g, recordId!, Margin, y + 4, _contentW / 2, 18);
+            }
+        }
+
+        /// <summary>
+        /// Code 39: каждый знак это девять полос, пять чёрных и четыре белых, из которых три
+        /// широкие. Кодировка задана таблицей ширин, где 0 узкая полоса, 1 широкая. Начало и
+        /// конец помечаются знаком «звёздочка», как того требует сам код.
+        /// </summary>
+        private static void DrawCode39(XGraphics g, string text, double x, double y, double maxW, double h)
+        {
+            const string алфавит = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%*";
+            string[] коды =
+            {
+                "000110100", "100100001", "001100001", "101100000", "000110001", "100110000", "001110000",
+                "000100101", "100100100", "001100100", "100001001", "001001001", "101001000", "000011001",
+                "100011000", "001011000", "000001101", "100001100", "001001100", "000011100", "100000011",
+                "001000011", "101000010", "000010011", "100010010", "001010010", "000000111", "100000110",
+                "001000110", "000010110", "110000001", "011000001", "111000000", "010010001", "110010000",
+                "011010000", "010000101", "111000000", "010101000", "010100010", "010001010", "000101010",
+                "010010100"
+            };
+            var знаки = "*" + new string(text.ToUpperInvariant().Where(c => алфавит.IndexOf(c) >= 0).ToArray()) + "*";
+            // Ширина одного модуля: узкая полоса. Широкая втрое, между знаками пробел в один
+            // модуль, значит на знак приходится 13 модулей плюс разделитель.
+            var модулей = знаки.Length * 13.0;
+            var m = Math.Min(1.2, maxW / модулей);
+            if (m <= 0.1) return;
+            var cx = x;
+            foreach (var ch in знаки)
+            {
+                var idx = алфавит.IndexOf(ch);
+                if (idx < 0 || idx >= коды.Length) continue;
+                var код = коды[idx];
+                for (var i = 0; i < код.Length; i++)
+                {
+                    var w = (код[i] == '1' ? 3 : 1) * m;
+                    if (i % 2 == 0) g.DrawRectangle(XBrushes.Black, cx, y, w, h);
+                    cx += w;
+                }
+                cx += m;   // разделитель между знаками
+            }
+        }
+
         public void Gap(double h) => _y += h;
 
         /// <summary>
@@ -472,7 +654,7 @@ public class PdfService
 
         private bool FloatActive => _floatWidth > 0 && _y < _floatBottom;
         /// <summary>Левая граница строки на текущей высоте.</summary>
-        private double LineLeft => FloatActive && !_floatRight ? Margin + _floatWidth : Margin;
+        private double LineLeft => (FloatActive && !_floatRight ? Margin + _floatWidth : Margin) + _listIndent;
         /// <summary>Правая граница строки на текущей высоте.</summary>
         private double LineRight => Margin + _contentW - (FloatActive && _floatRight ? _floatWidth : 0);
 
@@ -584,6 +766,14 @@ public class PdfService
         /// a shear, since no proportional italic face is embedded, so this stays a single-font document.</summary>
         public void Rich(List<TextRun> runs, bool isHeading, string? align = null)
         {
+            // Заголовок в самом низу листа отрывается от того, что он озаглавливает. Если под ним
+            // не осталось места хотя бы на три строки текста, он уезжает на следующую страницу
+            // вместе со своим разделом.
+            if (isHeading && runs is { Count: > 0 })
+            {
+                var нужно = Body.GetHeight() * 1.15 * 3 + H2.GetHeight() * 1.2;
+                if (_y > Margin && _y + нужно > _pageH - Margin) { ClearFloat(); NewPage(); }
+            }
             // gap: перед словом стоит пробел. По этим пробелам растягивается строка при
             // выравнивании по обоим краям, поэтому куски разорванного слова, склеенные без
             // пробела, растягиванием не разъезжаются.
@@ -692,6 +882,218 @@ public class PdfService
             _gfx.MultiplyTransform(new XMatrix(1, 0, -0.22, 1, 0, 0)); // shear -> right-leaning italic
             _gfx.DrawString(text, font, brush, new XPoint(0, 0));
             _gfx.Restore(state);
+        }
+
+        /// <summary>Горизонтальная черта во всю ширину текста.</summary>
+        public void Divider()
+        {
+            Ensure(14);
+            _y += 6;
+            _gfx.DrawLine(new XPen(XColors.LightGray, 0.75), Margin, _y, Margin + _contentW, _y);
+            Note("divider", Margin, _y, _contentW, 1);
+            _y += 8;
+        }
+
+        /// <summary>Начать новую страницу принудительно. На пустой странице ничего не делает,
+        /// иначе разрыв в начале документа давал бы пустой первый лист.</summary>
+        public void PageBreak()
+        {
+            if (_y <= Margin + 0.5) return;
+            NewPage();
+        }
+
+        /// <summary>
+        /// Отложить текущее место: сюда потом ляжет плашка или рамка. Высота становится известна
+        /// только после вёрстки содержимого, поэтому фон рисуется задним числом, под уже
+        /// напечатанным. PDF это позволяет: порядок рисования решает, что окажется сверху, и
+        /// фон, положенный позже, накрыл бы текст, поэтому он кладётся на отдельном слое ниже.
+        /// </summary>
+        public void Boxed(DocBlock b, Action content)
+        {
+            var есть = !string.IsNullOrEmpty(b.Bg) || !string.IsNullOrEmpty(b.BorderColor);
+            if (!есть) { content(); return; }
+            var pad = Math.Clamp(b.Pad, 0, 40);
+            var сверху = _y;
+            var страница = _pageIndex;
+            _y += pad;
+            content();
+            _y += pad;
+            // Содержимое перешло на новую страницу: рисовать коробку через разрыв нечем, и
+            // честнее не рисовать её вовсе, чем обвести половину.
+            if (_pageIndex != страница) return;
+            var h = _y - сверху;
+            if (h <= 0) return;
+            var rect = new XRect(Margin - 4, сверху - 2, _contentW + 8, h + 4);
+            // Рамка рисуется сразу: она поверх, и текущий холст страницы для этого и открыт.
+            if (!string.IsNullOrEmpty(b.BorderColor))
+                _gfx.DrawRectangle(new XPen(ColorOf(b.BorderColor), 0.75), rect);
+            // Фон должен лечь ПОД текст, а текст уже напечатан. Открыть второй холст этой же
+            // страницы прямо сейчас нельзя: PDFsharp держит один холст на страницу, и попытка
+            // роняла сборку PDF целиком. Поэтому плашки копятся и рисуются в самом конце, когда
+            // поток закончен и холст отпущен.
+            if (!string.IsNullOrEmpty(b.Bg))
+            {
+                _boxes.Add((страница, rect, b.Bg!));
+                Note("box", rect.X, rect.Y, rect.Width, rect.Height, b.Bg!);
+            }
+        }
+
+        /// <summary>Отложенные плашки: страница, место и цвет.</summary>
+        private readonly List<(int Page, XRect Rect, string Color)> _boxes = new();
+
+        /// <summary>
+        /// Нарисовать накопленные плашки под уже готовым текстом. Prepend кладёт рисование в
+        /// начало содержимого страницы, поэтому буквы остаются видны поверх фона.
+        /// </summary>
+        public void FlushBoxes()
+        {
+            if (_boxes.Count == 0) return;
+            _gfx?.Dispose();
+            _gfx = null!;
+            foreach (var группа in _boxes.GroupBy(x => x.Page))
+            {
+                if (группа.Key < 0 || группа.Key >= _doc.PageCount) continue;
+                using var g = XGraphics.FromPdfPage(_doc.Pages[группа.Key], XGraphicsPdfPageOptions.Prepend);
+                foreach (var b in группа) g.DrawRectangle(new XSolidBrush(ColorOf(b.Color)), b.Rect);
+            }
+            _boxes.Clear();
+        }
+
+        private static XColor ColorOf(string? hex)
+        {
+            if (!string.IsNullOrEmpty(hex) && hex.Length == 7 && hex[0] == '#'
+                && int.TryParse(hex.AsSpan(1, 2), System.Globalization.NumberStyles.HexNumber, null, out var r)
+                && int.TryParse(hex.AsSpan(3, 2), System.Globalization.NumberStyles.HexNumber, null, out var g)
+                && int.TryParse(hex.AsSpan(5, 2), System.Globalization.NumberStyles.HexNumber, null, out var b))
+                return XColor.FromArgb(r, g, b);
+            return XColors.White;
+        }
+
+        /// <summary>
+        /// Список: каждая строка блока это пункт. Маркер или номер печатается отдельным куском
+        /// без оформления, а сам пункт с отступом, чтобы вторая строка не подлезала под маркер.
+        /// </summary>
+        public void ListBlock(List<TextRun> runs, bool numbered, DocBlock block)
+        {
+            var пункты = new List<List<TextRun>> { new() };
+            foreach (var r in runs ?? new List<TextRun>())
+            {
+                var segs = (r?.Text ?? "").Replace("\r", "").Split('\n');
+                for (var i = 0; i < segs.Length; i++)
+                {
+                    if (i > 0) пункты.Add(new List<TextRun>());
+                    if (segs[i].Length > 0)
+                        пункты[^1].Add(new TextRun { Text = segs[i], Bold = r!.Bold, Italic = r.Italic,
+                            Color = r.Color, Size = r.Size, SizePt = r.SizePt, Mark = r.Mark });
+                }
+            }
+            var n = 1;
+            foreach (var пункт in пункты)
+            {
+                if (пункт.Count == 0) continue;
+                var маркер = numbered ? n++ + ".  " : "•  ";
+                var строка = new List<TextRun> { new() { Text = маркер } };
+                строка.AddRange(пункт);
+                // Отступ под маркер: вторая строка пункта начинается там же, где первая буква.
+                _listIndent = 16;
+                Rich(строка, isHeading: false, block.Align);
+                _listIndent = 0;
+            }
+        }
+
+        /// <summary>Отступ содержимого списка, чтобы перенос строки не подлезал под маркер.</summary>
+        private double _listIndent;
+
+        /// <summary>
+        /// Таблица. Строки одинаковой высоты не делаются: ячейка переносится по словам, и высота
+        /// строки это высота самой длинной ячейки. Строка, не влезающая на лист, уезжает на
+        /// следующий целиком, а не рвётся пополам.
+        /// </summary>
+        public void Table(DocTable t, string? bg, string? border, int pad)
+        {
+            var rows = t.Rows ?? new List<List<string>>();
+            if (rows.Count == 0) return;
+            var cols = rows.Max(r => r?.Count ?? 0);
+            if (cols == 0) return;
+
+            var widths = new double[cols];
+            var заданы = t.Widths is { Count: > 0 } && t.Widths.Count == cols;
+            for (var i = 0; i < cols; i++)
+                widths[i] = заданы ? _contentW * t.Widths[i] / 100.0 : _contentW / cols;
+
+            var отступ = Math.Clamp(pad <= 0 ? 4 : pad, 2, 20);
+            var рамка = string.IsNullOrEmpty(border) ? XColors.Gray : ColorOf(border);
+
+            for (var ri = 0; ri < rows.Count; ri++)
+            {
+                var шапка = t.HeaderRow && ri == 0;
+                var font = шапка ? FontFor(Body.Size, true) : Body;
+                var row = rows[ri] ?? new List<string>();
+
+                // Высота строки: считается по самой высокой ячейке, до всякого рисования.
+                double h = 0;
+                var разбито = new List<List<string>>();
+                for (var ci = 0; ci < cols; ci++)
+                {
+                    var текст = ci < row.Count ? row[ci] ?? "" : "";
+                    var строки = WrapInto(текст, font, widths[ci] - 2 * отступ);
+                    разбито.Add(строки);
+                    h = Math.Max(h, строки.Count * font.GetHeight() * 1.15);
+                }
+                h += 2 * отступ;
+                Ensure(h);
+
+                double x = Margin;
+                for (var ci = 0; ci < cols; ci++)
+                {
+                    var rect = new XRect(x, _y, widths[ci], h);
+                    var заливка = шапка ? "#f1f5f9" : bg;
+                    if (!string.IsNullOrEmpty(заливка))
+                        _gfx.DrawRectangle(new XSolidBrush(ColorOf(заливка)), rect);
+                    _gfx.DrawRectangle(new XPen(рамка, 0.6), rect);
+                    var ty = _y + отступ;
+                    foreach (var строка in разбито[ci])
+                    {
+                        _gfx.DrawString(строка, font, XBrushes.Black, new XPoint(x + отступ, ty + font.GetHeight()));
+                        ty += font.GetHeight() * 1.15;
+                    }
+                    Note("cell", rect.X, rect.Y, rect.Width, rect.Height,
+                        string.Join(" ", разбито[ci]), font.Size, шапка);
+                    x += widths[ci];
+                }
+                _y += h;
+            }
+            _y += 8;
+        }
+
+        /// <summary>Разбить текст по ширине на строки. Тот же перенос, что и у абзаца.</summary>
+        private List<string> WrapInto(string text, XFont font, double width)
+        {
+            var out_ = new List<string>();
+            if (width <= 0) { out_.Add(text); return out_; }
+            foreach (var para in (text ?? "").Replace("\r", "").Split('\n'))
+            {
+                var line = "";
+                foreach (var raw in para.Split(' '))
+                {
+                    var pieces = _gfx.MeasureString(raw, font).Width > width
+                        ? BreakLongWord(raw, font, width)
+                        : new List<string> { raw };
+                    foreach (var word in pieces)
+                    {
+                        var trial = line.Length == 0 ? word : line + " " + word;
+                        if (line.Length > 0 && _gfx.MeasureString(trial, font).Width > width)
+                        {
+                            out_.Add(line);
+                            line = word;
+                        }
+                        else line = trial;
+                    }
+                }
+                out_.Add(line);
+            }
+            if (out_.Count == 0) out_.Add("");
+            return out_;
         }
 
         /// <summary>Draw a block image scaled to a percent of the content width, capped to the page.</summary>

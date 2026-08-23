@@ -168,6 +168,52 @@ public class DocCheckbox
     // поэтому номер сквозной для всех трёх видов. -1 означает "не задан": так выглядят документы,
     // сохранённые до появления свободного порядка, и им номера проставляются при сохранении.
     public int Ord { get; set; } = -1;
+
+}
+
+/// <summary>
+/// Таблица: строки одинаковой ширины столбцов. Ячейки это обычный текст без оформления: так
+/// таблица остаётся читаемой и в редакторе, и в PDF, а оформленный текст живёт в блоках рядом.
+/// </summary>
+public class DocTable
+{
+    /// <summary>Строки, каждая это список ячеек. Число ячеек выравнивается по самой длинной.</summary>
+    public List<List<string>> Rows { get; set; } = new();
+    /// <summary>Ширины столбцов в процентах. Пусто означает поровну.</summary>
+    public List<int> Widths { get; set; } = new();
+    /// <summary>Первая строка это шапка: полужирная и с плашкой.</summary>
+    public bool HeaderRow { get; set; } = true;
+}
+
+/// <summary>
+/// Поле ввода на планшете: клиент вписывает значение с экранной клавиатуры. Значение живёт как
+/// тег: работает в условиях, подставляется в текст ниже, попадает в запись и в PDF.
+/// </summary>
+public class DocInput
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    /// <summary>Вид значения: "text" | "number" | "date" | "phone". От него зависят клавиатура
+    /// на планшете и проверка на сервере.</summary>
+    public string Type { get; set; } = "text";
+    public string? Placeholder { get; set; }
+    public bool Required { get; set; }
+    /// <summary>Заранее заполненное значение: обычно приходит из тега API с тем же именем.</summary>
+    public string? Value { get; set; }
+    public VisibleWhen? VisibleWhen { get; set; }
+    public int Ord { get; set; } = -1;
+}
+
+/// <summary>
+/// Правило поверх отметок страницы. "exclusive": из перечисленных пунктов отмечен может быть
+/// только один, отметка снимает остальные. "minchecked": пунктов из перечня должно быть отмечено
+/// не меньше N, иначе дальше не пройти. Проверяют и планшет, и сервер.
+/// </summary>
+public class CheckRule
+{
+    public string Kind { get; set; } = "exclusive";
+    public List<string> Keys { get; set; } = new();
+    public int N { get; set; } = 1;
 }
 
 /// <summary>One option inside a group. Its key is what the API sends to select it.</summary>
@@ -211,6 +257,13 @@ public class TextRun
     public bool Italic { get; set; }
     public string? Color { get; set; }   // "#rrggbb" (from the editor palette); null = default text colour
     public string? Size { get; set; }    // "n" (normal) | "l" (large) | "h" (huge); null/other = normal
+    /// <summary>Выделение фоном, как маркером: "#rrggbb". Пусто означает без выделения.</summary>
+    public string? Mark { get; set; }
+    /// <summary>
+    /// Свой размер шрифта в точках, 8..40. Ноль означает «по ступени Size». Точки, а не проценты:
+    /// это те же единицы, что в PDF, и на бумаге получается ровно то, что задано.
+    /// </summary>
+    public int SizePt { get; set; }
 }
 
 /// <summary>A condition on an API field, used to show or hide a block or a whole page.
@@ -257,6 +310,12 @@ public class DocBlock
     /// </summary>
     public string? Align { get; set; }
     public string? ImageUrl { get; set; }        // "/media/{file}" when this block is an image
+    /// <summary>
+    /// Имя тега картинки, присылаемой внешней системой. Когда оно задано, на место этого блока
+    /// встаёт картинка из запроса, а ImageUrl остаётся запасным: он показывается, если картинку
+    /// не прислали. Не прислали и запасной нет - блока не будет вовсе, пустая рамка хуже.
+    /// </summary>
+    public string? ImageTag { get; set; }
     public int ImageWidth { get; set; } = 100;   // image width as a percent of the content width (10..100)
     /// <summary>
     /// Обтекание картинки текстом: "left" картинка слева и текст справа от неё, "right" наоборот.
@@ -274,6 +333,33 @@ public class DocBlock
     // поэтому номер сквозной для всех трёх видов. -1 означает "не задан": так выглядят документы,
     // сохранённые до появления свободного порядка, и им номера проставляются при сохранении.
     public int Ord { get; set; } = -1;
+    /// <summary>
+    /// Особый вид блока: "divider" это горизонтальная черта, "pagebreak" это разрыв страницы в
+    /// PDF (на планшете не рисуется: там свои экраны). Пусто это обычный текст или картинка.
+    /// </summary>
+    public string? Kind { get; set; }
+
+    /// <summary>Режим списка: "bullet" маркированный, "number" нумерованный. Каждая строка блока
+    /// становится пунктом. Пусто это обычный абзац.</summary>
+    public string? List { get; set; }
+
+    /// <summary>Фон блока, "#rrggbb". Пусто означает без плашки.</summary>
+    public string? Bg { get; set; }
+    /// <summary>Рамка блока, "#rrggbb". Пусто означает без рамки.</summary>
+    public string? BorderColor { get; set; }
+    /// <summary>Внутренний отступ плашки или рамки, в точках, 0..40.</summary>
+    public int Pad { get; set; }
+    /// <summary>Межстрочный интервал в процентах, 100..250. Ноль означает обычный.</summary>
+    public int LineHeight { get; set; }
+
+    /// <summary>Таблица. Блок с таблицей не несёт текста и картинки: у него только она.</summary>
+    public DocTable? Table { get; set; }
+
+    /// <summary>
+    /// Печатать ли этот блок в PDF. У блока ограничений нет: текст, картинка и таблица ничего
+    /// не подтверждают сами по себе, поэтому исключить можно любой.
+    /// </summary>
+    public bool InPdf { get; set; } = true;
 }
 
 public class DocPage
@@ -290,6 +376,14 @@ public class DocPage
     /// <summary>Выравнивание заголовка страницы: left, center, right, justify.</summary>
     public string? HeadingAlign { get; set; }
 
+    /// <summary>
+    /// Печатать ли эту страницу в PDF. Вступительный экран «внимательно прочитайте» нужен
+    /// клиенту, но в подписанной бумаге он только мешает. Страницу, на которой клиент что-то
+    /// отмечает, выбирает, вписывает, подписывает или сканирует, исключить нельзя: в PDF
+    /// оказалась бы галочка без того, под чем она стоит.
+    /// </summary>
+    public bool InPdf { get; set; } = true;
+
     public string Heading { get; set; } = "";                  // legacy plain heading (fallback)
     public List<TextRun> HeadingRuns { get; set; } = new();    // rich heading
     public string Body { get; set; } = "";                     // legacy plain body (fallback)
@@ -301,11 +395,50 @@ public class DocPage
     public List<DocSignature> Signatures { get; set; } = new();
     /// <summary>Сканирование кода внутри страницы: штрихкод пробирки, QR из направления.</summary>
     public List<DocScan> Scans { get; set; } = new();
+    /// <summary>Поля ввода внутри страницы: телефон, номер полиса, что угодно вписываемое.</summary>
+    public List<DocInput> Inputs { get; set; } = new();
+    /// <summary>Правила поверх отметок этой страницы.</summary>
+    public List<CheckRule> CheckRules { get; set; } = new();
+    /// <summary>Кнопка «отметить всё» над пунктами страницы: для длинных списков согласий.</summary>
+    public bool ShowCheckAll { get; set; }
     public bool IncludeDynamic { get; set; } = false; // anchor: API-supplied checkboxes render here
+}
+
+/// <summary>
+/// Один документ в библиотеке: чем он адресуется по API и как называется у оператора.
+/// Сам текст документа лежит отдельным файлом, чтобы список открывался, не читая их все.
+/// </summary>
+public class DocumentInfo
+{
+    public string Id { get; set; } = "";
+    /// <summary>
+    /// Код для API: его пишет оператор, им адресуется документ в запросе. Внутренний
+    /// идентификатор опаковый и меняется при пересоздании, а код стабилен, читается в чужом коде
+    /// и переживает перенос на другой сервер. Так же устроены рабочие места.
+    /// </summary>
+    public string Code { get; set; } = "";
+    public string Name { get; set; } = "";
+    /// <summary>Этот документ показывается, когда запрос пришёл без кода.</summary>
+    public bool IsDefault { get; set; }
+    public DateTime UpdatedUtc { get; set; }
+}
+
+/// <summary>Библиотека: список документов. Тексты документов лежат по отдельным файлам.</summary>
+public class DocumentLibrary
+{
+    public List<DocumentInfo> Documents { get; set; } = new();
 }
 
 public class DocumentConfig
 {
+    /// <summary>
+    /// Для чего этот документ. Пусто или "sign" это обычный подписной: страницы, экран подписи,
+    /// запись и PDF. "info" это информационный: его существование в том, чтобы показать клиенту
+    /// то, что прислала внешняя система, картинку или текст. У него нет экрана подписи, на
+    /// последней странице стоит «Готово», и после него не остаётся ни записи, ни PDF.
+    /// </summary>
+    public string? Kind { get; set; }
+
     public string Title { get; set; } = "Документ";
     public List<DocPage> Pages { get; set; } = new();
     public string SignPrompt { get; set; } = "Пожалуйста, поставьте вашу подпись в поле ниже";
@@ -335,6 +468,15 @@ public class DocumentConfig
     /// На подпись, которой задано своё место на листе, не влияет: у неё свой прямоугольник.
     /// </summary>
     public int PdfSignatureScale { get; set; } = 100;
+
+    /// <summary>Колонтитул внизу каждой страницы PDF: номер страницы «N из M».</summary>
+    public bool PdfPageNumbers { get; set; }
+    /// <summary>Колонтитул: название документа.</summary>
+    public bool PdfFooterTitle { get; set; }
+    /// <summary>Колонтитул: номер записи подписи.</summary>
+    public bool PdfFooterRecordId { get; set; }
+    /// <summary>Колонтитул: штрихкод номера записи, чтобы бумажный лист находился по сканеру.</summary>
+    public bool PdfFooterBarcode { get; set; }
 
     /// <summary>
     /// Экран благодарности как обычная страница: заголовок, текст и картинки с тем же
@@ -519,6 +661,14 @@ public class SignedSignature
     public string File { get; set; } = "";
 }
 
+/// <summary>Что клиент вписал в поле ввода.</summary>
+public class SubmittedInput
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    public string Value { get; set; } = "";
+}
+
 public class SignatureSubmission
 {
     public List<SubmittedItem> Items { get; set; } = new();
@@ -527,6 +677,8 @@ public class SignatureSubmission
     public List<SubmittedSignature> Signatures { get; set; } = new();
     /// <summary>Коды, отсканированные внутри страниц.</summary>
     public List<SubmittedScan> Scans { get; set; } = new();
+    /// <summary>Вписанные значения полей ввода.</summary>
+    public List<SubmittedInput> Inputs { get; set; } = new();
     public string Signature { get; set; } = ""; // data URL (image/png)
     // Identifies one signing session. If the response is lost and the tablet retries, the server
     // returns the record it already stored instead of creating a second, data-less duplicate.
@@ -538,6 +690,10 @@ public class SignatureRecord
     public string Id { get; set; } = "";
     public DateTime CreatedUtc { get; set; }
     public string DocumentTitle { get; set; } = "";
+    /// <summary>Код документа из библиотеки. Заголовки повторяются и меняются со временем, а по
+    /// коду через год видно, что именно подписали.</summary>
+    public string? DocumentCode { get; set; }
+    public string? DocumentName { get; set; }
     public string? DeviceId { get; set; }
     public string? DeviceName { get; set; }
     public string? WorkstationId { get; set; }
@@ -548,6 +704,8 @@ public class SignatureRecord
     public List<SignedSignature> Signatures { get; set; } = new();
     /// <summary>Коды, отсканированные внутри документа.</summary>
     public List<SubmittedScan> Scans { get; set; } = new();
+    /// <summary>Вписанные клиентом значения полей ввода.</summary>
+    public List<SubmittedInput> Inputs { get; set; } = new();
     public Dictionary<string, string>? Fields { get; set; } // signer data used to fill {{tags}}
     public string? SubmissionId { get; set; }               // dedupes a retried submit
 }
@@ -716,6 +874,9 @@ public class DocSession
     /// действительно использует. Считаются при показе, потому что при отправке шаблон уже мог
     /// быть другим.</summary>
     public Dictionary<string, string>? RecordFields { get; set; }
+    /// <summary>Из какого документа библиотеки сделан снимок: попадёт в запись подписи.</summary>
+    public string? DocumentCode { get; set; }
+    public string? DocumentName { get; set; }
     public DateTime ShownUtc { get; set; }
 }
 
@@ -725,7 +886,8 @@ public record LoginDto(string? Password);
 /// <summary>DeviceIds задаёт произвольный набор планшетов, когда Target = devices.</summary>
 public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec, List<string>? DeviceIds = null);
 public record TargetDto(string? Target);
-public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups);
+public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups,
+    Dictionary<string, string>? Images = null, string? DocumentCode = null);
 
 public record EnrollRequest(string? Code);
 public record CreateEnrollmentDto(string? Name, string? WorkstationId, List<string>? GroupIds, int? TtlMinutes);
@@ -738,7 +900,12 @@ public record ApiKeyDto(string? Label);
 
 public record ExtEnrollmentDto(string? WorkstationExternalId, string? Name);
 public record ExtWorkstationAssignDto(string? ExternalId);
-public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups);
+/// <summary>
+/// Images: картинки, присылаемые вместе с заказом. Ключ это имя тега картинки в документе,
+/// значение это сама картинка строкой BASE64, с приставкой data:image/... или без неё.
+/// </summary>
+public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups,
+    Dictionary<string, string>? Images = null, string? DocumentCode = null);
 public record ExtScanRequestDto(string? DeviceId, string? WorkstationExternalId, int? TimeoutSec);
 public record AckDto(string? Id);
 /// <summary>Выбор варианта в группе, присланный внешней системой.</summary>
@@ -756,4 +923,8 @@ public record KioskControlSettingsDto(bool Enabled, int Port, string? ApiKey, bo
     int TimeoutSec, bool AutoHeal, int AutoHealAfterMinutes, int BatteryWarnPercent, int StorageWarnPercent);
 public record ValueDto(int? Value);
 public record TextDto(string? Text);
-public record PreviewDto(DocumentConfig? Document, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups);
+/// <summary>Создание и переименование документа в библиотеке.</summary>
+public record DocumentMetaDto(string? Code, string? Name, string? CopyOfId);
+
+public record PreviewDto(DocumentConfig? Document, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups,
+    Dictionary<string, string>? Images = null, string? DocumentId = null);

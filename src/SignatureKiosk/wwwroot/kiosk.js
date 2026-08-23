@@ -176,6 +176,10 @@
   // ==================================================================
   var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null, idleTimer: null, idleMs: 0, thankTimer: null, session: 0 };
 
+  function isInfoDoc() {
+    return !!doc.config && String(doc.config.kind || "").toLowerCase() === "info";
+  }
+
   function applyDocument(config, sessionId) {
     stopSlides();
     endDocSession();               // cancel any timers from a previous session; invalidates in-flight submits
@@ -187,6 +191,7 @@
     doc.signs = {};          // имя поля подписи -> картинка в виде data URL
     doc.signThumbs = {};     // и её уменьшенная копия, только для наблюдателя
     doc.codes = {};          // имя поля сканирования -> { code, format, label }
+    doc.inputs = {};         // имя поля ввода -> вписанное значение
     doc.pagePads = {};       // имя поля подписи -> перо, чтобы очистить и восстановить
     doc.pad = null;
     doc.submitting = false;
@@ -198,7 +203,10 @@
       // И выбор в группах, если внешняя система его прислала.
       (p.groups || []).forEach(function (g) { if (g && g.key) doc.picks[g.key] = g.selected || ""; });
     });
-    doc.screens.push({ type: "signature" });
+    // Информационный документ не подписывают: он существует, чтобы показать клиенту то, что
+    // прислала внешняя система. Экрана подписи у него нет вовсе, и после последней страницы
+    // сразу идёт прощание, которое само возвращает планшет к рекламе.
+    if (!isInfoDoc()) doc.screens.push({ type: "signature" });
     doc.screens.push({ type: "thankyou" });
     doc.index = 0;
     el.docTitle.textContent = doc.config.title || "";
@@ -249,6 +257,9 @@
   // взаимные ссылки между блоками разрешаются сами и не могут зациклиться.
   function liveValue(key) {
     if (Object.prototype.hasOwnProperty.call(doc.picks, key)) return doc.picks[key] || "";
+    // Вписанное клиентом значение живёт наравне с отметкой: условие «телефон не пусто» должно
+    // срабатывать, пока он печатает.
+    if (Object.prototype.hasOwnProperty.call(doc.inputs, key)) return doc.inputs[key] || "";
     var found = "";
     (doc.config.pages || []).forEach(function (p, pi) {
       (p.checkboxes || []).forEach(function (cb, ci) {
@@ -274,9 +285,51 @@
     return cond.not ? !ok : ok;
   }
 
+  // Почему значение не подходит виду поля. Слово в слово как на сервере: расхождение означало
+  // бы, что планшет пускает дальше то, что сервер потом отвергнет.
+  function badInput(вид, значение) {
+    var v = String(значение == null ? "" : значение).trim();
+    if (!v.length) return "";
+    if (вид === "number") return /^-?\d+([.,]\d+)?$/.test(v) ? "" : "это не число";
+    if (вид === "date") return /^\d{2}[./-]\d{2}[./-]\d{4}$|^\d{4}-\d{2}-\d{2}$/.test(v)
+      ? "" : "это не дата, подойдёт 01.01.1990 или 1990-01-01";
+    if (вид === "phone") {
+      var цифр = (v.match(/\d/g) || []).length;
+      return цифр >= 5 && цифр <= 15 ? "" : "это не похоже на номер телефона";
+    }
+    return "";
+  }
+
+  function числоИз(текст) {
+    var n = parseFloat(String(текст == null ? "" : текст).trim().replace(",", "."));
+    return isFinite(n) ? n : null;
+  }
+
   function partValue(cond) {
+    // Счёт отметок: поле это перечень имён через запятую, а не одно имя.
+    if (cond.op === "minchecked") {
+      var надо = parseInt(cond.value, 10);
+      if (!(надо >= 1)) return false;
+      var есть = String(cond.field || "").split(",").map(function (x) { return x.trim(); })
+        .filter(function (x) { return x.length; })
+        .filter(function (k) { return String(liveValue(k) || "").trim().toLowerCase() === "true"; }).length;
+      return есть >= надо;
+    }
     var val = String(liveValue(cond.field) || "").trim().toLowerCase();
     var target = String(cond.value || "").trim().toLowerCase();
+    // Числа сравниваются как числа: «9» меньше «10», хотя как строки наоборот.
+    if (cond.op === "numlt" || cond.op === "numge" || cond.op === "numin") {
+      var n = числоИз(val);
+      if (n === null) return false;
+      if (cond.op === "numin") {
+        var гр = target.split("..");
+        var a = числоИз(гр[0]), b = числоИз(гр.length > 1 ? гр[1] : "");
+        return a !== null && b !== null && n >= a && n <= b;
+      }
+      var lim = числоИз(target);
+      if (lim === null) return false;
+      return cond.op === "numlt" ? n < lim : n >= lim;
+    }
     switch (cond.op) {
       case "ne": return val !== target;
       case "empty": return val.length === 0;
@@ -392,6 +445,32 @@
       if (sc.required && condHolds(sc.visibleWhen) && !doc.codes[sc.key])
         out.push({ kind: "scan", key: sc.key || "" });
     });
+    (page.inputs || []).forEach(function (inp) {
+      if (!inp || !condHolds(inp.visibleWhen)) return;
+      var v = String(doc.inputs[inp.key] != null ? doc.inputs[inp.key] : (inp.value || "")).trim();
+      // Пустое обязательное и заполненное неправильно держат кнопку одинаково: и то и другое
+      // сервер всё равно не примет.
+      if ((inp.required && !v.length) || badInput((inp.type || "text").toLowerCase(), v))
+        out.push({ kind: "input", key: inp.key || "" });
+    });
+    (page.checkRules || []).forEach(function (rule) {
+      if (!rule || rule.kind !== "minchecked" || !rule.keys) return;
+      var есть = 0;
+      (page.checkboxes || []).forEach(function (cb, i) {
+        if (cb && cb.key && rule.keys.indexOf(cb.key) >= 0 && doc.checks[checkKey(pageIndex, i)]) есть++;
+      });
+      // Правило показывает на первый неотмеченный пункт из своего перечня: подсветить надо то,
+      // что клиенту нажимать, а не абстрактное «правило не выполнено».
+      if (есть < (rule.n || 1)) {
+        for (var i = 0; i < (page.checkboxes || []).length; i++) {
+          var cb = page.checkboxes[i];
+          if (cb && cb.key && rule.keys.indexOf(cb.key) >= 0 && !doc.checks[checkKey(pageIndex, i)]) {
+            out.push({ kind: "check", key: checkKey(pageIndex, i) });
+            break;
+          }
+        }
+      }
+    });
     return out;
   }
 
@@ -414,7 +493,8 @@
     missing.forEach(function (m) {
       var attr = m.kind === "check" ? "data-miss-key"
         : m.kind === "group" ? "data-miss-group"
-        : m.kind === "sign" ? "data-miss-sign" : "data-miss-scan";
+        : m.kind === "sign" ? "data-miss-sign"
+        : m.kind === "input" ? "data-miss-input" : "data-miss-scan";
       var node = el.docBody.querySelector('[' + attr + '="' + m.key + '"]');
       if (!node) return;
       node.classList.add("miss");
@@ -457,7 +537,9 @@
       var sc = page.scans[ci];
       if (sc.required && condHolds(sc.visibleWhen) && !doc.codes[sc.key]) return false;
     }
-    return true;
+    // Поля ввода и правила отметок считаются тем же кодом, что подсвечивает пропущенное: два
+    // разных счёта однажды разошлись бы, и кнопка «Далее» перестала бы совпадать с подсветкой.
+    return missingOn(pageIndex).length === 0;
   }
 
   // ==================================================================
@@ -589,7 +671,17 @@
         if (r.bold) span.style.fontWeight = "700";
         if (r.italic) span.style.fontStyle = "italic";
         if (r.color && /^#[0-9a-fA-F]{6}$/.test(r.color)) span.style.color = r.color;
-        if (r.size === "l") span.className = "rt-l";
+        // Выделение фоном, как маркером.
+        if (r.mark && /^#[0-9a-fA-F]{6}$/.test(r.mark)) {
+          span.style.backgroundColor = r.mark;
+          span.style.padding = "0 2px";
+          span.style.borderRadius = "3px";
+        }
+        // Свой размер в точках сильнее ступени: оператор задал его руками, значит хотел именно
+        // его. Точки в CSS те же, что в PDF, поэтому экран и бумага сходятся.
+        var pt = parseInt(r.sizePt, 10);
+        if (pt >= 8 && pt <= 40) span.style.fontSize = pt + "pt";
+        else if (r.size === "l") span.className = "rt-l";
         else if (r.size === "h") span.className = "rt-h";
         span.textContent = seg;
         parent.appendChild(span);
@@ -597,9 +689,77 @@
     });
   }
 
+  // Оформление плашки и рамки: общее для текста, списка и таблицы, поэтому вынесено.
+  function styleBox(node, b) {
+    if (b.bg && /^#[0-9a-fA-F]{6}$/.test(b.bg)) node.style.background = b.bg;
+    if (b.borderColor && /^#[0-9a-fA-F]{6}$/.test(b.borderColor)) {
+      node.style.border = "1px solid " + b.borderColor;
+      node.style.borderRadius = "6px";
+    }
+    var pad = parseInt(b.pad, 10);
+    if (pad > 0) node.style.padding = Math.min(pad, 40) + "px";
+    var lh = parseInt(b.lineHeight, 10);
+    if (lh >= 100 && lh <= 250) node.style.lineHeight = (lh / 100).toFixed(2);
+  }
+
   // Render one block: an image (with its width) or styled text.
   function appendBlock(parent, b) {
-    if (b && b.imageUrl && /^\/media\/[^/\\]+$/.test(b.imageUrl)) {
+    if (!b) return;
+    // Горизонтальная черта. Разрыв страницы это свойство бумаги: на планшете свои экраны, и
+    // рисовать там нечего, поэтому он просто пропускается.
+    if (b.kind === "divider") {
+      var hr = document.createElement("div"); hr.className = "doc-divider";
+      parent.appendChild(hr); return;
+    }
+    if (b.kind === "pagebreak") return;
+
+    if (b.table && b.table.rows && b.table.rows.length) {
+      var wrapT = document.createElement("div"); wrapT.className = "doc-table-wrap";
+      var t = document.createElement("table"); t.className = "doc-table";
+      var widths = b.table.widths || [];
+      (b.table.rows || []).forEach(function (row, ri) {
+        var tr = document.createElement("tr");
+        (row || []).forEach(function (cell, ci) {
+          var шапка = b.table.headerRow !== false && ri === 0;
+          var td = document.createElement(шапка ? "th" : "td");
+          if (widths[ci] > 0) td.style.width = widths[ci] + "%";
+          td.textContent = String(cell == null ? "" : cell);
+          tr.appendChild(td);
+        });
+        t.appendChild(tr);
+      });
+      styleBox(wrapT, b);
+      wrapT.appendChild(t); parent.appendChild(wrapT); return;
+    }
+
+    if (b.list === "bullet" || b.list === "number") {
+      // Каждая строка блока это пункт списка. Оформление внутри строки сохраняется: куски
+      // текста разносятся по пунктам по переводам строки, как и в обычном абзаце.
+      var box = document.createElement(b.list === "number" ? "ol" : "ul");
+      box.className = "doc-list";
+      var пункты = [[]];
+      ((b.runs) || []).forEach(function (r) {
+        var segs = String(r && r.text != null ? r.text : "").split("\n");
+        segs.forEach(function (seg, i) {
+          if (i > 0) пункты.push([]);
+          if (seg.length) пункты[пункты.length - 1].push({ text: seg, bold: r.bold, italic: r.italic, color: r.color, size: r.size, sizePt: r.sizePt, mark: r.mark });
+        });
+      });
+      пункты.forEach(function (куски) {
+        if (!куски.length) return;
+        var li = document.createElement("li");
+        appendRuns(li, куски);
+        box.appendChild(li);
+      });
+      if (!box.childNodes.length) return;
+      styleBox(box, b);
+      parent.appendChild(box); return;
+    }
+
+    // Картинка бывает своя, из хранилища, и присланная внешней системой прямо в заказе. Вторая
+    // приходит уже разобранной и проверенной сервером по первым байтам: сюда попадает только
+    // PNG, JPG или BMP.
+    if (b && b.imageUrl && (/^\/media\/[^/\\]+$/.test(b.imageUrl) || /^data:image\/(png|jpeg|bmp);base64,[A-Za-z0-9+/=]+$/.test(b.imageUrl))) {
       var fig = document.createElement("div"); fig.className = "doc-image";
       // Картинку тоже выравниваем. По умолчанию она стоит по центру: так было всегда, и
       // менять это для документов, где выравнивание не задано, нельзя.
@@ -628,6 +788,7 @@
       // Выравнивание задано на весь абзац, а не на кусок текста: так же оно попадёт и в PDF.
       var al = (b && b.align || "").toLowerCase();
       if (al === "center" || al === "right" || al === "justify") text.style.textAlign = al;
+      styleBox(text, b);
       appendRuns(text, (b && b.runs) || []); parent.appendChild(text);
     }
   }
@@ -650,6 +811,7 @@
     add(page.groups, 2);
     add(page.signatures, 3);
     add(page.scans, 4);
+    add(page.inputs, 5);
     items.sort(function (a, b) { return (a.ord - b.ord) || (a.kind - b.kind) || (a.index - b.index); });
     return items;
   }
@@ -683,6 +845,23 @@
     // и сама текущая страница могла стать скрытой.
     function rerender() { renderScreen(); }
 
+    // Снять отметки с пунктов, которые не могут стоять вместе с этим. Возвращает, сняла ли
+    // что-нибудь: от этого зависит, надо ли перерисовывать страницу.
+    function снятьВзаимоисключающие(ключ) {
+      var снято = false;
+      (page.checkRules || []).forEach(function (rule) {
+        if (!rule || rule.kind !== "exclusive" || !rule.keys) return;
+        if (rule.keys.indexOf(ключ) < 0) return;
+        (page.checkboxes || []).forEach(function (cb, i) {
+          if (!cb || !cb.key || cb.key === ключ) return;
+          if (rule.keys.indexOf(cb.key) < 0) return;
+          var k = checkKey(pageIndex, i);
+          if (doc.checks[k]) { doc.checks[k] = false; снято = true; }
+        });
+      });
+      return снято;
+    }
+
     function makeCheckbox(cb, i) {
       var key = checkKey(pageIndex, i);
       var label = document.createElement("label");
@@ -692,6 +871,9 @@
       input.checked = !!doc.checks[key];
       input.addEventListener("change", function () {
         doc.checks[key] = input.checked;
+        // Взаимоисключающие пункты: отметка снимает остальные из того же правила. Иначе клиент
+        // отмечает «согласен» и «отказываюсь» разом, и документ подписан сам себе противореча.
+        var снято = input.checked && cb.key ? снятьВзаимоисключающие(cb.key) : false;
         label.classList.toggle("checked", input.checked);
         // Пометка «не отмечено» снимается сразу, как только пункт отметили: человек должен
         // видеть, что список требований тает, а не что подсветка висит до конца.
@@ -701,7 +883,9 @@
         // Наблюдателю отметка нужна всегда, даже когда от неё на странице ничего не зависит и
         // перерисовки не будет: он должен видеть то же, что клиент, а не через раз.
         watchPush();
-        if (cb.key && dependsOn(cb.key)) rerender(); else updateFooter();
+        // Перерисовка обязательна и тогда, когда правило сняло соседние отметки: без неё
+        // галочки на экране остались бы стоять, хотя в памяти их уже нет.
+        if (снято || (cb.key && dependsOn(cb.key))) rerender(); else updateFooter();
       });
       label.setAttribute("data-miss-key", key);
       var span = document.createElement("span");
@@ -769,14 +953,107 @@
       if (!checks) { checks = document.createElement("div"); checks.className = "checks"; body.appendChild(checks); }
       return checks;
     }
+    // Кнопка «отметить всё» над пунктами: у длинного согласия иначе двадцать нажатий подряд.
+    // Ставится только когда видимых пунктов действительно много: над двумя она смотрелась бы
+    // насмешкой.
+    function makeCheckAll() {
+      var видимых = (page.checkboxes || []).filter(function (cb, i) {
+        return cb && condHolds(cb.visibleWhen);
+      });
+      if (видимых.length < 3) return null;
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-ghost check-all";
+      function все() {
+        return видимых.every(function (cb) {
+          var i = (page.checkboxes || []).indexOf(cb);
+          return doc.checks[checkKey(pageIndex, i)];
+        });
+      }
+      function подпись() { btn.textContent = все() ? "Снять все отметки" : "Отметить всё"; }
+      подпись();
+      btn.addEventListener("click", function () {
+        var ставим = !все();
+        видимых.forEach(function (cb) {
+          var i = (page.checkboxes || []).indexOf(cb);
+          doc.checks[checkKey(pageIndex, i)] = ставим;
+        });
+        watchPush();
+        rerender();
+      });
+      return btn;
+    }
+
+    // Поле ввода: клиент вписывает значение с экранной клавиатуры. Значение живёт как имя, то
+    // есть работает в условиях ровно так же, как отметка чекбокса.
+    function makeInput(inp) {
+      var box = document.createElement("div");
+      box.className = "page-input";
+      box.setAttribute("data-miss-input", inp.key || "");
+      if (inp.label) {
+        var t = document.createElement("label");
+        t.className = "page-input-title";
+        t.textContent = inp.label;
+        if (inp.required) {
+          var req = document.createElement("span");
+          req.className = "req"; req.textContent = "*";
+          t.appendChild(req);
+        }
+        box.appendChild(t);
+      }
+      var field = document.createElement("input");
+      // Вид значения решает, какую клавиатуру покажет планшет: телефонную, числовую или
+      // обычную. Это не проверка, а удобство: проверяют планшет перед «Далее» и сервер.
+      var вид = (inp.type || "text").toLowerCase();
+      field.type = вид === "date" ? "date" : вид === "phone" ? "tel" : вид === "number" ? "text" : "text";
+      if (вид === "number") field.setAttribute("inputmode", "decimal");
+      if (вид === "phone") field.setAttribute("inputmode", "tel");
+      field.className = "page-input-field";
+      if (inp.placeholder) field.placeholder = inp.placeholder;
+      // Значение уже могло прийти из тега или быть введённым до перелистывания страницы.
+      var было = doc.inputs[inp.key];
+      field.value = было != null ? было : (inp.value || "");
+      doc.inputs[inp.key] = field.value;
+      var подсказка = document.createElement("div");
+      подсказка.className = "page-input-hint";
+      box.appendChild(field); box.appendChild(подсказка);
+      function проверить() {
+        var плохо = badInput(вид, field.value);
+        подсказка.textContent = плохо || "";
+        box.classList.toggle("bad", !!плохо);
+        return !плохо;
+      }
+      field.addEventListener("input", function () {
+        doc.inputs[inp.key] = field.value;
+        clearMiss(box);
+        проверить();
+        watchPush();
+        // Перерисовка только если от поля что-то зависит: иначе страница дёргалась бы под
+        // каждым набранным символом и уводила курсор.
+        if (inp.key && dependsOn(inp.key)) rerender(); else updateFooter();
+      });
+      field.addEventListener("blur", проверить);
+      return box;
+    }
+
+    var поставленаКнопкаВсё = false;
     pageItems(page, blocks).forEach(function (it) {
       if (!condHolds(it.item.visibleWhen)) return;
-      if (it.kind === 1) { checksBox().appendChild(makeCheckbox(it.item, it.index)); return; }
+      if (it.kind === 1) {
+        if (page.showCheckAll && !поставленаКнопкаВсё) {
+          поставленаКнопкаВсё = true;
+          var кн = makeCheckAll();
+          if (кн) body.appendChild(кн);
+        }
+        checksBox().appendChild(makeCheckbox(it.item, it.index));
+        return;
+      }
       checks = null;
       if (it.kind === 0) appendBlock(body, it.item);
       else if (it.kind === 2) body.appendChild(makeGroup(it.item));
       else if (it.kind === 3) body.appendChild(makePageSignature(it.item));
-      else body.appendChild(makePageScan(it.item));
+      else if (it.kind === 4) body.appendChild(makePageScan(it.item));
+      else body.appendChild(makeInput(it.item));
     });
 
     // Поле подписи внутри страницы. Документ может требовать несколько подписей: согласие,
@@ -905,7 +1182,11 @@
 
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
-    renderFooter({ back: doc.index > 0, next: true, nextLabel: "Далее" });
+    // На последней странице информационного документа дальше идти некуда: следующий экран это
+    // прощание. Поэтому кнопка называется «Готово», а не «Далее»: клиент должен понимать, что
+    // нажатием он заканчивает, а не переходит куда-то ещё.
+    var последняя = isInfoDoc() && stepIndex(doc.index, 1) === doc.screens.length - 1;
+    renderFooter({ back: doc.index > 0, next: true, nextLabel: последняя ? "Готово" : "Далее" });
   }
 
   // Между двумя кадрами планшет успевает снять несколько точек пера, и браузер отдаёт их не
@@ -1198,6 +1479,22 @@
     return out;
   }
 
+  // Вписанные значения. Собираются только с видимых страниц и видимых полей: скрытое условием
+  // поле клиент не видел, и его значения в записи быть не должно.
+  function collectInputs() {
+    var out = [];
+    (doc.config.pages || []).forEach(function (page) {
+      if (!condHolds(page.visibleWhen)) return;
+      (page.inputs || []).forEach(function (inp) {
+        if (!inp || !condHolds(inp.visibleWhen)) return;
+        var v = String(doc.inputs[inp.key] != null ? doc.inputs[inp.key] : (inp.value || "")).trim();
+        if (!v.length) return;
+        out.push({ key: inp.key || "", label: inp.label || "", value: v });
+      });
+    });
+    return out;
+  }
+
   function collectGroups() {
     var groups = [];
     (doc.config.pages || []).forEach(function (page) {
@@ -1231,7 +1528,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + (getToken() || "") },
       body: JSON.stringify({ items: collectItems(), groups: collectGroups(),
-        signatures: collectSignatures(), scans: collectScans(),
+        signatures: collectSignatures(), scans: collectScans(), inputs: collectInputs(),
         signature: doc.pad.toDataURL("image/png"), submissionId: doc.submissionId })
     }).then(function (r) {
       if (doc.session !== session) return;          // document was replaced/cleared while sending
@@ -1584,7 +1881,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "6.6";
+  var APP_VERSION = "6.9";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {

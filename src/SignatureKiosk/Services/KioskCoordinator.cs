@@ -317,15 +317,76 @@ public class KioskCoordinator
     private static string Cut(string? s, int max) =>
         string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s[..max]);
 
+    /// <summary>Сколько картинок можно прислать с одним заказом и какого размера каждая.</summary>
+    private const int MaxApiImages = 8;
+    private const int MaxApiImageChars = 2 * 1024 * 1024;   // длина строки BASE64 вместе с приставкой
+
+    /// <summary>
+    /// Разобрать картинки, присланные внешней системой. Каждая проверяется по первым байтам, а
+    /// не по тому, что о ней написали: приставку data:image/png можно поставить к чему угодно.
+    /// Годятся только те виды, которые умеет вложить в себя PDF: иначе клиент увидел бы картинку,
+    /// а в подписанном документе её бы не оказалось, и запись перестала бы совпадать с
+    /// подписанным. Возвращает готовые к показу значения или сообщение об ошибке.
+    /// </summary>
+    public static string? ParseApiImages(IReadOnlyDictionary<string, string>? images,
+        out Dictionary<string, string> готовые)
+    {
+        готовые = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (images is null || images.Count == 0) return null;
+        if (images.Count > MaxApiImages)
+            return "Слишком много картинок в одном запросе: не больше " + MaxApiImages + ".";
+
+        foreach (var kv in images)
+        {
+            var tag = (kv.Key ?? "").Trim();
+            if (tag.Length == 0) continue;
+            var raw = (kv.Value ?? "").Trim();
+            if (raw.Length == 0) continue;
+            if (raw.Length > MaxApiImageChars)
+                return "Картинка «" + tag + "» слишком большая: не больше двух мегабайт в BASE64.";
+
+            // Приставка не обязательна: внешняя система вправе прислать голый BASE64.
+            var base64 = raw;
+            var запятая = raw.IndexOf(',');
+            if (raw.StartsWith("data:", StringComparison.OrdinalIgnoreCase) && запятая > 0)
+                base64 = raw[(запятая + 1)..];
+
+            byte[] bytes;
+            try { bytes = Convert.FromBase64String(base64.Trim()); }
+            catch (FormatException) { return "Картинка «" + tag + "» это не BASE64."; }
+
+            var вид = ImageKind(bytes);
+            if (вид is null)
+                return "Картинка «" + tag + "» не PNG, не JPG и не BMP. Другие виды нельзя вложить в PDF, " +
+                       "и подписанный документ не совпал бы с тем, что видел клиент.";
+
+            готовые[tag] = "data:" + вид + ";base64," + Convert.ToBase64String(bytes);
+        }
+        return null;
+    }
+
+    /// <summary>Вид картинки по её первым байтам, или null для всего остального.</summary>
+    private static string? ImageKind(byte[] b)
+    {
+        if (b.Length >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "image/png";
+        if (b.Length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpeg";
+        if (b.Length >= 2 && b[0] == 0x42 && b[1] == 0x4D) return "image/bmp";
+        return null;
+    }
+
     public async Task ShowDocumentAsync(string deviceId, IReadOnlyDictionary<string, string>? fields = null,
-        IReadOnlyList<DocCheckbox>? checkboxes = null, IReadOnlyList<GroupSelectionDto>? groups = null)
+        IReadOnlyList<DocCheckbox>? checkboxes = null, IReadOnlyList<GroupSelectionDto>? groups = null,
+        IReadOnlyDictionary<string, string>? images = null, DocumentInfo? документ = null)
     {
         var fieldMap = new Dictionary<string, string>();
         if (fields is not null)
             foreach (var kv in fields.Take(MaxFields))
                 fieldMap[Cut(kv.Key, MaxFieldNameLength)] = Cut(kv.Value, MaxFieldValueLength);
 
-        var template = _storage.GetDocument();
+        // Какой документ показывать, решает вызывающий: он уже проверил код и отказал, если
+        // такого документа нет. Здесь остаётся взять его текст.
+        документ ??= _storage.DefaultDocumentInfo();
+        var template = _storage.GetDocument(документ.Id);
         // Имена, которые вообще есть в шаблоне. Чекбокс с известным именем не дописывается вниз
         // страницы, а задаёт состояние тому, который уже стоит в нужном месте документа.
         var known = DocumentTemplating.LiveKeys(template);
@@ -393,7 +454,7 @@ public class KioskCoordinator
             if (sent.Count > 0) options[key] = sent;
         }
 
-        var doc = DocumentTemplating.Resolve(template, fieldMap, cbs, selections, states, texts, options);
+        var doc = DocumentTemplating.Resolve(template, fieldMap, cbs, selections, states, texts, options, images);
 
         // Снимок сессии: документ ровно в том виде, в каком он сейчас уедет на планшет. Из него
         // соберётся запись и PDF, его же получит переподключившийся планшет и окно наблюдения.
@@ -410,6 +471,10 @@ public class KioskCoordinator
             SessionId = sessionId,
             Document = doc,
             RecordFields = recordFields.Count > 0 ? recordFields : null,
+            // Снимок помнит, из какого документа он сделан: это попадёт в запись подписи, и
+            // через год по коду будет видно, что именно подписали.
+            DocumentCode = документ.Code,
+            DocumentName = документ.Name,
             ShownUtc = DateTime.UtcNow
         });
         _storage.MutateStates(st => SetDeviceState(st, new[] { deviceId }, "document", fieldMap, cbs, states, selections, texts, options, sessionId));

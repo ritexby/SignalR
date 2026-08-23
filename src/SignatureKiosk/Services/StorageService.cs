@@ -507,14 +507,286 @@ public class StorageService
 
     // ---------------- Document ----------------
 
-    public DocumentConfig GetDocument()
+    // ---------------- Библиотека документов ----------------
+    // Документов может быть несколько: согласие, договор, анкета. Каждый лежит своим файлом,
+    // а список с кодами и названиями отдельно: список открывается, не читая тексты всех
+    // документов сразу. Документ по умолчанию показывается, когда запрос пришёл без кода, и
+    // ровно он же лежит в document.json, чтобы всё написанное до библиотеки работало как было.
+
+    private string DocumentsDir => Path.Combine(_dataDir, "documents");
+    private string LibraryPath => Path.Combine(_dataDir, "documents.json");
+
+    /// <summary>Сколько документов может быть в библиотеке. Больше и список перестаёт быть списком.</summary>
+    public const int MaxDocuments = 50;
+
+    private string? DocFilePath(string id)
     {
-        lock (_lock) return ReadOr(DocumentPath, DefaultDocument);
+        var v = (id ?? "").Trim();
+        if (v.Length == 0 || v.Length > 64 || !v.All(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_'))
+            return null;
+        return Path.Combine(DocumentsDir, v + ".json");
     }
 
-    public void SaveDocument(DocumentConfig doc)
+    /// <summary>
+    /// Список документов. Библиотеки может не быть вовсе: так выглядит установка, обновлённая с
+    /// прежней версии. Тогда она заводится из единственного document.json, и он же становится
+    /// документом по умолчанию. Ничего не теряется и не переезжает: файл остаётся на месте.
+    /// </summary>
+    public List<DocumentInfo> GetDocuments()
     {
-        lock (_lock) Write(DocumentPath, doc);
+        lock (_lock)
+        {
+            var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+            if (lib.Documents.Count > 0) return lib.Documents;
+
+            var первый = new DocumentInfo
+            {
+                Id = "main",
+                Code = "main",
+                Name = ReadOr(DocumentPath, DefaultDocument).Title,
+                IsDefault = true,
+                UpdatedUtc = DateTime.UtcNow
+            };
+            if (string.IsNullOrWhiteSpace(первый.Name)) первый.Name = "Документ";
+            lib.Documents.Add(первый);
+            Write(LibraryPath, lib);
+            return lib.Documents;
+        }
+    }
+
+    public DocumentInfo? GetDocumentInfo(string? id)
+    {
+        var v = (id ?? "").Trim();
+        return GetDocuments().FirstOrDefault(d => string.Equals(d.Id, v, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Документ по коду. Код сравнивается без учёта регистра, как и всё остальное.</summary>
+    public DocumentInfo? FindByCode(string? code)
+    {
+        var v = (code ?? "").Trim();
+        if (v.Length == 0) return null;
+        return GetDocuments().FirstOrDefault(d => string.Equals(d.Code, v, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public DocumentInfo DefaultDocumentInfo()
+    {
+        var list = GetDocuments();
+        return list.FirstOrDefault(d => d.IsDefault) ?? list[0];
+    }
+
+    /// <summary>
+    /// Текст документа по его идентификатору. Документ по умолчанию читается из document.json:
+    /// так установка, обновлённая с прежней версии, продолжает работать без переноса файлов.
+    /// </summary>
+    public DocumentConfig GetDocument(string? id = null)
+    {
+        lock (_lock)
+        {
+            var info = id is null ? null : GetDocumentInfoNoLock(id);
+            if (id is null || info is null || info.IsDefault) return ReadOr(DocumentPath, DefaultDocument);
+            var path = DocFilePath(info.Id);
+            return path is null ? DefaultDocument() : ReadOr(path, DefaultDocument);
+        }
+    }
+
+    private DocumentInfo? GetDocumentInfoNoLock(string id)
+    {
+        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+        return lib.Documents.FirstOrDefault(d => string.Equals(d.Id, (id ?? "").Trim(), StringComparison.OrdinalIgnoreCase));
+    }
+
+    public void SaveDocument(DocumentConfig doc) => SaveDocument(null, doc);
+
+    public void SaveDocument(string? id, DocumentConfig doc)
+    {
+        lock (_lock)
+        {
+            var info = id is null ? null : GetDocumentInfoNoLock(id);
+            if (id is null || info is null || info.IsDefault) { Write(DocumentPath, doc); }
+            else
+            {
+                var path = DocFilePath(info.Id);
+                if (path is null) return;
+                Directory.CreateDirectory(DocumentsDir);
+                Write(path, doc);
+            }
+            TouchDocument(info?.Id ?? DefaultIdNoLock(), doc.Title);
+        }
+    }
+
+    private string DefaultIdNoLock()
+    {
+        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+        var def = lib.Documents.FirstOrDefault(d => d.IsDefault) ?? lib.Documents.FirstOrDefault();
+        return def?.Id ?? "main";
+    }
+
+    /// <summary>Отметить время правки. Название документа не трогается: его задаёт оператор
+    /// в библиотеке, а заголовок внутри документа это другое и может отличаться.</summary>
+    private void TouchDocument(string id, string? title)
+    {
+        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+        var info = lib.Documents.FirstOrDefault(d => d.Id == id);
+        if (info is null) return;
+        info.UpdatedUtc = DateTime.UtcNow;
+        if (string.IsNullOrWhiteSpace(info.Name) && !string.IsNullOrWhiteSpace(title)) info.Name = title!;
+        Write(LibraryPath, lib);
+    }
+
+    /// <summary>Завести документ. Возвращает его или сообщение, почему нельзя.</summary>
+    public (DocumentInfo? Info, string? Error) AddDocument(string? code, string? name, string? copyOfId)
+    {
+        lock (_lock)
+        {
+            var список = GetDocumentsNoLock();
+            if (список.Count >= MaxDocuments)
+                return (null, "Больше " + MaxDocuments + " документов не бывает: список перестанет быть списком.");
+            var чистыйКод = CleanDocCode(code);
+            if (чистыйКод.Length == 0)
+                return (null, "Код документа обязателен: по нему документ вызывается из внешней системы.");
+            if (список.Any(d => string.Equals(d.Code, чистыйКод, StringComparison.OrdinalIgnoreCase)))
+                return (null, "Код «" + чистыйКод + "» уже занят другим документом.");
+
+            var info = new DocumentInfo
+            {
+                Id = Guid.NewGuid().ToString("N")[..12],
+                Code = чистыйКод,
+                Name = string.IsNullOrWhiteSpace(name) ? чистыйКод : name!.Trim(),
+                IsDefault = false,
+                UpdatedUtc = DateTime.UtcNow
+            };
+            // Копия делается с уже сохранённого документа: так новый документ начинается не с
+            // пустого листа, а с готового, и это самый частый способ завести второй.
+            var текст = string.IsNullOrWhiteSpace(copyOfId) ? DefaultDocument() : GetDocumentNoLock(copyOfId!);
+            var path = DocFilePath(info.Id);
+            if (path is null) return (null, "Не удалось создать документ.");
+            Directory.CreateDirectory(DocumentsDir);
+            Write(path, текст);
+
+            var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+            lib.Documents = список;
+            lib.Documents.Add(info);
+            Write(LibraryPath, lib);
+            return (info, null);
+        }
+    }
+
+    private List<DocumentInfo> GetDocumentsNoLock()
+    {
+        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+        if (lib.Documents.Count > 0) return lib.Documents;
+        var первый = new DocumentInfo
+        {
+            Id = "main", Code = "main",
+            Name = ReadOr(DocumentPath, DefaultDocument).Title, IsDefault = true, UpdatedUtc = DateTime.UtcNow
+        };
+        if (string.IsNullOrWhiteSpace(первый.Name)) первый.Name = "Документ";
+        lib.Documents.Add(первый);
+        Write(LibraryPath, lib);
+        return lib.Documents;
+    }
+
+    private DocumentConfig GetDocumentNoLock(string id)
+    {
+        var info = GetDocumentInfoNoLock(id);
+        if (info is null || info.IsDefault) return ReadOr(DocumentPath, DefaultDocument);
+        var path = DocFilePath(info.Id);
+        return path is null ? DefaultDocument() : ReadOr(path, DefaultDocument);
+    }
+
+    /// <summary>Переименовать документ или сменить его код.</summary>
+    public string? UpdateDocumentMeta(string id, string? code, string? name)
+    {
+        lock (_lock)
+        {
+            var список = GetDocumentsNoLock();
+            var info = список.FirstOrDefault(d => d.Id == id);
+            if (info is null) return "Документ не найден.";
+            if (!string.IsNullOrWhiteSpace(code))
+            {
+                var чистый = CleanDocCode(code);
+                if (чистый.Length == 0) return "Код документа не может быть пустым.";
+                if (список.Any(d => d.Id != id && string.Equals(d.Code, чистый, StringComparison.OrdinalIgnoreCase)))
+                    return "Код «" + чистый + "» уже занят другим документом.";
+                info.Code = чистый;
+            }
+            if (!string.IsNullOrWhiteSpace(name)) info.Name = name!.Trim();
+            info.UpdatedUtc = DateTime.UtcNow;
+            var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+            lib.Documents = список;
+            Write(LibraryPath, lib);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Сделать документ показываемым по умолчанию. По умолчанию хранится в document.json, потому
+    /// файлы меняются местами: прежний по умолчанию уезжает в свой файл, новый занимает его место.
+    /// </summary>
+    public string? SetDefaultDocument(string id)
+    {
+        lock (_lock)
+        {
+            var список = GetDocumentsNoLock();
+            var новый = список.FirstOrDefault(d => d.Id == id);
+            if (новый is null) return "Документ не найден.";
+            if (новый.IsDefault) return null;
+            var прежний = список.FirstOrDefault(d => d.IsDefault);
+
+            var текстНового = GetDocumentNoLock(id);
+            var текстПрежнего = прежний is null ? null : ReadOr(DocumentPath, DefaultDocument);
+
+            Directory.CreateDirectory(DocumentsDir);
+            if (прежний is not null)
+            {
+                var путьПрежнего = DocFilePath(прежний.Id);
+                if (путьПрежнего is null) return "Не удалось переставить документ по умолчанию.";
+                Write(путьПрежнего, текстПрежнего!);
+                прежний.IsDefault = false;
+            }
+            Write(DocumentPath, текстНового);
+            var путьНового = DocFilePath(новый.Id);
+            if (путьНового is not null && File.Exists(путьНового)) { _text.Remove(путьНового); File.Delete(путьНового); }
+            новый.IsDefault = true;
+
+            var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+            lib.Documents = список;
+            Write(LibraryPath, lib);
+            return null;
+        }
+    }
+
+    /// <summary>Удалить документ. Документ по умолчанию не удаляется: сначала назначьте другой.</summary>
+    public string? DeleteDocument(string id)
+    {
+        lock (_lock)
+        {
+            var список = GetDocumentsNoLock();
+            var info = список.FirstOrDefault(d => d.Id == id);
+            if (info is null) return "Документ не найден.";
+            if (info.IsDefault)
+                return "Это документ по умолчанию: он показывается, когда запрос пришёл без кода. " +
+                       "Сначала назначьте по умолчанию другой.";
+            if (список.Count <= 1) return "Последний документ удалить нельзя.";
+            var path = DocFilePath(info.Id);
+            if (path is not null && File.Exists(path)) { _text.Remove(path); File.Delete(path); }
+            список.Remove(info);
+            var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+            lib.Documents = список;
+            Write(LibraryPath, lib);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Код документа: латиница, цифры, дефис и подчёркивание. Так он остаётся пригодным для
+    /// строки запроса и одинаково выглядит в чужом коде, в журнале и в адресной строке.
+    /// </summary>
+    public static string CleanDocCode(string? code)
+    {
+        var v = (code ?? "").Trim();
+        var kept = new string(v.Where(ch => char.IsLetterOrDigit(ch) && ch < 128 || ch is '-' or '_').ToArray());
+        return kept.Length > 40 ? kept[..40] : kept;
     }
 
     /// <summary>
@@ -522,11 +794,13 @@ public class StorageService
     /// поэтому одинаковый документ всегда даёт одну и ту же версию, а любая правка другую.
     /// Файл ещё не создан - версия «new»: у двух админок над свежей установкой она совпадает.
     /// </summary>
-    public string GetDocumentRev()
+    public string GetDocumentRev(string? id = null)
     {
         lock (_lock)
         {
-            var text = ReadText(DocumentPath);
+            var info = id is null ? null : GetDocumentInfoNoLock(id);
+            var path = id is null || info is null || info.IsDefault ? DocumentPath : DocFilePath(info.Id);
+            var text = path is null ? null : ReadText(path);
             return text is null ? "new" : Sha256Hex(text)[..16];
         }
     }
@@ -587,7 +861,8 @@ public class StorageService
     // ---------------- Signatures ----------------
 
     public SignatureRecord AddSignature(SignatureSubmission sub, DocumentConfig resolvedDoc, Device? device, Workstation? workstation, byte[] pngBytes, Dictionary<string, string>? fields = null,
-        List<(string Key, string Label, byte[] Png)>? extraSignatures = null)
+        List<(string Key, string Label, byte[] Png)>? extraSignatures = null,
+        string? documentCode = null, string? documentName = null)
     {
         lock (_lock)
         {
@@ -599,12 +874,15 @@ public class StorageService
                 Id = id,
                 CreatedUtc = DateTime.UtcNow,
                 DocumentTitle = resolvedDoc.Title,
+                DocumentCode = documentCode,
+                DocumentName = documentName,
                 DeviceId = device?.Id,
                 DeviceName = device?.Name,
                 WorkstationId = workstation?.Id,
                 WorkstationName = workstation?.Name,
                 Items = sub.Items ?? new List<SubmittedItem>(),
                 Groups = sub.Groups ?? new List<SubmittedGroup>(),
+                Inputs = sub.Inputs ?? new List<SubmittedInput>(),
                 Fields = fields is { Count: > 0 } ? new Dictionary<string, string>(fields) : null,
                 SubmissionId = string.IsNullOrWhiteSpace(sub.SubmissionId) ? null : sub.SubmissionId!.Trim()
             };

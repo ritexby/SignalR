@@ -47,7 +47,23 @@ public static partial class DocumentTemplating
     // документу нужно знать, младше ли человек четырнадцати. Две операции, а не четыре, потому
     // что «младше N» и «N и старше» делят людей ровно надвое, без щели и без нахлёста.
     private static readonly HashSet<string> AllowedOps = new(StringComparer.Ordinal)
-        { "eq", "ne", "empty", "notempty", "in", "agelt", "agege", "annivwithin" };
+        {
+            "eq", "ne", "empty", "notempty", "in", "agelt", "agege", "annivwithin",
+            // Числа для любых тегов: сумма, количество, что угодно числовое.
+            "numlt", "numge", "numin",
+            // Момент показа: день недели, период дат, время суток. Поле у таких условий
+            // служебное, "@сегодня": значение берётся из часов сервера, а не из тегов, и
+            // прислать его снаружи нельзя, оно всё равно не читается.
+            "dow", "daterange", "timerange",
+            // Отметки: из перечисленных в поле имён отмечено не меньше N. Считается на планшете.
+            "minchecked"
+        };
+
+    /// <summary>Служебное имя поля для условий по моменту показа.</summary>
+    public const string TodayField = "@сегодня";
+
+    public static bool IsClockOp(string? op) => op is "dow" or "daterange" or "timerange";
+    public static bool IsNumOp(string? op) => op is "numlt" or "numge" or "numin";
 
     public static bool IsAgeOp(string? op) =>
         string.Equals(op, "agelt", StringComparison.Ordinal) || string.Equals(op, "agege", StringComparison.Ordinal);
@@ -71,6 +87,37 @@ public static partial class DocumentTemplating
         if (DateTime.TryParse(v, System.Globalization.CultureInfo.InvariantCulture,
                 System.Globalization.DateTimeStyles.None, out d)) return d.Date;
         return null;
+    }
+
+    /// <summary>Число из текста: запятая принимается как точка, пробелы обрезаются.</summary>
+    private static bool TryNum(string? value, out decimal n) =>
+        decimal.TryParse((value ?? "").Trim().Replace(',', '.'), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out n);
+
+    /// <summary>Границы диапазона из записи «от..до».</summary>
+    private static (string От, string До) SplitRange(string? value)
+    {
+        var parts = (value ?? "").Split("..", 2);
+        return (parts[0].Trim(), parts.Length > 1 ? parts[1].Trim() : "");
+    }
+
+    /// <summary>Время из «HH:mm».</summary>
+    private static TimeSpan? ParseTime(string? value) =>
+        TimeSpan.TryParseExact((value ?? "").Trim(), @"h\:mm", null, out var t) ? t : null;
+
+    /// <summary>Попадает ли «сейчас» в диапазон «от..до». Открытая граница означает без предела.
+    /// Ночной диапазон вида 22:00..06:00 честно переворачивается: попадает всё вне середины.</summary>
+    private static bool WithinRange<T>(string target, T now, Func<string, T?> parse) where T : struct, IComparable<T>
+    {
+        var (от, до) = SplitRange(target);
+        var a = parse(от);
+        var b = parse(до);
+        if (a is null && b is null) return false;
+        if (a is not null && b is not null && a.Value.CompareTo(b.Value) > 0)
+            return now.CompareTo(a.Value) >= 0 || now.CompareTo(b.Value) <= 0;
+        if (a is not null && now.CompareTo(a.Value) < 0) return false;
+        if (b is not null && now.CompareTo(b.Value) > 0) return false;
+        return true;
     }
 
     /// <summary>
@@ -344,6 +391,46 @@ public static partial class DocumentTemplating
             return WithinDays(raw, anniversary: true, target);
         }
 
+        if (IsClockOp(cond.Op))
+        {
+            // Момент показа: считается по часам сервера в момент разбора. Значение тега тут ни
+            // при чём, поэтому подделать его через API нельзя.
+            var сейчас = DateTime.Now;
+            return cond.Op switch
+            {
+                "dow" => target.Split(',').Select(x => x.Trim()).Any(x =>
+                    int.TryParse(x, out var d) && d == (сейчас.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)сейчас.DayOfWeek)),
+                "daterange" => WithinRange(target, сейчас.Date, ParseDate),
+                _ => WithinRange(target, сейчас.TimeOfDay, ParseTime)
+            };
+        }
+
+        if (IsNumOp(cond.Op))
+        {
+            // Числа сравниваются как числа: «9» меньше «10», хотя как строки наоборот. Нет
+            // значения или оно не число: условие не выполнено, и отрицание ведёт себя обратно.
+            if (!TryNum(raw, out var n)) return false;
+            if (cond.Op == "numin")
+            {
+                var (от, до) = SplitRange(target);
+                return TryNum(от, out var a) && TryNum(до, out var b2) && n >= a && n <= b2;
+            }
+            if (!TryNum(target, out var lim)) return false;
+            return cond.Op == "numlt" ? n < lim : n >= lim;
+        }
+
+        // Счёт отметок вычисляет планшет: здесь, при разборе по тегам, перечисленные имена ещё
+        // никто не нажимал. Часть с этой операцией всегда живая (см. Split), сюда она попадает
+        // только из ApplyLiveConditions, где значения отметок уже известны.
+        if (cond.Op == "minchecked")
+        {
+            var имена = cond.Field.Split(',').Select(x => x.Trim()).Where(x => x.Length > 0);
+            if (!int.TryParse(cond.Value.Trim(), out var n) || n < 1) return false;
+            var отмечено = имена.Count(k => fields.TryGetValue(k, out var v) &&
+                string.Equals(v?.Trim(), "true", StringComparison.OrdinalIgnoreCase));
+            return отмечено >= n;
+        }
+
         if (IsAgeOp(cond.Op))
         {
             // Возраст считается из значения тега. Нет даты или её не удалось разобрать: условие
@@ -398,7 +485,8 @@ public static partial class DocumentTemplating
         IReadOnlyDictionary<string, string>? groupSelections = null,
         IReadOnlyDictionary<string, bool>? checkboxStates = null,
         IReadOnlyDictionary<string, string>? texts = null,
-        IReadOnlyDictionary<string, List<DocGroupOption>>? apiOptions = null)
+        IReadOnlyDictionary<string, List<DocGroupOption>>? apiOptions = null,
+        IReadOnlyDictionary<string, string>? images = null)
     {
         var map = BuildMap(fields);
         var hasDynamic = dynamicCheckboxes is { Count: > 0 };
@@ -416,9 +504,10 @@ public static partial class DocumentTemplating
             var resolved = new DocPage
             {
                 Kind = p.Kind,
+                InPdf = p.InPdf,
                 HeadingRuns = HeadingRuns(p).Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
                 HeadingAlign = p.HeadingAlign,
-                Blocks = ResolveBlocks(Blocks(p), map, live),
+                Blocks = ResolveBlocks(Blocks(p), map, live, images),
                 IncludeDynamic = p.IncludeDynamic,
                 VisibleWhen = LiveCondition(p.VisibleWhen, map, live),
                 Checkboxes = (p.Checkboxes ?? new List<DocCheckbox>())
@@ -441,7 +530,24 @@ public static partial class DocumentTemplating
                     {
                         Key = x.Key, Label = Apply(x.Label, map), Required = x.Required,
                         Ord = x.Ord, VisibleWhen = LiveCondition(x.VisibleWhen, map, live)
-                    }).ToList()
+                    }).ToList(),
+                Inputs = (p.Inputs ?? new List<DocInput>())
+                    .Where(x => x is not null && Keep(x.VisibleWhen, map, live))
+                    .Select(x => new DocInput
+                    {
+                        Key = x.Key, Label = Apply(x.Label, map), Type = x.Type,
+                        Placeholder = x.Placeholder, Required = x.Required,
+                        // Значение можно прислать тегом с тем же именем: тогда поле приходит к
+                        // клиенту уже заполненным, и он его только проверяет или правит.
+                        Value = map is not null && !string.IsNullOrWhiteSpace(x.Key)
+                                && map.TryGetValue(x.Key.Trim(), out var v) ? v : x.Value,
+                        Ord = x.Ord, VisibleWhen = LiveCondition(x.VisibleWhen, map, live)
+                    }).ToList(),
+                CheckRules = (p.CheckRules ?? new List<CheckRule>())
+                    .Where(r => r is not null && r.Keys is { Count: > 0 })
+                    .Select(r => new CheckRule { Kind = r.Kind, Keys = new List<string>(r.Keys), N = r.N })
+                    .ToList(),
+                ShowCheckAll = p.ShowCheckAll
             };
             // Экран подписи или сканирования без своего поля показывать нечего: поле могло не
             // подойти по условию, и тогда экран уходит вместе с ним, а не встаёт пустым.
@@ -472,15 +578,17 @@ public static partial class DocumentTemplating
 
         return new DocumentConfig
         {
+            // Вид документа едет с ним: планшет по нему решает, показывать ли экран подписи.
+            Kind = doc.Kind,
             Title = Apply(doc.Title, map),
             SignPrompt = Apply(doc.SignPrompt, map),
-            SignBlocks = ResolveBlocks(doc.SignBlocks ?? new List<DocBlock>(), map, live),
-            SignBlocksBelow = ResolveBlocks(doc.SignBlocksBelow ?? new List<DocBlock>(), map, live),
+            SignBlocks = ResolveBlocks(doc.SignBlocks ?? new List<DocBlock>(), map, live, images),
+            SignBlocksBelow = ResolveBlocks(doc.SignBlocksBelow ?? new List<DocBlock>(), map, live, images),
             ThankYouText = Apply(doc.ThankYouText, map),
             ThankYouRuns = LabelRuns(doc.ThankYouRuns, doc.ThankYouText)
                 .Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
             ThankYouAlign = doc.ThankYouAlign,
-            ThankYouBlocks = ResolveBlocks(doc.ThankYouBlocks ?? new List<DocBlock>(), map, live),
+            ThankYouBlocks = ResolveBlocks(doc.ThankYouBlocks ?? new List<DocBlock>(), map, live, images),
             ThankYouSec = doc.ThankYouSec,
             IdleReturnSec = doc.IdleReturnSec,
             PdfFontScale = doc.PdfFontScale,
@@ -558,6 +666,50 @@ public static partial class DocumentTemplating
         return null;
     }
 
+    /// <summary>
+    /// Первое нарушенное правило отметок или пустое обязательное поле ввода видимого документа.
+    /// Проверяет сервер: страница планшета делает то же самое, но полагаться на одну её нельзя.
+    /// </summary>
+    public static string? BrokenRuleOrInput(DocumentConfig doc,
+        IReadOnlyDictionary<string, bool> checks, IReadOnlyDictionary<string, string> inputs)
+    {
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null) continue;
+            foreach (var inp in p.Inputs ?? new List<DocInput>())
+            {
+                if (inp is null || string.IsNullOrWhiteSpace(inp.Key)) continue;
+                inputs.TryGetValue(inp.Key.Trim(), out var v);
+                v = (v ?? inp.Value ?? "").Trim();
+                if (inp.Required && v.Length == 0)
+                    return "поле «" + (string.IsNullOrWhiteSpace(inp.Label) ? inp.Key : inp.Label) + "» не заполнено";
+                if (v.Length > 0 && BadInputValue(inp.Type, v) is { } почему)
+                    return "поле «" + (string.IsNullOrWhiteSpace(inp.Label) ? inp.Key : inp.Label) + "»: " + почему;
+            }
+            foreach (var rule in p.CheckRules ?? new List<CheckRule>())
+            {
+                if (rule is null || rule.Keys is not { Count: > 1 }) continue;
+                var сколько = rule.Keys.Count(k => checks.TryGetValue(k.Trim(), out var on) && on);
+                if (rule.Kind == "minchecked" && сколько < rule.N)
+                    return "нужно отметить не меньше " + rule.N + " из перечисленных пунктов";
+                if (rule.Kind == "exclusive" && сколько > 1)
+                    return "из взаимоисключающих пунктов отмечен может быть только один";
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Почему значение не подходит виду поля, или null. Разбор нестрогий, как у дат.</summary>
+    public static string? BadInputValue(string? type, string value) => (type ?? "").Trim().ToLowerInvariant() switch
+    {
+        "number" => decimal.TryParse(value.Replace(',', '.'), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out _) ? null : "это не число",
+        "date" => ParseDate(value) is null ? "это не дата, подойдёт 01.01.1990 или 1990-01-01" : null,
+        // У телефона считаются только цифры: скобки, дефисы и пробелы это оформление.
+        "phone" => value.Count(char.IsDigit) is >= 5 and <= 15 ? null : "это не похоже на номер телефона",
+        _ => null
+    };
+
     public static void ApplyLiveConditions(DocumentConfig doc,
         IReadOnlyDictionary<string, bool> checkboxStates, IReadOnlyDictionary<string, string> groupSelections)
     {
@@ -610,13 +762,24 @@ public static partial class DocumentTemplating
                 if (x is not null && !string.IsNullOrWhiteSpace(x.Key)) keys.Add(x.Key.Trim());
             foreach (var x in p.Scans ?? new List<DocScan>())
                 if (x is not null && !string.IsNullOrWhiteSpace(x.Key)) keys.Add(x.Key.Trim());
+            // Поле ввода тоже живое: его значение появляется, пока клиент печатает, и условие на
+            // него может вычислить только планшет.
+            foreach (var x in p.Inputs ?? new List<DocInput>())
+                if (x is not null && !string.IsNullOrWhiteSpace(x.Key)) keys.Add(x.Key.Trim());
         }
         return keys;
     }
 
     /// <summary>True when this part of a condition is about something the signer controls on the tablet.</summary>
-    private static bool IsLive(VisibleWhen? cond, HashSet<string> live) =>
-        cond is not null && !string.IsNullOrWhiteSpace(cond.Field) && live.Contains(cond.Field.Trim());
+    private static bool IsLive(VisibleWhen? cond, HashSet<string> live)
+    {
+        if (cond is null || string.IsNullOrWhiteSpace(cond.Field)) return false;
+        // Счёт отметок всегда вычисляет планшет: перечисленные имена нажимают там. Момент
+        // показа наоборот всегда решается здесь: у планшета могут быть свои, сбитые часы.
+        if (cond.Op == "minchecked") return true;
+        if (IsClockOp(cond.Op)) return false;
+        return live.Contains(cond.Field.Trim());
+    }
 
     /// <summary>
     /// Оставить элемент: части про теги решаются здесь и должны выполниться все, а части про
@@ -659,6 +822,8 @@ public static partial class DocumentTemplating
                 if (IsLive(part, live))
                     deferred.Add(new VisibleWhen
                     {
+                        // Поле не обрезается по краям как одно имя: у счёта отметок это перечень
+                        // имён через запятую, и он уезжает как есть.
                         Field = part.Field.Trim(), Op = part.Op, Value = part.Value,
                         // Отрицание едет с частью: без него планшет вычислил бы её наоборот.
                         Not = part.Not
@@ -712,6 +877,11 @@ public static partial class DocumentTemplating
             }
             // Присланные по API чекбоксы на такой экран не дописываются: там одно дело.
             if (p.Kind is not null) { p.Checkboxes = new List<DocCheckbox>(); p.Groups = new List<DocGroup>(); p.IncludeDynamic = false; }
+            // Страницу, на которой клиент что-то подтверждает, из PDF исключить нельзя. Признак
+            // не отвергается с ошибкой, а возвращается на место: оператор мог поставить его
+            // раньше, а взаимодействие добавить потом, и терять из-за этого весь документ незачем.
+            if (HasInteraction(p)) p.InPdf = true;
+
             NormalizeOrder(p);
         }
         if (doc.Pages.Count > MaxPages) doc.Pages = doc.Pages.Take(MaxPages).ToList();
@@ -771,21 +941,47 @@ public static partial class DocumentTemplating
     }
 
     private static List<DocBlock> ResolveBlocks(IEnumerable<DocBlock> blocks,
-        IReadOnlyDictionary<string, string>? map, HashSet<string> live)
+        IReadOnlyDictionary<string, string>? map, HashSet<string> live,
+        IReadOnlyDictionary<string, string>? images = null)
     {
         var result = new List<DocBlock>();
         foreach (var b in blocks)
         {
             if (b is null) continue;
             if (!Keep(b.VisibleWhen, map, live)) continue;
+
+            // Картинка по тегу: на место блока встаёт то, что прислала внешняя система. Не
+            // прислала - остаётся запасная, заданная оператором. Нет и её - блока не будет
+            // вовсе: пустая рамка посреди документа выглядит поломкой.
+            var tag = (b.ImageTag ?? "").Trim();
+            var изАпи = tag.Length > 0 && images is not null && images.TryGetValue(tag, out var картинка)
+                ? картинка : null;
+            if (tag.Length > 0 && изАпи is null && string.IsNullOrEmpty(b.ImageUrl)) continue;
             result.Add(new DocBlock
             {
                 Runs = (b.Runs ?? new List<TextRun>()).Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
                 Align = b.Align,
-                ImageUrl = b.ImageUrl,
+                ImageUrl = изАпи ?? b.ImageUrl,
+                // Имя тега на планшет не едет: картинка уже подставлена, а знать про теги ему
+                // незачем.
                 ImageWidth = b.ImageWidth,
                 Wrap = b.Wrap,
                 WrapGap = b.WrapGap,
+                Kind = b.Kind,
+                InPdf = b.InPdf,
+                List = b.List,
+                Bg = b.Bg,
+                BorderColor = b.BorderColor,
+                Pad = b.Pad,
+                LineHeight = b.LineHeight,
+                // Теги подставляются и в ячейки: таблица реквизитов с {{ФИО}} обычное дело.
+                Table = b.Table is null ? null : new DocTable
+                {
+                    HeaderRow = b.Table.HeaderRow,
+                    Widths = new List<int>(b.Table.Widths ?? new List<int>()),
+                    Rows = (b.Table.Rows ?? new List<List<string>>())
+                        .Select(r => (r ?? new List<string>()).Select(c => Apply(c, map) ?? "").ToList()).ToList()
+                },
                 VisibleWhen = LiveCondition(b.VisibleWhen, map, live),
                 Ord = b.Ord
             });
@@ -858,8 +1054,48 @@ public static partial class DocumentTemplating
     /// keywords and well-formed hex colours, and known condition operators. This canonicalises the
     /// content so both renderers can trust it, and stops malformed styling from ever being stored.
     /// </summary>
+    /// <summary>Информационный ли это документ: показать и вернуть рекламу, без подписи.</summary>
+    public static bool IsInfo(DocumentConfig? doc) =>
+        string.Equals(doc?.Kind, "info", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Есть ли на странице что-то, что клиент подтверждает своими руками. Такую страницу нельзя
+    /// исключить из PDF: в бумаге оказалась бы отметка без того, под чем она стоит. И на
+    /// информационном документе такого быть не должно: подтверждать там нечем, следа не остаётся.
+    /// </summary>
+    public static bool HasInteraction(DocPage p) =>
+        (p.Checkboxes?.Count ?? 0) > 0 || (p.Groups?.Count ?? 0) > 0 ||
+        (p.Signatures?.Count ?? 0) > 0 || (p.Scans?.Count ?? 0) > 0 || (p.Inputs?.Count ?? 0) > 0;
+
+    /// <summary>
+    /// Почему документ нельзя сделать информационным, или null. Поле подписи и сканирование на
+    /// таком документе бессмысленны: их результат некуда положить, записи не будет. Молча
+    /// вычищать их нельзя, это потеря работы оператора без спроса, поэтому просто отказ с
+    /// перечислением страниц.
+    /// </summary>
+    public static string? WhyNotInfo(DocumentConfig doc)
+    {
+        var мешают = new List<string>();
+        var pages = doc.Pages ?? new List<DocPage>();
+        for (var i = 0; i < pages.Count; i++)
+        {
+            var p = pages[i];
+            if (p is null) continue;
+            var что = new List<string>();
+            if ((p.Signatures?.Count ?? 0) > 0) что.Add("поле подписи");
+            if ((p.Scans?.Count ?? 0) > 0) что.Add("сканирование");
+            if (что.Count > 0) мешают.Add("страница " + (i + 1) + " (" + string.Join(", ", что) + ")");
+        }
+        if (мешают.Count == 0) return null;
+        return "Информационный документ не подписывают, поэтому поля подписи и сканирования на нём " +
+               "работать не будут: их результат некуда положить. Уберите их и повторите. Мешают: " +
+               string.Join("; ", мешают) + ".";
+    }
+
     public static void Sanitize(DocumentConfig doc)
     {
+        // Вид документа: всё, кроме известного, это обычный подписной.
+        doc.Kind = IsInfo(doc) ? "info" : null;
         // Anything may arrive here from an imported file or an API client, including nulls inside
         // lists. Strip them: a single null element used to be stored happily and then throw on
         // every later render, breaking signing for the whole fleet until someone edited the file.
@@ -946,6 +1182,41 @@ public static partial class DocumentTemplating
                 sc.VisibleWhen = Normalized(sc.VisibleWhen);
             }
             if (p.Scans.Count > MaxPerKind) p.Scans = p.Scans.Take(MaxPerKind).ToList();
+
+            // Поля ввода: имя обязательно по той же причине, что у подписей. Вид значения только
+            // из известного списка, всё прочее это текст.
+            p.Inputs = Compact(p.Inputs);
+            for (var i = 0; i < p.Inputs.Count; i++)
+            {
+                var inp = p.Inputs[i];
+                inp.Key = CleanKey(inp.Key);
+                if (inp.Key.Length == 0) inp.Key = "input" + (i + 1);
+                inp.Label = Clamp(inp.Label);
+                inp.Placeholder = Clamp(inp.Placeholder);
+                inp.Value = Clamp(inp.Value);
+                var t = (inp.Type ?? "").Trim().ToLowerInvariant();
+                inp.Type = t is "number" or "date" or "phone" ? t : "text";
+                inp.VisibleWhen = Normalized(inp.VisibleWhen);
+            }
+            if (p.Inputs.Count > MaxPerKind) p.Inputs = p.Inputs.Take(MaxPerKind).ToList();
+
+            // Правила отметок: только известные виды, только существующие на этой странице имена
+            // и хотя бы два имени, иначе правилу не над чем работать.
+            var pageKeys = new HashSet<string>(
+                (p.Checkboxes ?? new List<DocCheckbox>()).Where(c => c is not null && c.Key.Length > 0).Select(c => c.Key.Trim()),
+                StringComparer.OrdinalIgnoreCase);
+            p.CheckRules = (p.CheckRules ?? new List<CheckRule>()).Where(r => r is not null).Select(r =>
+            {
+                var kind = (r.Kind ?? "").Trim().ToLowerInvariant();
+                return new CheckRule
+                {
+                    Kind = kind is "minchecked" ? "minchecked" : "exclusive",
+                    Keys = (r.Keys ?? new List<string>()).Select(CleanKey)
+                        .Where(k => k.Length > 0 && pageKeys.Contains(k)).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                    N = Math.Clamp(r.N <= 0 ? 1 : r.N, 1, 50)
+                };
+            }).Where(r => r.Keys.Count >= 2).Take(10).ToList();
+            if (p.CheckRules.Count == 0) p.CheckRules = new List<CheckRule>();
 
             NormalizeOrder(p);
         }
@@ -1039,6 +1310,9 @@ public static partial class DocumentTemplating
         var scans = page.Scans ?? new List<DocScan>();
         for (var i = 0; i < scans.Count; i++)
             items.Add((scans[i].Ord >= 0 ? scans[i].Ord : 5 * tail + i, 4, i));
+        var inputs = page.Inputs ?? new List<DocInput>();
+        for (var i = 0; i < inputs.Count; i++)
+            items.Add((inputs[i].Ord >= 0 ? inputs[i].Ord : 6 * tail + i, 5, i));
 
         return items.OrderBy(x => x.Key).ThenBy(x => x.Kind).ThenBy(x => x.Index)
             .Select(x => (x.Kind, x.Index)).ToList();
@@ -1053,6 +1327,7 @@ public static partial class DocumentTemplating
         foreach (var g in p.Groups) if (g.Ord > max) max = g.Ord;
         foreach (var x in p.Signatures) if (x.Ord > max) max = x.Ord;
         foreach (var x in p.Scans) if (x.Ord > max) max = x.Ord;
+        foreach (var x in p.Inputs) if (x.Ord > max) max = x.Ord;
         return max + 1;
     }
 
@@ -1091,6 +1366,11 @@ public static partial class DocumentTemplating
             var sc = p.Scans[i];
             items.Add((sc.Ord, 4, i, v => sc.Ord = v));
         }
+        for (var i = 0; i < p.Inputs.Count; i++)
+        {
+            var inp = p.Inputs[i];
+            items.Add((inp.Ord, 5, i, v => inp.Ord = v));
+        }
         if (items.Count == 0) return;
 
         // Элемент без номера встаёт туда, где он оказался бы в старом документе: в конец своего
@@ -1111,6 +1391,7 @@ public static partial class DocumentTemplating
         p.Groups = p.Groups.OrderBy(x => x.Ord).ToList();
         p.Signatures = p.Signatures.OrderBy(x => x.Ord).ToList();
         p.Scans = p.Scans.OrderBy(x => x.Ord).ToList();
+        p.Inputs = p.Inputs.OrderBy(x => x.Ord).ToList();
     }
 
     /// <summary>A non-null list without null elements.</summary>
@@ -1126,14 +1407,67 @@ public static partial class DocumentTemplating
         b.Runs = Compact(b.Runs);
         foreach (var r in b.Runs) CleanRun(r);
         b.ImageUrl = CleanImageUrl(b.ImageUrl);
-        b.ImageWidth = b.ImageUrl is null ? 100 : Math.Clamp(b.ImageWidth <= 0 ? 100 : b.ImageWidth, 10, 100);
+        // Блок с тегом это тоже картинка, даже когда своей у него нет: её пришлёт внешняя
+        // система. Иначе ширина и обтекание у такого блока сбрасывались бы при каждом
+        // сохранении, и оператор не мог бы задать их вовсе.
+        var картинка = b.ImageUrl is not null || b.ImageTag is not null;
+        b.ImageWidth = картинка ? Math.Clamp(b.ImageWidth <= 0 ? 100 : b.ImageWidth, 10, 100) : 100;
         // Обтекание только у картинки и только двумя сторонами: текст «вокруг со всех сторон»
         // выглядит красиво лишь на широкой колонке, а на планшете превращается в узкие обрывки.
         var wrap = (b.Wrap ?? "").Trim().ToLowerInvariant();
-        b.Wrap = b.ImageUrl is not null && wrap is "left" or "right" ? wrap : null;
+        b.Wrap = картинка && wrap is "left" or "right" ? wrap : null;
         // Картинка во всю ширину обтекать не может: текста рядом с ней не поместится.
         if (b.Wrap is not null && b.ImageWidth > 70) b.ImageWidth = 70;
         b.WrapGap = Math.Clamp(b.WrapGap < 0 ? 10 : b.WrapGap, 0, 60);
+
+        // Имя тега картинки живёт по тем же правилам, что и обычный тег в тексте: его пишет
+        // оператор, а присылает внешняя система, и косая черта с точками там не нужна.
+        b.ImageTag = string.IsNullOrWhiteSpace(b.ImageTag) ? null : Clamp(b.ImageTag).Trim();
+        if (b.ImageTag is { Length: 0 }) b.ImageTag = null;
+
+        var kind = (b.Kind ?? "").Trim().ToLowerInvariant();
+        b.Kind = kind is "divider" or "pagebreak" ? kind : null;
+        var list = (b.List ?? "").Trim().ToLowerInvariant();
+        b.List = list is "bullet" or "number" ? list : null;
+        b.Bg = NormalizeColor(b.Bg);
+        b.BorderColor = NormalizeColor(b.BorderColor);
+        b.Pad = Math.Clamp(b.Pad < 0 ? 0 : b.Pad, 0, 40);
+        b.LineHeight = b.LineHeight <= 0 ? 0 : Math.Clamp(b.LineHeight, 100, 250);
+        // Плашка и рамка живут только у текста: у картинки они рисовали бы пустую коробку, а у
+        // разделителя и разрыва страницы оформлять нечего.
+        if (картинка || b.Kind is not null) { b.Bg = null; b.BorderColor = null; b.Pad = 0; }
+
+        if (b.Table is not null)
+        {
+            // Таблица ограничена разумным листом: больше сорока строк и восьми столбцов не
+            // читается ни на планшете, ни на бумаге, а импортированный файл не должен уметь
+            // принести таблицу на тысячу строк.
+            var rows = (b.Table.Rows ?? new List<List<string>>())
+                .Where(r => r is not null).Take(40)
+                .Select(r => r.Select(c => Clamp(c) ?? "").ToList()).ToList();
+            var cols = rows.Count == 0 ? 0 : Math.Min(rows.Max(r => r.Count), 8);
+            if (cols == 0 || rows.All(r => r.All(string.IsNullOrWhiteSpace)))
+            {
+                b.Table = null;
+            }
+            else
+            {
+                foreach (var r in rows)
+                {
+                    while (r.Count < cols) r.Add("");
+                    if (r.Count > cols) r.RemoveRange(cols, r.Count - cols);
+                }
+                var widths = (b.Table.Widths ?? new List<int>()).Take(cols)
+                    .Select(w2 => Math.Clamp(w2, 5, 90)).ToList();
+                // Ширины либо заданы все и в сумме близки к ста, либо не заданы вовсе: половина
+                // заданных ширин означала бы догадки, которые на планшете и в PDF разошлись бы.
+                if (widths.Count != cols || Math.Abs(widths.Sum() - 100) > 5) widths = new List<int>();
+                b.Table = new DocTable { HeaderRow = b.Table.HeaderRow, Rows = rows, Widths = widths };
+            }
+        }
+        // Блок с таблицей не несёт ни текста, ни картинки: две сущности в одном элементе
+        // означали бы, что порядок их отрисовки решается молча.
+        if (b.Table is not null) { b.Runs = new List<TextRun>(); b.ImageUrl = null; b.ImageTag = null; b.List = null; }
     }
 
     /// <summary>
@@ -1160,6 +1494,10 @@ public static partial class DocumentTemplating
         r.Text = Clamp(r.Text);
         if (r.Size != null && !AllowedSizes.Contains(r.Size)) r.Size = null;
         r.Color = NormalizeColor(r.Color);
+        r.Mark = NormalizeColor(r.Mark);
+        // Свой размер в точках. Границы те же, что у PDF: мельче восьми не читается, крупнее
+        // сорока не помещается в строку планшета.
+        r.SizePt = r.SizePt <= 0 ? 0 : Math.Clamp(r.SizePt, 8, 40);
     }
 
     /// <summary>
@@ -1195,10 +1533,20 @@ public static partial class DocumentTemplating
 
     /// <summary>Accept only a "/media/{filename}" reference to an uploaded image; reject anything
     /// with a path separator or traversal so a block can never point outside the image store.</summary>
+    /// <summary>Приставка картинки, присланной внешней системой прямо в запросе.</summary>
+    public const string DataImagePrefix = "data:image/";
+
+    /// <summary>Картинка ли это, присланная внешней системой строкой BASE64.</summary>
+    public static bool IsApiImage(string? url) =>
+        url is not null && url.StartsWith(DataImagePrefix, StringComparison.Ordinal);
+
     public static string? CleanImageUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url)) return null;
         var u = url.Trim();
+        // Картинка из запроса уже проверена при приёме: разобрана, опознана по своим первым
+        // байтам и ограничена по размеру. Здесь её пропускаем как есть.
+        if (IsApiImage(u)) return u;
         const string prefix = "/media/";
         if (!u.StartsWith(prefix, StringComparison.Ordinal)) return null;
         var name = u[prefix.Length..];
@@ -1274,6 +1622,9 @@ public static partial class DocumentTemplating
         c.Field = (c.Field ?? "").Trim();
         c.Value = (c.Value ?? "").Trim();
         if (string.IsNullOrEmpty(c.Op) || !AllowedOps.Contains(c.Op)) c.Op = "eq";
+        // Момент показа не зависит от тегов: поле всегда служебное, что бы ни пришло из
+        // редактора или из импортированного файла.
+        if (IsClockOp(c.Op)) c.Field = TodayField;
         // Окно условия по сроку записывается как «7» или «14/3». Приводим к одному виду, чтобы
         // редактор и сервер читали одно и то же, а мусор вроде «14 / abc» не сохранялся.
         if (IsDaysOp(c.Op))
@@ -1370,6 +1721,7 @@ public static partial class DocumentTemplating
             foreach (var g in p.Groups ?? new List<DocGroup>()) Add(g?.VisibleWhen);
             foreach (var x in p.Signatures ?? new List<DocSignature>()) Add(x?.VisibleWhen);
             foreach (var x in p.Scans ?? new List<DocScan>()) Add(x?.VisibleWhen);
+            foreach (var x in p.Inputs ?? new List<DocInput>()) Add(x?.VisibleWhen);
         }
         foreach (var b in doc.SignBlocks ?? new List<DocBlock>()) Add(b?.VisibleWhen);
         foreach (var b in doc.SignBlocksBelow ?? new List<DocBlock>()) Add(b?.VisibleWhen);
