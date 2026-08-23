@@ -157,7 +157,6 @@ public class PdfService
                         block.Align, block.Wrap, block.WrapGap);
                 }
                 else if (block.Runs is { Count: > 0 }) { w.Rich(block.Runs, isHeading: false, block.Align); w.Gap(8); }
-                else if (!string.IsNullOrEmpty(block.ImageUrl)) { /* картинка уже нарисована выше */ }
             }
         }
 
@@ -288,6 +287,9 @@ public class PdfService
             .Where(i => i is not null && !printedItems.Contains(i)).ToList();
         if (leftoverItems.Count > 0)
         {
+            // Документ мог закончиться обтекаемой картинкой: без спуска ниже неё этот раздел
+            // печатался бы прямо поверх.
+            w.ClearWrap();
             w.Gap(4);
             w.Line("Отмеченные пункты:", w.H2);
             w.Gap(3);
@@ -596,6 +598,13 @@ public class PdfService
                 if (pending.Count == 0) return;
                 double h = lineH * 1.2;
                 Ensure(h);
+                // Строка могла уехать на новую страницу изнутри обтекания: картинка осталась на
+                // прошлой, и её отступ здесь уже ничего не обтекает. Слова собраны со старым
+                // отступом, поэтому строка сдвигается к текущей левой границе целиком.
+                var сдвигВлево = pending[0].x - LineLeft;
+                if (сдвигВлево > 0)
+                    for (var i = 0; i < pending.Count; i++)
+                        pending[i] = pending[i] with { x = pending[i].x - сдвигВлево };
                 double baseline = _y + lineH;
                 var last = pending[^1];
                 var left = pending[0].x;

@@ -355,21 +355,46 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
             if (k.Length > 0) finalGroups[k] = DocumentTemplating.CleanKey(g!.Selected);
         }
 
-        var template = storage.GetDocument();
-        var resolvedDoc = DocumentTemplating.Resolve(template, fields, state.DynamicCheckboxes,
-            finalGroups, finalStates, state.Texts, state.GroupOptions);
+        // Запись и PDF собираются из снимка сессии: документа ровно в том виде, в каком его
+        // получил планшет. Пересборка из текущего шаблона здесь была бы ошибкой: шаблон могли
+        // править, пока человек подписывал, и в запись легло бы не то, что он видел и подписал.
+        DocumentConfig resolvedDoc;
+        Dictionary<string, string>? recordFields;
+        var session = string.IsNullOrEmpty(state.SessionId) ? null : storage.GetDocSession(deviceId);
+        if (session is not null && session.SessionId == state.SessionId)
+        {
+            resolvedDoc = session.Document;
+            DocumentTemplating.ApplyMarks(resolvedDoc, finalStates, finalGroups);
+            recordFields = session.RecordFields;
+        }
+        else
+        {
+            // Сессия начата до появления снимков: прежний путь, из текущего шаблона. Поля
+            // отбираются по нему же: только те, что документ действительно использует. Внешняя
+            // система вправе прислать и свои служебные поля, но человек их не видел и не
+            // подписывал, поэтому в записи им не место.
+            var template = storage.GetDocument();
+            resolvedDoc = DocumentTemplating.Resolve(template, fields, state.DynamicCheckboxes,
+                finalGroups, finalStates, state.Texts, state.GroupOptions);
+            var used = DocumentTemplating.UsedFields(template);
+            recordFields = fields?.Where(kv => used.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
+        }
         // Блоки, скрытые условием на чекбокс, клиент не видел: их не должно быть и в PDF.
         DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups);
-
-        // В запись и в PDF идут только те поля, которые документ действительно использует.
-        // Внешняя система вправе прислать вместе с данными подписанта и свои служебные поля
-        // (номер заказа, идентификатор в их системе), но человек их не видел и не подписывал,
-        // поэтому в подписанном документе им не место, а хранить их незачем.
-        var used = DocumentTemplating.UsedFields(template);
-        var recordFields = fields is null
-            ? null
-            : fields.Where(kv => used.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
         if (recordFields is { Count: 0 }) recordFields = null;
+
+        // Обязательное должно быть заполнено. Это проверяет и страница планшета, но полагаться
+        // на одну её нельзя: сломанная или подделанная страница прислала бы запись о согласии
+        // без самого согласия, и запись выглядела бы подлинной. Отказ сессию не трогает: клиент
+        // ещё подписывает, и стереть его документ из-за чужого кривого запроса нельзя.
+        var missing = DocumentTemplating.MissingRequired(resolvedDoc,
+            extraSignatures.Select(x => x.Key).ToList(),
+            (sub.Scans ?? new List<SubmittedScan>()).Select(x => DocumentTemplating.CleanKey(x.Key)).ToList());
+        if (missing is not null)
+        {
+            cleared = true;
+            return Results.BadRequest(new { error = "Не заполнено обязательное: " + missing });
+        }
 
         var rec = storage.AddSignature(sub, resolvedDoc, device, ws, png, recordFields, extraSignatures);
 
@@ -735,10 +760,27 @@ admin.MapGet("/field-schema", () => Results.Ok(new
     })
 }));
 
-admin.MapGet("/document", () => Results.Ok(storage.GetDocument()));
-admin.MapPut("/document", (DocumentConfig? doc) =>
+// Версия документа едет заголовком, а не в теле: тело остаётся самим документом, и ни админка,
+// ни внешние системы, ни экспорт с импортом форму ответа не меняют.
+admin.MapGet("/document", (HttpContext ctx) =>
+{
+    ctx.Response.Headers["X-Doc-Rev"] = storage.GetDocumentRev();
+    return Results.Ok(storage.GetDocument());
+});
+admin.MapPut("/document", (DocumentConfig? doc, HttpContext ctx) =>
 {
     if (doc is null) return Results.BadRequest(new { error = "document required" });
+    // Две открытые админки правят один документ: без сверки версий вторая молча затирала бы
+    // работу первой, и никто бы об этом не узнал. Сверка по желанию отправителя: админка шлёт
+    // версию, от которой правила, а внешняя система и импорт не шлют ничего и работают как
+    // работали, перезаписью целиком.
+    var baseRev = ctx.Request.Headers["X-Doc-Rev"].ToString();
+    if (baseRev.Length > 0 && baseRev != storage.GetDocumentRev())
+        return Results.Json(new
+        {
+            error = "Документ уже изменён в другом окне или другим оператором. " +
+                    "Возьмите свежую версию, иначе чужая работа будет затёрта."
+        }, statusCode: StatusCodes.Status409Conflict);
     DocumentTemplating.Sanitize(doc);
     var badImages = DocumentTemplating.UnsupportedImages(doc);
     if (badImages.Count > 0)
@@ -748,6 +790,7 @@ admin.MapPut("/document", (DocumentConfig? doc) =>
                     "Подойдут PNG, JPG или BMP. Проблемные файлы: " + string.Join(", ", badImages)
         });
     storage.SaveDocument(doc);
+    ctx.Response.Headers["X-Doc-Rev"] = storage.GetDocumentRev();
     return Results.Ok(new { ok = true });
 });
 

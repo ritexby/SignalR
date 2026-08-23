@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "6.5";
+  var APP_VERSION = "6.6";
 
   var state = {
     slidesTarget: "all",   // кому идёт реклама: all / group:{id} / device:{id} / devices
@@ -519,7 +519,12 @@
   var OTHER_OPTION = "\u0000other";   // cannot collide with a real tag or value
 
   function loadDoc() {
-    return apiJson("/document").then(function (d) {
+    return api("/document").then(function (r) {
+      // Версия, от которой оператор правит. Уедет с сохранением, и сервер откажет, если
+      // документ уже переписали из другого окна.
+      state.docRev = r.headers.get("X-Doc-Rev") || "";
+      return r.json();
+    }).then(function (d) {
       state.doc = d; renderDoc(); docLoaded = true;
       // Черновик предлагается, только когда открыта вкладка документа: окно поверх «Слайдов»
       // перекрывало бы вкладки и мешало тому, кто про документ сейчас и не думает.
@@ -1671,7 +1676,13 @@
     var ed = r.querySelector('[data-role="cblabel"]');
     var runs = ed ? editorToRuns(ed) : [];
     var lab = runsText(runs);
-    if (!lab.trim()) return null;
+    // Как и у групп: совсем пустая заготовка выбрасывается со счётом, а недоделанная, где уже
+    // есть имя или условие, остаётся, и о недостающем тексте скажет проверка документа.
+    if (!lab.trim()) {
+      var естьИмя = ((r.querySelector('[data-role="cbkey"]') || {}).value || "").trim();
+      var естьУсловие = readCondition(r.querySelector('[data-role="cbcond"]'));
+      if (!естьИмя && !естьУсловие) { выброшеноПустых++; return null; }
+    }
     var item = {
       key: ((r.querySelector('[data-role="cbkey"]') || {}).value || "").trim(),
       label: lab,
@@ -1706,7 +1717,7 @@
     if (!gkey && gtitle.trim()) gkey = slugKey(gtitle);
     // Совсем пустую заготовку выбрасываем, а недоделанную оставляем: молча стирать работу
     // оператора нельзя, о недостающем имени и вариантах ему скажет проверка документа.
-    if (!gkey && !options.length && !gtitle.trim()) return null;
+    if (!gkey && !options.length && !gtitle.trim()) { выброшеноПустых++; return null; }
     var grp = { key: gkey, title: gtitle, titleRuns: truns,
       required: r.querySelector('[data-role="greq"]').checked, options: options };
     if (выбран) grp.selected = выбран;
@@ -2499,9 +2510,14 @@
   }
 
   function readSignatureRow(box) {
+    if (!box) return null;
     var label = (box.querySelector('[data-role="siglabel"]') || {}).value || "";
     var key = (box.querySelector('[data-role="sigkey"]') || {}).value || "";
-    if (!label.trim() && !key.trim()) return null;
+    if (!label.trim() && !key.trim()) {
+      // Поле с условием уже не пустая заготовка: оператор его настраивал. Оно остаётся, а о
+      // недостающем имени скажет проверка документа.
+      if (!readCondition(box.querySelector('[data-role="sigcond"]'))) { выброшеноПустых++; return null; }
+    }
     var out = { key: key.trim(), label: label, required: (box.querySelector('[data-role="sigreq"]') || {}).checked !== false };
     out.width = parseInt((box.querySelector('[data-role="sigwidth"]') || {}).value, 10) || 280;
     out.height = parseInt((box.querySelector('[data-role="sigheight"]') || {}).value, 10) || 100;
@@ -2513,9 +2529,12 @@
   }
 
   function readScanRow(box) {
+    if (!box) return null;
     var label = (box.querySelector('[data-role="scanlabel"]') || {}).value || "";
     var key = (box.querySelector('[data-role="scankey"]') || {}).value || "";
-    if (!label.trim() && !key.trim()) return null;
+    if (!label.trim() && !key.trim()) {
+      if (!readCondition(box.querySelector('[data-role="scancond"]'))) { выброшеноПустых++; return null; }
+    }
     var out = { key: key.trim(), label: label, required: (box.querySelector('[data-role="scanreq"]') || {}).checked !== false };
     var cond = readCondition(box.querySelector('[data-role="scancond"]'));
     if (cond) out.visibleWhen = cond;
@@ -2646,7 +2665,13 @@
     var del = el("button", "btn btn-danger", "×"); del.addEventListener("click", function () { row.remove(); updatePlaceholders(); }); row.appendChild(del);
     return row;
   }
+  // Сколько совсем пустых заготовок выброшено при последнем сборе. Пустая заготовка это
+  // элемент, который добавили и не тронули: хранить его нечем, но выбрасывать молча нельзя,
+  // сохранение назовёт число вслух.
+  var выброшеноПустых = 0;
+
   function collectDoc() {
+    выброшеноПустых = 0;
     state.doc.title = $("docTitle").value; state.doc.signPrompt = $("signPrompt").value;
     state.doc.idleReturnSec = parseInt($("idleReturn").value, 10) || 0;
     var pages = [];
@@ -2753,7 +2778,9 @@
     host.insertBefore(menu, anchor.nextSibling);
   }
   $("addPage").addEventListener("click", function () { openPageKinds($("addPage")); });
-  $("saveDocument").addEventListener("click", function () { saveDoc().then(function () { toast("Документ сохранён"); }); });
+  // Сообщение об итоге показывает сам saveDoc: тост здесь один на всех, и «Документ сохранён»
+  // из обработчика затирал бы предупреждение о несохранённых заготовках, не дав его прочитать.
+  $("saveDocument").addEventListener("click", function () { saveDoc().catch(function () { /* уже показано */ }); });
 
   // ---- Защита несохранённого ----
   // Документ пишется на сервер только по кнопке. Закрытая вкладка, обновление страницы или
@@ -2792,16 +2819,54 @@
     try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* нечего убирать */ }
   }
 
-  function saveDoc() {
+  function saveDoc(поверх) {
     collectDoc();
     // Условие без выбранного тега в документ не попадает. Сохранить документ всё равно надо,
     // но сказать об этом обязательно: иначе блок молча покажется всем.
     var пустых = незаполненныеУсловия();
-    return apiSend("/document", "PUT", state.doc).then(function (r) {
+    var headers = { "Content-Type": "application/json" };
+    // Версия отправляется, только когда она есть и оператор не решил сохранить поверх: сервер
+    // сверит её и откажет, если документ уже переписали из другого окна.
+    if (state.docRev && !поверх) headers["X-Doc-Rev"] = state.docRev;
+    return api("/document", { method: "PUT", headers: headers, body: JSON.stringify(state.doc) }).then(function (r) {
+      state.docRev = r.headers.get("X-Doc-Rev") || state.docRev;
       dirty = false; syncDirty(); dropDraft();
-      if (пустых) toast("Условий без выбранного тега: " + пустых + ". Они не сохранены, блок будет показан всем.", true);
+      // Одно сообщение целиком: предупреждения приклеены к «сохранён», иначе следующее
+      // сообщение затёрло бы их раньше, чем оператор успел прочитать.
+      var итог = "Документ сохранён";
+      if (пустых) итог += ". Условий без выбранного тега: " + пустых + ", они не сохранены, блок будет показан всем";
+      if (выброшеноПустых) итог += ". Пустых заготовок не сохранено: " + выброшеноПустых;
+      toast(итог);
       return r;
+    }).catch(function (err) {
+      if (err && err.status === 409) { offerConflict(); }
+      throw err;
     });
+  }
+
+  // Документ переписали из другого окна, пока оператор правил здесь. Молча затереть чужую
+  // работу нельзя, молча выбросить свою тоже: выбор за оператором, и оба пути безопасны,
+  // потому что свои правки в любом случае лежат в черновике.
+  function offerConflict() {
+    saveDraft();
+    var c = el("div");
+    c.appendChild(el("h3", null, "Документ изменён в другом окне"));
+    c.appendChild(el("p", "sig-meta",
+      "Пока вы правили, документ сохранили из другого окна или другой оператор. " +
+      "Ваши правки целы: они лежат в черновике этого браузера."));
+    var взять = iconBtn("download", "Взять свежий с сервера", "btn-primary");
+    взять.addEventListener("click", function () {
+      closeModal();
+      loadDoc().then(function () { toast("Загружена свежая версия. Ваши правки можно вернуть из черновика."); });
+    });
+    var поверх = iconBtn("upload", "Сохранить мою версию поверх", "btn-ghost");
+    поверх.title = "Затирает то, что сохранили в другом окне";
+    поверх.addEventListener("click", function () {
+      closeModal();
+      saveDoc(true).catch(function () { /* уже показано */ });
+    });
+    c.appendChild(взять); c.appendChild(поверх);
+    openModal(c);
   }
 
   // Любая правка внутри вкладки документа считается изменением: перечислять поля по одному
@@ -2884,6 +2949,10 @@
       (p.blocks || []).forEach(function (b) { addCond(b.visibleWhen); });
       (p.checkboxes || []).forEach(function (c) { addCond(c.visibleWhen); });
       (p.groups || []).forEach(function (g) { addCond(g.visibleWhen); });
+      // Подписи и сканы тоже живут под условиями: тег, использованный только там, иначе не
+      // предлагался бы в предпросмотре, и проверить показ поля подписи было бы нечем.
+      (p.signatures || []).forEach(function (x) { addCond(x.visibleWhen); });
+      (p.scans || []).forEach(function (x) { addCond(x.visibleWhen); });
     });
     (state.doc.signBlocks || []).forEach(function (b) { addCond(b.visibleWhen); });
     (state.doc.signBlocksBelow || []).forEach(function (b) { addCond(b.visibleWhen); });
@@ -5377,24 +5446,6 @@
   // ни здесь.
   var watch = { deviceId: null, name: "", doc: null, mode: "", state: null, node: null, solo: false };
 
-  // Ссылка вида /admin/#watch=WS-204 открывает наблюдение сразу за нужным планшетом. Так внешняя
-  // система, отправившая документ, может дать оператору прямую ссылку рядом со своим заказом, не
-  // заставляя его искать планшет в списке. Адресуется код рабочего места, как и везде в API;
-  // имя планшета и внутренний идентификатор тоже принимаются, если кому-то так удобнее.
-  function watchByName(нужное) {
-    var q = String(нужное || "").trim().toLowerCase();
-    if (!q) return;
-    return apiJson("/devices").then(function (list) {
-      var dev = (list || []).filter(function (d) {
-        return (d.workstation && String(d.workstation.externalId || "").toLowerCase() === q)
-          || String(d.name || "").toLowerCase() === q
-          || String(d.id || "").toLowerCase() === q;
-      })[0];
-      if (!dev) { toast("Планшет «" + нужное + "» не найден"); return; }
-      if (!dev.online) { toast("Планшет «" + dev.name + "» не на связи: смотреть нечего"); return; }
-      openWatch(dev);
-    }).catch(function () { toast("Не удалось найти планшет"); });
-  }
 
   // Окно, открытое ссылкой #watch=, показывает только экран планшета. Раньше в нём открывалась
   // вкладка «Планшеты», а наблюдение всплывало поверх неё окошком. Пока планшет был на связи,

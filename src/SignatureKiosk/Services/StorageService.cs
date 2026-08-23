@@ -517,6 +517,73 @@ public class StorageService
         lock (_lock) Write(DocumentPath, doc);
     }
 
+    /// <summary>
+    /// Версия сохранённого документа: хэш его файла. Считается от текста, а не от объекта,
+    /// поэтому одинаковый документ всегда даёт одну и ту же версию, а любая правка другую.
+    /// Файл ещё не создан - версия «new»: у двух админок над свежей установкой она совпадает.
+    /// </summary>
+    public string GetDocumentRev()
+    {
+        lock (_lock)
+        {
+            var text = ReadText(DocumentPath);
+            return text is null ? "new" : Sha256Hex(text)[..16];
+        }
+    }
+
+    // ---------------- Сессии подписания ----------------
+    // Снимок разобранного документа на время одной сессии. Отдельным файлом на планшет, а не
+    // внутри states.json: состояние читается на каждое подключение всего парка, а снимок нужен
+    // только переподключению, наблюдению и самой отправке подписи.
+
+    private string SessionsDir => Path.Combine(_dataDir, "sessions");
+
+    private string? SessionPath(string deviceId)
+    {
+        // Имя файла строится из имени планшета. Наши имена это dev-и шестнадцатеричные цифры,
+        // но файл не то место, где стоит доверять любой строке.
+        var id = (deviceId ?? "").Trim();
+        if (id.Length == 0 || id.Length > 64 || !id.All(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_'))
+            return null;
+        return Path.Combine(SessionsDir, id + ".json");
+    }
+
+    public void SaveDocSession(string deviceId, DocSession session)
+    {
+        var path = SessionPath(deviceId);
+        if (path is null) return;
+        lock (_lock)
+        {
+            Directory.CreateDirectory(SessionsDir);
+            Write(path, session);
+        }
+    }
+
+    public DocSession? GetDocSession(string deviceId)
+    {
+        var path = SessionPath(deviceId);
+        if (path is null) return null;
+        lock (_lock)
+        {
+            if (!File.Exists(path)) return null;
+            return ReadOr<DocSession?>(path, () => null);
+        }
+    }
+
+    public void DeleteDocSession(string deviceId)
+    {
+        var path = SessionPath(deviceId);
+        if (path is null) return;
+        lock (_lock)
+        {
+            // Кэш чистится вместе с файлом: следующая сессия не должна прочитать прежнюю.
+            _text.Remove(path);
+            try { File.Delete(path); }
+            catch (IOException) { /* файла уже нет или каталог не создавался - снимка и так нет */ }
+            catch (UnauthorizedAccessException) { /* права снесло руками; читать его всё равно никто не будет */ }
+        }
+    }
+
     // ---------------- Signatures ----------------
 
     public SignatureRecord AddSignature(SignatureSubmission sub, DocumentConfig resolvedDoc, Device? device, Workstation? workstation, byte[] pngBytes, Dictionary<string, string>? fields = null,

@@ -176,10 +176,11 @@
   // ==================================================================
   var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null, idleTimer: null, idleMs: 0, thankTimer: null, session: 0 };
 
-  function applyDocument(config) {
+  function applyDocument(config, sessionId) {
     stopSlides();
     endDocSession();               // cancel any timers from a previous session; invalidates in-flight submits
     showLayer("document");
+    doc.serverSession = sessionId || null;
     doc.config = config || { title: "", pages: [] };
     doc.checks = {};
     doc.picks = {};          // группа -> ключ выбранного варианта ("" = ничего не выбрано)
@@ -210,6 +211,7 @@
   // replaced or cleared meanwhile and quietly stop, avoiding cross-session jumps / null refs.
   function endDocSession() {
     doc.session++;
+    doc.serverSession = null;       // имя серверной сессии живёт ровно столько же, сколько сама
     doc.submissionId = null;        // a new signing session must never reuse the previous key
     stopIdle();
     if (doc.thankTimer) { clearTimeout(doc.thankTimer); doc.thankTimer = null; }
@@ -320,6 +322,10 @@
       (p.blocks || []).forEach(function (b) { check(b.visibleWhen); });
       (p.checkboxes || []).forEach(function (c) { check(c.visibleWhen); });
       (p.groups || []).forEach(function (g) { check(g.visibleWhen); });
+      // Подписи и сканы тоже живут под условиями: без них поле подписи, спрятанное за
+      // чекбоксом «подписывает представитель», не появлялось бы при его отметке.
+      (p.signatures || []).forEach(function (x) { check(x.visibleWhen); });
+      (p.scans || []).forEach(function (x) { check(x.visibleWhen); });
     });
     (doc.config.signBlocks || []).forEach(function (b) { check(b.visibleWhen); });
     (doc.config.signBlocksBelow || []).forEach(function (b) { check(b.visibleWhen); });
@@ -1281,7 +1287,12 @@
   // ==================================================================
   // Layers
   // ==================================================================
+  // Какой слой на экране прямо сейчас. Нужно переподключению: решить, тот же это документ или
+  // новый, можно только зная, что документ вообще показан.
+  var activeLayer = "";
+
   function showLayer(which) {
+    activeLayer = which;
     el.enroll.classList.add("hidden");
     // Смена экрана это то, что наблюдателю надо увидеть первым делом.
     setTimeout(watchPush, 0);
@@ -1439,6 +1450,10 @@
   // Проверить путь кода без камеры иначе нельзя: в браузере проверки камеры нет, а разбирать
   // надо именно то, что происходит после считывания. Работает только при открытом сканировании,
   // поэтому подсунуть код в обход экрана не получится.
+  // Обрыв связи для проверок: роняет соединение так же, как это делает пропавший Wi-Fi, и
+  // страница переподключается своим обычным путём. Продукт этим не пользуется.
+  window.__sk_test_drop = function () { if (conn) conn.stop(); };
+
   window.__sk_test_scan = function (code, format) {
     if (scan.active || scan.inline) onScanned({ text: code, format: format });
   };
@@ -1509,7 +1524,13 @@
       showEnroll("Это окно не привязано к планшету. Введите код активации.");
       return;
     }
-    if (cmd.mode === "document") applyDocument(cmd.document);
+    if (cmd.mode === "document") {
+      // Переподключение внутри той же сессии подписания. Пересоздать документ значило бы
+      // сбросить клиента на первую страницу и стереть всё отмеченное из-за моргнувшего Wi-Fi.
+      // Сервер прислал бы другое имя сессии, будь это другой показ.
+      if (cmd.sessionId && doc.serverSession === cmd.sessionId && activeLayer === "document") return;
+      applyDocument(cmd.document, cmd.sessionId);
+    }
     else applySlides(cmd.slides);
   }
 
@@ -1563,7 +1584,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "6.5";
+  var APP_VERSION = "6.6";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {
@@ -1606,7 +1627,7 @@
       .build();
 
     conn.on("ShowSlides", applySlides);
-    conn.on("ShowDocument", applyDocument);
+    conn.on("ShowDocument", function (config, sessionId) { applyDocument(config, sessionId); });
     conn.on("Identify", function (p) { showIdentify(p && p.code, p && p.name); });
     conn.on("StartScan", startScan);
     conn.on("StopScan", stopScan);

@@ -32,6 +32,13 @@ public class KioskState
     /// </summary>
     public Dictionary<string, List<DocGroupOption>> GroupOptions { get; set; } = new();
     public DateTime? DocumentSetUtc { get; set; }                          // when the document was put on this device
+    /// <summary>
+    /// Имя сессии подписания. Выдаётся при показе документа и указывает на снимок разобранного
+    /// документа рядом с состоянием. Пока клиент подписывает, оператор может править шаблон:
+    /// без снимка переподключившийся планшет и итоговая запись собирались бы из нового шаблона,
+    /// а подписал человек старый.
+    /// </summary>
+    public string? SessionId { get; set; }
 
     public KioskState Clone() => new()
     {
@@ -45,7 +52,8 @@ public class KioskState
         Texts = new Dictionary<string, string>(Texts),
         GroupOptions = GroupOptions.ToDictionary(kv => kv.Key,
             kv => kv.Value.Select(o => new DocGroupOption { Key = o.Key, Label = o.Label }).ToList()),
-        DocumentSetUtc = DocumentSetUtc
+        DocumentSetUtc = DocumentSetUtc,
+        SessionId = SessionId
     };
 }
 
@@ -690,6 +698,25 @@ public class CurrentCommand
     public string Mode { get; set; } = "slides"; // "slides" | "document"
     public SlidesPayload? Slides { get; set; }
     public DocumentConfig? Document { get; set; }
+    /// <summary>Имя сессии подписания. По нему планшет понимает при переподключении, что это
+    /// тот же самый документ, и не сбрасывает клиенту прогресс.</summary>
+    public string? SessionId { get; set; }
+}
+
+/// <summary>
+/// Снимок сессии подписания: документ ровно в том виде, в каком его получил планшет. Хранится
+/// отдельным файлом на время сессии. Запись и PDF собираются из него, а не из текущего шаблона:
+/// шаблон могли править, пока человек подписывал, а подписал он то, что видел.
+/// </summary>
+public class DocSession
+{
+    public string SessionId { get; set; } = "";
+    public DocumentConfig Document { get; set; } = new();
+    /// <summary>Поля подписанта, отобранные по шаблону на момент показа: только те, что документ
+    /// действительно использует. Считаются при показе, потому что при отправке шаблон уже мог
+    /// быть другим.</summary>
+    public Dictionary<string, string>? RecordFields { get; set; }
+    public DateTime ShownUtc { get; set; }
 }
 
 // ---------- API DTOs ----------

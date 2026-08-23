@@ -97,18 +97,6 @@ public static partial class DocumentTemplating
         }
     }
 
-    /// <summary>Ближайшее расстояние в днях, по модулю. Нужно для подсказок и разбора.</summary>
-    public static int? DaysTo(string? value, bool anniversary, DateTime? today = null)
-    {
-        int? best = null;
-        foreach (var d in DaysToAll(value, anniversary, today))
-        {
-            var abs = Math.Abs(d);
-            if (best is null || abs < best) best = abs;
-        }
-        return best;
-    }
-
     /// <summary>
     /// Окно условия по сроку: «7» это семь дней в обе стороны, «14/3» это четырнадцать дней до
     /// даты и три после. Раздельные окна нужны, потому что поздравлять за две недели и
@@ -510,6 +498,66 @@ public static partial class DocumentTemplating
     /// скрытого блока считается неотмеченным, поэтому взаимные ссылки между блоками разрешаются
     /// сами и не могут зациклиться.
     /// </summary>
+    /// <summary>
+    /// Проставить в разобранный документ то, что клиент в итоге отметил: галочки по имени и
+    /// выбор в группах. Нужно снимку сессии: он сделан при показе, до всех отметок, а запись и
+    /// PDF должны показывать документ таким, каким его подписали.
+    /// </summary>
+    public static void ApplyMarks(DocumentConfig doc,
+        IReadOnlyDictionary<string, bool> checkboxStates, IReadOnlyDictionary<string, string> groupSelections)
+    {
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null) continue;
+            foreach (var c in p.Checkboxes ?? new List<DocCheckbox>())
+            {
+                if (c is null || string.IsNullOrWhiteSpace(c.Key)) continue;
+                if (checkboxStates.TryGetValue(c.Key.Trim(), out var isChecked)) c.Checked = isChecked;
+            }
+            foreach (var g in p.Groups ?? new List<DocGroup>())
+            {
+                if (g is null || string.IsNullOrWhiteSpace(g.Key)) continue;
+                if (groupSelections.TryGetValue(g.Key.Trim(), out var sel))
+                    g.Selected = string.IsNullOrWhiteSpace(sel) ? null : sel;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Первый обязательный, но не заполненный элемент видимого документа: имя того, чего не
+    /// хватает, или null, когда всё на месте. Проверяет сервер, а не только страница планшета:
+    /// страница может быть сломана или подделана, а запись о согласии без самого согласия
+    /// выглядит подлинной и потому хуже, чем отказ.
+    /// </summary>
+    public static string? MissingRequired(DocumentConfig doc,
+        IReadOnlyCollection<string> signatureKeys, IReadOnlyCollection<string> scanKeys)
+    {
+        static bool Has(IReadOnlyCollection<string> keys, string? key) =>
+            !string.IsNullOrWhiteSpace(key) && keys.Any(k => string.Equals(k, key.Trim(), StringComparison.OrdinalIgnoreCase));
+
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null) continue;
+            // Безымянный пункт проверить нельзя: отметки приходят по имени, и сопоставить их с
+            // ним нечем. Такие бывают в документах, сохранённых до автоимён, и отказывать всему
+            // документу из-за них значило бы остановить подписание на ровном месте. Страница
+            // планшета их по-прежнему требует, а галочка в PDF берётся из записи по совпадению.
+            foreach (var c in p.Checkboxes ?? new List<DocCheckbox>())
+                if (c is { Required: true, Checked: false } && !string.IsNullOrWhiteSpace(c.Key))
+                    return "пункт «" + (PlainOf(c.LabelRuns, c.Label) ?? "") + "»";
+            foreach (var g in p.Groups ?? new List<DocGroup>())
+                if (g is { Required: true } && !string.IsNullOrWhiteSpace(g.Key) && string.IsNullOrWhiteSpace(g.Selected))
+                    return "выбор «" + (PlainOf(g.TitleRuns, g.Title) ?? "") + "»";
+            foreach (var x in p.Signatures ?? new List<DocSignature>())
+                if (x is { Required: true } && !Has(signatureKeys, x.Key))
+                    return "подпись «" + (x.Label ?? x.Key) + "»";
+            foreach (var x in p.Scans ?? new List<DocScan>())
+                if (x is { Required: true } && !Has(scanKeys, x.Key))
+                    return "сканирование «" + (x.Label ?? x.Key) + "»";
+        }
+        return null;
+    }
+
     public static void ApplyLiveConditions(DocumentConfig doc,
         IReadOnlyDictionary<string, bool> checkboxStates, IReadOnlyDictionary<string, string> groupSelections)
     {

@@ -139,7 +139,12 @@ public class KioskCoordinator
             .Select(kv => kv.Key).ToList();
         if (candidates.Count == 0) return 0;   // never rewrite the file for nothing
 
-        return _storage.MutateStates(states =>
+        // Снимки сессий уходят вместе с данными подписанта. Удаляются после записи состояния:
+        // наоборот осталось бы окно, где состояние ещё «документ», а снимка уже нет.
+        var swept = new List<string>();
+        try
+        {
+            return _storage.MutateStates(states =>
         {
             var n = 0;
             foreach (var deviceId in candidates)
@@ -151,10 +156,17 @@ public class KioskCoordinator
                 s.CheckboxStates.Clear();
                 s.GroupSelections.Clear();
                 s.DocumentSetUtc = null;
+                s.SessionId = null;
+                swept.Add(deviceId);
                 n++;
             }
             return n;
         });
+        }
+        finally
+        {
+            foreach (var id in swept) _storage.DeleteDocSession(id);
+        }
     }
 
     public CurrentCommand BuildCurrentCommand(string deviceId)
@@ -168,11 +180,20 @@ public class KioskCoordinator
         }
         if (state.Mode == "document")
         {
-            // Resolve with THIS device's own signer data only, so a tablet never receives
-            // another signer's fields or checkboxes.
+            // Переподключившийся планшет получает снимок, сделанный при показе, а не пересборку
+            // из текущего шаблона: шаблон могли править, пока клиент подписывал, и документ
+            // менялся бы у него на глазах посреди подписания.
+            if (!string.IsNullOrEmpty(state.SessionId))
+            {
+                var session = _storage.GetDocSession(deviceId);
+                if (session is not null && session.SessionId == state.SessionId)
+                    return new CurrentCommand { Mode = "document", Document = session.Document, SessionId = session.SessionId };
+            }
+            // Снимка нет: сессия начата до появления снимков. Прежний путь, с данными только
+            // этого планшета: чужого он не получит и здесь.
             var doc = DocumentTemplating.Resolve(_storage.GetDocument(), state.Fields, state.DynamicCheckboxes,
                 state.GroupSelections, state.CheckboxStates, state.Texts, state.GroupOptions);
-            return new CurrentCommand { Mode = "document", Document = doc };
+            return new CurrentCommand { Mode = "document", Document = doc, SessionId = state.SessionId };
         }
         return new CurrentCommand { Mode = "slides", Slides = BuildSlidesPayload(state) };
     }
@@ -184,7 +205,7 @@ public class KioskCoordinator
         Dictionary<string, string> fields, List<DocCheckbox> checkboxes,
         Dictionary<string, bool>? checkboxStates = null, Dictionary<string, string>? groupSelections = null,
         Dictionary<string, string>? texts = null,
-        Dictionary<string, List<DocGroupOption>>? groupOptions = null)
+        Dictionary<string, List<DocGroupOption>>? groupOptions = null, string? sessionId = null)
     {
         foreach (var deviceId in deviceIds)
         {
@@ -204,6 +225,7 @@ public class KioskCoordinator
                 : groupOptions.ToDictionary(kv => kv.Key,
                     kv => kv.Value.Select(o => new DocGroupOption { Key = o.Key, Label = o.Label }).ToList());
             s.DocumentSetUtc = mode == "document" ? DateTime.UtcNow : null;
+            s.SessionId = mode == "document" ? sessionId : null;
         }
     }
 
@@ -371,10 +393,28 @@ public class KioskCoordinator
             if (sent.Count > 0) options[key] = sent;
         }
 
-        _storage.MutateStates(st => SetDeviceState(st, new[] { deviceId }, "document", fieldMap, cbs, states, selections, texts, options));
-
         var doc = DocumentTemplating.Resolve(template, fieldMap, cbs, selections, states, texts, options);
-        await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", doc);
+
+        // Снимок сессии: документ ровно в том виде, в каком он сейчас уедет на планшет. Из него
+        // соберётся запись и PDF, его же получит переподключившийся планшет и окно наблюдения.
+        // Поля подписанта отбираются по шаблону сейчас, при показе: при отправке подписи шаблон
+        // уже может быть другим, и по нему отбор был бы неверным.
+        // Порядок намеренный: сначала файл снимка, потом состояние с его именем, потом отправка.
+        // Обратный порядок оставлял бы окно, где состояние ссылается на снимок, которого нет.
+        var sessionId = Guid.NewGuid().ToString("N");
+        var used = DocumentTemplating.UsedFields(template);
+        var recordFields = fieldMap.Where(kv => used.Contains(kv.Key))
+            .ToDictionary(kv => kv.Key, kv => kv.Value);
+        _storage.SaveDocSession(deviceId, new DocSession
+        {
+            SessionId = sessionId,
+            Document = doc,
+            RecordFields = recordFields.Count > 0 ? recordFields : null,
+            ShownUtc = DateTime.UtcNow
+        });
+        _storage.MutateStates(st => SetDeviceState(st, new[] { deviceId }, "document", fieldMap, cbs, states, selections, texts, options, sessionId));
+
+        await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", doc, sessionId);
         // На планшете сменился документ: тот, кто смотрит, должен перечитать его заново, иначе
         // рисовал бы старый документ поверх нового состояния.
         await NotifyWatchersReloadAsync(deviceId);
@@ -416,7 +456,10 @@ public class KioskCoordinator
             s.CheckboxStates.Clear();
             s.GroupSelections.Clear();
             s.DocumentSetUtc = null;
+            s.SessionId = null;
         });
+        // Снимок сессии это тоже данные подписанта: уходит вместе с ними.
+        _storage.DeleteDocSession(deviceId);
     }
 
     /// <summary>
