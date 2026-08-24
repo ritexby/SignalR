@@ -165,25 +165,44 @@ public class StorageService
         }
     }
 
-    /// <summary>Assign a device to a workstation identified by the external system's id.</summary>
-    public bool AssignWorkstationByExternalId(string deviceId, string? externalId)
+    /// <summary>Чем кончилась привязка планшета к рабочему месту.</summary>
+    public enum РезультатПривязки { Готово, НетПланшета, НетМеста }
+
+    /// <summary>
+    /// Assign a device to a workstation identified by the external system's id. Пустой код
+    /// означает отвязку, и решает это вызывающий: молча отвязать планшет по недосланному полю
+    /// нельзя, потому что снаружи это выглядит как обычное «ок».
+    /// </summary>
+    /// <remarks>
+    /// Раньше возвращалось одно «нет» на два разных случая, и внешняя система получала
+    /// «device or workstation not found», не зная, что чинить: несуществующий номер планшета или
+    /// код рабочего места, которого ещё не завели.
+    /// </remarks>
+    public РезультатПривязки AssignWorkstationByExternalId(string deviceId, string? externalId)
     {
         lock (_lock)
         {
-            var wsId = (string?)null;
-            if (!string.IsNullOrWhiteSpace(externalId))
-            {
-                var ws = ReadOr(WorkstationsPath, () => new List<Workstation>())
-                    .FirstOrDefault(w => w.ExternalId == externalId);
-                if (ws == null) return false;
-                wsId = ws.Id;
-            }
+            // Планшет проверяется первым: он адресат запроса, и если его нет, всё остальное уже
+            // неважно.
             var list = ReadOr(DevicesPath, () => new List<Device>());
             var dev = list.FirstOrDefault(d => d.Id == deviceId);
-            if (dev == null) return false;
+            if (dev == null) return РезультатПривязки.НетПланшета;
+
+            var wsId = (string?)null;
+            var код = (externalId ?? "").Trim();
+            if (код.Length > 0)
+            {
+                // Код рабочего места сравнивается без учёта регистра и без окружающих пробелов,
+                // как и везде: завести два места с кодами «Room-1» и «room-1» система не даёт,
+                // значит и искать место по коду надо одинаково во всех местах.
+                var ws = ReadOr(WorkstationsPath, () => new List<Workstation>())
+                    .FirstOrDefault(w => string.Equals((w.ExternalId ?? "").Trim(), код, StringComparison.OrdinalIgnoreCase));
+                if (ws == null) return РезультатПривязки.НетМеста;
+                wsId = ws.Id;
+            }
             dev.WorkstationId = wsId;
             Write(DevicesPath, list);
-            return true;
+            return РезультатПривязки.Готово;
         }
     }
 
@@ -405,6 +424,25 @@ public class StorageService
         }
     }
 
+    /// <summary>
+    /// Выключить или включить ключ, не удаляя его. Раньше ключ можно было только удалить, а это
+    /// необратимо: чтобы на час перекрыть доступ подозрительной интеграции, приходилось стирать
+    /// ключ и потом заново настраивать чужую систему. Возвращает false, если такого ключа нет.
+    /// </summary>
+    public bool SetApiKeyDisabled(string id, bool disabled)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(ApiKeysPath, () => new List<ApiKey>());
+            var k = list.FirstOrDefault(x => x.Id == id);
+            if (k == null) return false;
+            if (k.Disabled == disabled) return true;          // менять нечего, файл не трогаем
+            k.Disabled = disabled;
+            Write(ApiKeysPath, list);
+            return true;
+        }
+    }
+
     public bool ValidateApiKey(string? key)
     {
         if (string.IsNullOrWhiteSpace(key)) return false;
@@ -416,7 +454,9 @@ public class StorageService
             var bytes = Encoding.UTF8.GetBytes(hash);
             var found = false;
             foreach (var k in ReadOr(ApiKeysPath, () => new List<ApiKey>()))
-                if (CryptographicOperations.FixedTimeEquals(bytes, Encoding.UTF8.GetBytes(k.KeyHash ?? "")))
+                // Выключенный ключ сравнивается наравне с остальными и только потом отбрасывается:
+                // иначе по времени ответа было бы видно, что ключ угадан верно, просто выключен.
+                if (CryptographicOperations.FixedTimeEquals(bytes, Encoding.UTF8.GetBytes(k.KeyHash ?? "")) && !k.Disabled)
                     found = true;
             return found;
         }
@@ -1205,6 +1245,31 @@ public class StorageService
     // A warning threshold of 100% would be true for every tablet, every time, which is an alert
     // that can never clear. The same reasoning already applies to the error-burst thresholds.
     private const int MaxWarnPercent = 90;
+
+    /// <summary>
+    /// Годится ли ключ доступа к планшетам. Возвращает причину отказа или null, если ключ годится.
+    ///
+    /// Ключ уезжает в заголовок HTTP, а в значении заголовка допустимы только видимые знаки ASCII
+    /// (RFC 7230). Кириллица туда не помещается вовсе: платформа отказывается отправлять такой
+    /// заголовок и рвёт запрос, а наверх это приходило как «Планшет не отвечает по сети» при живом
+    /// планшете, стоящем в соседнем кабинете. Перекодировать ключ (в проценты, в BASE64, в
+    /// латиницу) нельзя: на планшете он сравнивается с тем, что там записано, и любая перекодировка
+    /// означает другой ключ и отказ уже от самого планшета. Поэтому такой ключ не принимается при
+    /// сохранении, и причина называется прямо.
+    /// </summary>
+    public static string? ПочемуКлючУправленияНеГодится(string? key)
+    {
+        var k = (key ?? "").Trim();
+        if (k.Length == 0) return null;                  // ключ не задан: это не ошибка
+        var плохие = k.Where(c => c < ' ' || c > '~').Distinct().Take(5).ToList();
+        if (плохие.Count == 0) return null;
+        var перечень = string.Join(", ", плохие.Select(c => char.IsWhiteSpace(c) || char.IsControl(c)
+            ? "знак с кодом " + ((int)c)
+            : "«" + c + "»"));
+        return "Ключ доступа к планшетам передаётся в заголовке HTTP, а туда помещаются только " +
+               "латиница, цифры и знаки препинания. В присланном ключе есть недопустимое: " + перечень +
+               ". Наберите ключ латиницей и задайте такой же в самом FreeKiosk.";
+    }
 
     private static void ClampKioskControl(KioskControlSettings s)
     {

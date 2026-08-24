@@ -80,6 +80,13 @@ public class FreeKioskClient
         settings ??= _storage.GetKioskControlSettings();
         if (!settings.Enabled) return new Result(false, 0, "Управление планшетами выключено в настройках.", null);
 
+        // Ключ, который нельзя положить в заголовок, рвёт запрос до отправки, и без этой проверки
+        // отказ выглядел бы как «планшет не отвечает по сети». Настройки могли быть записаны
+        // старой версией или руками в файле, поэтому проверять надо и здесь, а не только при
+        // сохранении.
+        var плохойКлюч = StorageService.ПочемуКлючУправленияНеГодится(settings.ApiKey);
+        if (плохойКлюч is not null) return new Result(false, 0, плохойКлюч, null);
+
         var baseUrl = BaseUrl(device, settings);
         if (baseUrl is null) return new Result(false, 0, "Адрес планшета неизвестен. Укажите его в карточке планшета.", null);
 
@@ -114,6 +121,8 @@ public class FreeKioskClient
     {
         var settings = _storage.GetKioskControlSettings();
         if (!settings.Enabled) return (null, null, "Управление планшетами выключено в настройках.");
+        var плохойКлюч = StorageService.ПочемуКлючУправленияНеГодится(settings.ApiKey);
+        if (плохойКлюч is not null) return (null, null, плохойКлюч);
         var baseUrl = BaseUrl(device, settings);
         if (baseUrl is null) return (null, null, "Адрес планшета неизвестен. Укажите его в карточке планшета.");
 

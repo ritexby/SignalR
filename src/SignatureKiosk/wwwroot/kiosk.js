@@ -174,7 +174,9 @@
   // ==================================================================
   // Signing document flow
   // ==================================================================
-  var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null, idleTimer: null, idleMs: 0, thankTimer: null, session: 0 };
+  var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null, idleTimer: null, idleMs: 0, thankTimer: null, session: 0,
+    // Подписи полей заведены сразу: их спрашивают и до того, как на планшет пришёл документ.
+    signStrokes: {}, signGeom: {}, signs: {}, signThumbs: {} };
   // Щель для проверок, как и __padForTest рядом: без неё нельзя развести то, что знает
   // страница, и то, что знает снимок на сервере, а именно на этом расхождении и проверяется,
   // объясняет ли планшет отказ сервера или выдаёт его за обрыв связи.
@@ -192,16 +194,21 @@
     doc.config = config || { title: "", pages: [] };
     doc.checks = {};
     doc.picks = {};          // группа -> ключ выбранного варианта ("" = ничего не выбрано)
+    // Подпись поля внутри страницы хранится росчерком, как и итоговая: это то, что клиент
+    // нарисовал, и всё остальное считается от него. Картинка и копия для наблюдателя лежат
+    // рядом готовыми, но собраны они из росчерка и сами по себе ничего не решают.
+    doc.signStrokes = {};    // имя поля подписи -> точки росчерка: сама подпись
+    doc.signGeom = {};       // и размер холста, на котором она снята
     doc.signs = {};          // имя поля подписи -> картинка в виде data URL
     doc.signThumbs = {};     // и её уменьшенная копия, только для наблюдателя
     doc.codes = {};          // имя поля сканирования -> { code, format, label }
     doc.inputs = {};         // имя поля ввода -> вписанное значение
     doc.pagePads = {};       // имя поля подписи -> перо, чтобы очистить и восстановить
     doc.pad = null;
-    // Итоговая подпись и её копия для наблюдателя. Стереть их обязательно: без этого подпись
-    // прежнего клиента оставалась в памяти, и оператор видел её в наблюдении на экране подписи
-    // следующего человека, который ещё ничего не нарисовал.
-    doc.finalSign = "";
+    // Итоговая подпись (точками росчерка) и её копия для наблюдателя. Стереть их обязательно:
+    // без этого подпись прежнего клиента оставалась в памяти, и оператор видел её в наблюдении
+    // на экране подписи следующего человека, который ещё ничего не нарисовал.
+    doc.finalStrokes = null;
     doc.finalInk = "";
     doc.submitting = false;
     doc.screens = [];
@@ -268,8 +275,11 @@
   function clearDocState() {
     endDocSession();
     doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {}; doc.picks = {};
+    // Росчерки полей стираются вместе с их картинками. Порознь нельзя: росчерк это и есть
+    // подпись, и оставленный в памяти он вернул бы её следующему клиенту на глаза.
+    doc.signStrokes = {}; doc.signGeom = {};
     doc.signs = {}; doc.signThumbs = {}; doc.codes = {}; doc.pagePads = {};
-    doc.pad = null; doc.finalInk = ""; doc.finalSign = ""; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
+    doc.pad = null; doc.finalInk = ""; doc.finalStrokes = null; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
     // Вписанное клиентом стирается вместе со всем остальным: заголовок этого куска обещает не
     // оставить следа, а значения полей ввода тут забыли, и они лежали в памяти планшета до
     // следующего документа.
@@ -330,7 +340,9 @@
       (p.signatures || []).forEach(function (sg, si) {
         if (!sg || sg.key !== key) return;
         нашли = true;
-        found = (видноЛи("s" + pi + "_" + si, sg.visibleWhen, p.visibleWhen) && doc.signs[key]) ? "подписано" : "";
+        // Спрашивается росчерк: он и есть подпись. Картинка рядом с ним лишь его отпечаток.
+        found = (видноЛи("s" + pi + "_" + si, sg.visibleWhen, p.visibleWhen)
+          && (doc.signStrokes[key] || []).length) ? "подписано" : "";
       });
       (p.scans || []).forEach(function (sc, ni) {
         if (!sc || sc.key !== key) return;
@@ -507,7 +519,9 @@
       return дни.some(function (d) { return d >= 0 ? d <= до : (-d) <= после; });
     }
     switch (cond.op) {
-      case "ne": return val !== target;
+      // «Не равно» не выполняется, когда значения нет вовсе: пустое это «не знаем», а не
+      // «другое». Иначе блок про другую систему кодирования видел каждый, кому её не присылали.
+      case "ne": return val.length > 0 && val !== target;
       case "empty": return val.length === 0;
       case "notempty": return val.length > 0;
       case "in": return target.split(",").map(function (x) { return x.trim(); })
@@ -640,7 +654,7 @@
         out.push({ kind: "group", key: g.key || "" });
     });
     (page.signatures || []).forEach(function (sg) {
-      if (sg.required && condHolds(sg.visibleWhen) && !(doc.signs[sg.key] || ""))
+      if (sg.required && condHolds(sg.visibleWhen) && !(doc.signStrokes[sg.key] || []).length)
         out.push({ kind: "sign", key: sg.key || "" });
     });
     (page.scans || []).forEach(function (sc) {
@@ -758,7 +772,7 @@
     }
     for (var si = 0; si < (page.signatures || []).length; si++) {
       var sg = page.signatures[si];
-      if (sg.required && condHolds(sg.visibleWhen) && !(doc.signs[sg.key] || "")) return false;
+      if (sg.required && condHolds(sg.visibleWhen) && !(doc.signStrokes[sg.key] || []).length) return false;
     }
     for (var ci = 0; ci < (page.scans || []).length; ci++) {
       var sc = page.scans[ci];
@@ -803,6 +817,44 @@
     } catch (e) { return ""; }
   }
 
+  // Настройки пера одни на все поля подписи. Картинка поля собирается заново, отдельным пером,
+  // и собраться она должна ровно такой же, какой клиент видел её на экране: разойдись здесь
+  // толщина или цвет, и в записи оказалась бы не та подпись, что на планшете.
+  var ПЕРО = { minWidth: 1.2, maxWidth: 3.2, penColor: "#111827", throttle: 0, minDistance: 0 };
+
+  // Картинка поля подписи внутри страницы. Не хранится, а собирается из росчерка тогда, когда
+  // нужна: в запись и в PDF. Источник истины здесь росчерк, потому что картинку перо своей не
+  // считает, а росчерк переживает и перерисовку страницы, и пересчёт холста.
+  // Размер холста берётся тот, на котором росчерк снят: в PDF подпись садится по пропорциям
+  // своей картинки, и собранная в другом размере она встала бы на лист сплюснутой.
+  function рисунокПоля(key) {
+    var точки = doc.signStrokes[key];
+    if (!точки || !точки.length) return "";
+    var г = doc.signGeom[key];
+    if (!г || !г.w || !г.h) return "";
+    try {
+      var c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(г.w * г.k));
+      c.height = Math.max(1, Math.round(г.h * г.k));
+      c.getContext("2d").scale(г.k, г.k);
+      var p = new SignaturePad(c, ПЕРО);
+      p.fromData(точки);
+      var out = p.toDataURL("image/png");
+      p.off();                     // перо жило ровно столько, сколько собиралась картинка
+      return out;
+    } catch (e) { return ""; }
+  }
+
+  // Стереть подпись поля отовсюду: и росчерк, и собранную из него картинку, и копию для
+  // наблюдателя. Одним куском нарочно: у итоговой подписи стирали по частям, росчерк оставался
+  // в памяти и возвращал на экран подпись, которую клиент только что стёр.
+  function забытьПоле(key) {
+    delete doc.signStrokes[key];
+    delete doc.signGeom[key];
+    delete doc.signs[key];
+    delete doc.signThumbs[key];
+  }
+
   function watchState() {
     var screen = doc.screens[doc.index];
     var out = { mode: doc.config ? "document" : "slides" };
@@ -825,7 +877,11 @@
       sh: Math.round((window.screen && window.screen.height) || 0)
     };
     out.screen = экран;
-    if (scan && scan.active) {
+    // По открытому экрану, а не по работающей камере. Считанный код показывается ещё две
+    // секунды после того, как камера уже выключена, и разрешение камеры может не дать её вовсе:
+    // в обоих случаях клиент смотрит на экран сканирования, а наблюдение показывало оператору
+    // документ или рекламу. Оператор обязан видеть то же, что клиент.
+    if (activeLayer === "scan") {
       // Про камеру говорим словами: у наблюдателя никакой камеры не открывается и разрешения
       // не спрашивается, он видит только, что клиент подносит код.
       out.mode = "scan";
@@ -1015,7 +1071,10 @@
       var ia = (b && b.align || "").toLowerCase();
       if (ia === "right") fig.style.textAlign = "right";
       else if (ia === "center") fig.style.textAlign = "center";
-      else if (ia === "justify") fig.style.textAlign = "left";
+      // «Слева» и «по обоим краям» для картинки это одно и то же: прижать к левому полю.
+      // Раньше ветки для «слева» не было вовсе, и картинка, которой оператор явно задал левое
+      // выравнивание, вставала по центру: экран не выполнял заданное.
+      else if (ia === "left" || ia === "justify") fig.style.textAlign = "left";
       // Обтекание: картинка встаёт сбоку, а текст следующих абзацев идёт рядом с ней.
       var wrap = (b && b.wrap || "").toLowerCase();
       if (wrap === "left" || wrap === "right") {
@@ -1379,12 +1438,13 @@
       clear.className = "btn btn-ghost page-sign-clear"; clear.type = "button"; clear.textContent = "Очистить";
       clear.addEventListener("click", function () {
         var pad = doc.pagePads[sig.key];
-        if (pad) {
-          pad.clear(); doc.signs[sig.key] = ""; doc.signThumbs[sig.key] = "";
-          wrap.classList.remove("has-ink"); updateFooter();
-          // Иначе у наблюдателя осталась бы подпись, которой уже нет.
-          watchPush();
-        }
+        if (pad) pad.clear();
+        // Память планшета чистится и тогда, когда пера уже нет: прежде всё стирание висело под
+        // проверкой на перо, и без него подпись оставалась в памяти при пустом на вид поле.
+        забытьПоле(sig.key);
+        wrap.classList.remove("has-ink"); updateFooter();
+        // Иначе у наблюдателя осталась бы подпись, которой уже нет.
+        watchPush();
       });
       box.appendChild(clear);
 
@@ -1400,33 +1460,81 @@
       canvas.width = Math.round(rect.width * ratio);
       canvas.height = Math.round(rect.height * ratio);
       canvas.getContext("2d").scale(ratio, ratio);
-      var pad = new SignaturePad(canvas, { minWidth: 1.2, maxWidth: 3.2, penColor: "#111827", throttle: 0, minDistance: 0 });
+      var pad = new SignaturePad(canvas, ПЕРО);
       attachCoalesced(canvas);
       doc.pagePads[sig.key] = pad;
+
+      // Снять с пера то, что на нём нарисовано, и сложить в память планшета: сам росчерк, размер
+      // холста под него и обе картинки. Одним местом на все случаи, чтобы росчерк и картинка не
+      // могли разойтись: разошлись бы, и в запись уехало бы не то, что клиент видел на экране.
+      function запомнить() {
+        var точки = null;
+        try { точки = pad.isEmpty() ? null : pad.toData(); } catch (e) { точки = null; }
+        if (!точки || !точки.length) { забытьПоле(sig.key); return; }
+        var r = wrap.getBoundingClientRect();
+        // Коробку поля могли померить в тот миг, когда её на экране ещё нет: ноль на ноль. Это
+        // не повод стирать подпись, в памяти остаётся снятое прошлый раз. Стирает поле только
+        // пустое перо, и только оно.
+        if (!r.width || !r.height) return;
+        // Своя копия: перо держит эти точки живым массивом и дописывает в него следующий
+        // росчерк, а память планшета обязана хранить снятое сейчас, а не ссылку на чужое.
+        doc.signStrokes[sig.key] = JSON.parse(JSON.stringify(точки));
+        doc.signGeom[sig.key] = { w: r.width, h: r.height, k: Math.max(window.devicePixelRatio || 1, 1) };
+        doc.signs[sig.key] = рисунокПоля(sig.key);
+        doc.signThumbs[sig.key] = padThumb(canvas);
+      }
+
       // Поворот планшета или всплывшая системная панель меняют коробку холста, но не его битмап:
       // нарисованное растягивается, а новая линия идёт со смещением от пальца. На отдельном
       // экране подписи это учтено, у полей внутри страницы забыли.
       подогнатьПеро.push(function () {
         var r2 = wrap.getBoundingClientRect();
         if (!r2.width || !r2.height) return;
-        var было = null;
-        try { if (!pad.isEmpty()) было = pad.toData(); } catch (e) { было = null; }
         var k = Math.max(window.devicePixelRatio || 1, 1);
-        canvas.width = Math.round(r2.width * k);
-        canvas.height = Math.round(r2.height * k);
+        var ш = Math.round(r2.width * k), в = Math.round(r2.height * k);
+        // Размер битмапа задаётся даже тогда, когда он и так такой: это стирает холст. Если
+        // коробка не менялась, стирать и перерисовывать нечего.
+        if (canvas.width === ш && canvas.height === в) return;
+        // Из пера, а если оно посреди росчерка отдало пустоту, то из памяти планшета. Картинкой
+        // подпись отсюда не берётся вовсе: перо картинку своей не считает и стёрло бы её.
+        var было = null;
+        try { было = pad.isEmpty() ? null : pad.toData(); } catch (e) { было = null; }
+        if (!было || !было.length) было = doc.signStrokes[sig.key] || null;
+        canvas.width = ш;
+        canvas.height = в;
         canvas.getContext("2d").scale(k, k);
         pad.clear();
         if (было && было.length) { try { pad.fromData(было); } catch (e) { /* не восстановилась */ } }
+        // Холст стал другого размера, значит и картинка для записи должна стать другого: в PDF
+        // подпись садится по пропорциям своей картинки, и старая встала бы на лист сплюснутой.
+        запомнить();
+        wrap.classList.toggle("has-ink", !pad.isEmpty());
       });
-      var saved = doc.signs[sig.key];
-      if (saved) { try { pad.fromDataURL(saved); wrap.classList.add("has-ink"); } catch (e) { /* не восстановилась */ } }
+
+      // Возвращаем то, что клиент уже нарисовал в этом поле: страница перерисовывается от любой
+      // отметки, и подпись обязана пережить перерисовку.
+      // Точками росчерка, а не картинкой. Картинка ложится на холст мимо пера: точек в перо она
+      // не кладёт, поэтому перо считает поле нарисованным, но пустым по данным, и ближайший же
+      // пересчёт холста (поворот планшета, всплывшая клавиатура) стирал подпись начисто, а
+      // следующий росчерк ложился уже на пустое поле и уносил всё, что было до него, в запись.
+      // Точки же перо принимает как свои: они переживают любой пересчёт, и подпись, которую
+      // видно, это ровно та подпись, которую планшет отправит.
+      var сохранённый = doc.signStrokes[sig.key];
+      if (сохранённый && сохранённый.length) {
+        try {
+          pad.fromData(сохранённый);
+          wrap.classList.add("has-ink");
+          // Коробка поля могла стать другой с прошлой отрисовки: раскрывшийся по условию блок
+          // сдвигает вёрстку. Картинка пересобирается под нынешний холст.
+          запомнить();
+        } catch (e) { /* не восстановилась */ }
+      }
       var сессияПоля = doc.session;
       pad.addEventListener("endStroke", function () {
         // Конец росчерка приходит от окна и может прийти уже после смены документа: писать в
         // состояние следующего клиента нельзя.
         if (doc.session !== сессияПоля) return;
-          doc.signs[sig.key] = pad.isEmpty() ? "" : pad.toDataURL("image/png");
-        doc.signThumbs[sig.key] = pad.isEmpty() ? "" : padThumb(canvas);
+        запомнить();
         watchPush();
         wrap.classList.toggle("has-ink", !pad.isEmpty());
         if (!pad.isEmpty()) clearMiss(wrap.closest(".page-sign"));
@@ -1482,9 +1590,13 @@
 
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
-    // Перья внутри страницы теперь пересчитываются вместе с окном, как и итоговое поле подписи.
-    if (подогнатьПеро.length)
-      doc.docPadResize = function () { подогнатьПеро.forEach(function (f) { try { f(); } catch (e) { /* поле уже ушло */ } }); };
+    // Перья внутри страницы пересчитываются вместе с окном, как и итоговое поле подписи.
+    // Без проверки на пустоту списка: перья встают не здесь, а следующим заданием (холст меряют
+    // после того, как вёрстка встала), и на этой строке список ещё пуст всегда. Проверка
+    // оставляла страницу без пересчёта вовсе, поэтому холст поля не менялся ни на поворот
+    // планшета, ни на всплывшую клавиатуру: нарисованное растягивалось вместе с коробкой, а
+    // новая линия шла мимо пальца тем сильнее, чем правее клиент вёл.
+    doc.docPadResize = function () { подогнатьПеро.forEach(function (f) { try { f(); } catch (e) { /* поле уже ушло */ } }); };
     // На последней странице информационного документа дальше идти некуда: следующий экран это
     // прощание. Поэтому кнопка называется «Готово», а не «Далее»: клиент должен понимать, что
     // нажатием он заканчивает, а не переходит куда-то ещё.
@@ -1600,16 +1712,24 @@
       // падала с ошибкой прямо в руках у клиента.
       if (!doc.pad || doc.session !== сессияЭкрана) return;
       doc.finalInk = doc.pad.isEmpty() ? "" : padThumb(canvas);
-      // И сама подпись, чтобы вернуть её при возврате на этот экран. Перо создаётся заново на
-      // каждый заход, и без сохранённого оттиска подпись пропадала, стоило клиенту нажать
+      // И сам росчерк, чтобы вернуть подпись при возврате на этот экран. Перо создаётся заново
+      // на каждый заход, и без сохранённого росчерка подпись пропадала, стоило клиенту нажать
       // «Назад» и вернуться: на экране пусто, а у оператора в наблюдении она ещё висит.
-      try { doc.finalSign = doc.pad.isEmpty() ? "" : doc.pad.toDataURL("image/png"); } catch (e) { doc.finalSign = ""; }
+      // Точки, а не картинка: почему именно так, написано у восстановления ниже.
+      try { doc.finalStrokes = doc.pad.isEmpty() ? null : doc.pad.toData(); } catch (e) { doc.finalStrokes = null; }
       watchPush();
     });
     sizeCanvas();
-    // Возвращаем подпись, если клиент уже расписался и уходил перечитать документ.
-    if (doc.finalSign) {
-      try { doc.pad.fromDataURL(doc.finalSign); hint.style.display = "none"; } catch (e) { /* не восстановилась */ }
+    // Возвращаем подпись, если клиент уже расписался и уходил перечитать документ или моргнул
+    // Wi-Fi. Точками росчерка, а не картинкой: картинка ложится на холст мимо пера и приходит
+    // с задержкой, потому что грузится как изображение. Перо после неё считает поле пустым, и
+    // ближайший же замер холста (строка ниже, поворот экрана, системная панель) стирал подпись,
+    // а картинка догружалась поверх уже стёртого. Клиент видел свою подпись на экране, а кнопка
+    // ПОДПИСАТЬ отвечала «Поставьте подпись в выделенном поле»: выйти из этого было некуда.
+    // Точки же перо принимает как свои: рисуются сразу, переживают любой замер, и подпись,
+    // которую видно, это ровно та подпись, которую планшет отправит.
+    if (doc.finalStrokes && doc.finalStrokes.length) {
+      try { doc.pad.fromData(doc.finalStrokes); hint.style.display = "none"; } catch (e) { /* не восстановилась */ }
     }
     // Re-measure once the flex layout has settled so the pad fills its final size.
     requestAnimationFrame(sizeCanvas);
@@ -1626,7 +1746,17 @@
     var thanks = (doc.config && doc.config.thankYouText) || "Спасибо!";
     var runs = labelRuns(doc.config && doc.config.thankYouRuns, thanks);
     var align = (doc.config && doc.config.thankYouAlign) || "";
-    var blocks = (doc.config && doc.config.thankYouBlocks) || [];
+    // Блоки прощания живут под условиями показа так же, как всё остальное в документе, и
+    // показывать блок «вам придёт результат на почту» тому, кто почту не оставил, нельзя.
+    // Считаем видимость прямо здесь: ниже отметки клиента стираются ради его же тайны, и
+    // проверять условие будет уже не по чему. Условие с уцелевших блоков снимаем: экран
+    // прощания рисуется заново при переподключении, и по стёртым отметкам все блоки под
+    // условием исчезли бы у клиента на глазах.
+    var blocks = visible((doc.config && doc.config.thankYouBlocks) || []).map(function (b) {
+      var копия = {};
+      Object.keys(b).forEach(function (имя) { if (имя !== "visibleWhen") копия[имя] = b[имя]; });
+      return копия;
+    });
     var держать = (doc.config && doc.config.thankYouSec) || 6;
     // PRIVACY: the title may contain the signer's data (for example "Согласие {{ФИО}}"), so it is
     // wiped as soon as signing is done, together with the resolved document held in memory. Only
@@ -1680,6 +1810,14 @@
         if (!doc.pad) return;
         doc.pad.clear();
         doc.finalInk = "";
+        // И сам росчерк: перо очистилось, а сохранённая подпись оставалась в памяти планшета и
+        // возвращалась на экран, стоило уйти назад и вернуться. Клиент стёр её как раз для того,
+        // чтобы её не было, и подписать стёртое он не соглашался.
+        doc.finalStrokes = null;
+        // Поле возвращается в исходный вид целиком, вместе с подсказкой: без неё клиент видит
+        // пустой прямоугольник и не понимает, что от него теперь хотят.
+        var подсказка = el.docBody.querySelector(".sign-hint");
+        if (подсказка) подсказка.style.display = "";
         updateFooter();
         watchPush();
       });
@@ -1773,7 +1911,10 @@
       if (!condHolds(page.visibleWhen)) return;
       (page.signatures || []).forEach(function (sg) {
         if (!condHolds(sg.visibleWhen)) return;
-        var img = doc.signs[sg.key] || "";
+        // Картинка собирается из росчерка прямо сейчас: росчерк это подпись, а картинка её
+        // отпечаток, и отпечаток обязан быть снят с того, что клиент видел последним. Готовая
+        // картинка рядом остаётся страховкой на случай, если собрать не вышло.
+        var img = рисунокПоля(sg.key) || doc.signs[sg.key] || "";
         if (!img) return;
         out.push({ key: sg.key || "", label: sg.label || "", image: img });
       });
@@ -1824,7 +1965,12 @@
           title: g.title || "",
           selected: selected,
           selectedLabel: chosen ? (chosen.label || chosen.key) : "",
-          options: (g.options || []).map(function (o) { return { key: o.key, label: o.label }; })
+          // Вместе с оформлением подписи варианта. Бумага печатает варианты из записи, а не из
+          // документа, и без кусков оформления жирное, цветное и выделенное превращалось на
+          // листе в обычный чёрный текст: клиент видел одно, а подписывал на вид другое.
+          options: (g.options || []).map(function (o) {
+            return { key: o.key, label: o.label, labelRuns: o.labelRuns || [] };
+          })
         });
       });
     });
@@ -1972,6 +2118,9 @@
   function clearScanResult() {
     el.scanCode.textContent = "";
     el.scanResult.classList.add("hidden");
+    // Код уходит и из памяти: наблюдению он нужен ровно столько, сколько виден клиенту, а
+    // дальше это чужой код в планшете, который никому уже не показывают.
+    scan.lastCode = "";
   }
 
   function stopScan() {
@@ -2018,10 +2167,9 @@
   /// возвращается к документу. Без opts это привычное сканирование по команде оператора.
   function startScan(opts) {
     if (scan.active) return;
-    scan.lastCode = "";
     scan.inline = (opts && typeof opts.onCode === "function") ? opts.onCode : null;
     if (scan.doneTimer) { clearTimeout(scan.doneTimer); scan.doneTimer = null; }  // stale "return" timer
-    clearScanResult();
+    clearScanResult();                            // и код прошлого клиента вместе с ним
     if (!window.ZXingBrowser || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       showLayer("scan");
       el.scanMsg.textContent = "Сканирование недоступно на этом устройстве.";
@@ -2115,13 +2263,16 @@
     } catch (e) { format = ""; }
 
     // One code per session: stop the camera immediately, show confirmation, save, then leave.
-    scan.lastCode = code;
-    watchPush();
     var inline = scan.inline;
     stopScan();
     el.scanMsg.textContent = "";
+    // Код запоминается и уходит наблюдателю после остановки камеры, а не до неё: stopScan
+    // стирает показанный код вместе с камерой, и записанное раньше он же и затирал. Рассылка
+    // наблюдателю идёт пачкой через десятую долю секунды, то есть заведомо после stopScan.
+    scan.lastCode = code;
     el.scanCode.textContent = code;
     el.scanResult.classList.remove("hidden");
+    watchPush();
 
     // Код для элемента страницы принадлежит документу: он уедет вместе с подписью и в общий
     // список сканирований не попадает, иначе оператор видел бы там чужие коды вперемешку.
@@ -2190,18 +2341,28 @@
   // ==================================================================
   // Enrollment
   // ==================================================================
+  // Почему планшет оказался на экране активации. Сервер обрывает соединение через четверть
+  // секунды после сообщения об отзыве, и следом onclose показывал экран активации заново, уже
+  // без объяснения: оператор видел обычный «введите код» и не понимал, что случилось.
+  var причинаАктивации = "";
+
   function showEnroll(message) {
     stopSlides();
     // Close the camera and wipe any signer data: activation can be reached from any screen
     // (a revoked token, a reset device), and the scan layer would otherwise cover this one.
     stopScan();
     clearDocState();
+    // Экран активации это тоже слой, и назвать его надо своим именем: наблюдение смотрит на
+    // открытый слой, и планшет, ушедший на активацию прямо с камеры, иначе так и показывался бы
+    // оператору снимающим код.
+    activeLayer = "enroll";
     el.scan.classList.add("hidden");
     el.slideshow.classList.add("hidden");
     el.document.classList.add("hidden");
     hideStatus();
     el.enroll.classList.remove("hidden");
-    el.enrollMsg.textContent = message || "";
+    if (message) причинаАктивации = message;
+    el.enrollMsg.textContent = message || причинаАктивации || "";
     setTimeout(function () { try { el.enrollCode.focus(); } catch (e) {} }, 100);
   }
 
@@ -2225,7 +2386,7 @@
     if (!code) return;
     el.enrollMsg.textContent = "Активация…";
     enroll(code)
-      .then(function () { el.enrollCode.value = ""; connect(); })
+      .then(function () { причинаАктивации = ""; el.enrollCode.value = ""; connect(); })
       .catch(function () { el.enrollMsg.textContent = "Код недействителен или истёк. Проверьте и попробуйте снова."; });
   });
 
@@ -2237,7 +2398,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "7.3";
+  var APP_VERSION = "7.4";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {

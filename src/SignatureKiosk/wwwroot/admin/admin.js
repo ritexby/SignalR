@@ -358,11 +358,25 @@
     }).length;
   }
 
+  // Короткая строка «Где» для карточки. Групп может быть много, и перечень имён в узкой карточке
+  // превратился бы в простыню: с трёх штук называем число, а полный перечень показывает панель.
   function описаниеГрупп(img) {
     var только = (img.groupIds || []).map(имяГруппы), кроме = (img.exceptGroupIds || []).map(имяГруппы);
     if (!только.length && !кроме.length) return "на всех планшетах";
-    var т = только.length ? только.join(", ") : "на всех планшетах";
-    return кроме.length ? (т + ", кроме: " + кроме.join(", ")) : т;
+    function свод(список, одна, много) {
+      if (список.length <= 2) return список.join(", ");
+      return список.length + " " + склонение(список.length, одна, много[0], много[1]);
+    }
+    var т = только.length ? свод(только, "группе", ["группах", "группах"]) : "на всех планшетах";
+    return кроме.length ? (т + ", кроме " + свод(кроме, "группы", ["групп", "групп"])) : т;
+  }
+
+  // «1 группе», «2 группах», «5 группах»: без этого выходит «в 5 группа».
+  function склонение(n, одна, две, много) {
+    var д = n % 10, с = n % 100;
+    if (д === 1 && с !== 11) return одна;
+    if (д >= 2 && д <= 4 && (с < 10 || с >= 20)) return две;
+    return много;
   }
 
   // Строка «Где: ...» на карточке. Открывает выбор групп: где показывать эту картинку и где не
@@ -388,57 +402,128 @@
     return строка;
   }
 
-  // Выбор групп для одной картинки. Панель кладётся в body, а не в карточку: у карточки
-  // обрезается всё, что вылезло за края, и внутри неё панель была бы наполовину не видна.
+  // Выбор групп для одной картинки.
+  //
+  // Групп у большой сети бывает шестьдесят и больше, поэтому два отдельных списка «показывать» и
+  // «кроме» не годятся: это сто двадцать строк, по которым надо ползать глазами и в которых
+  // легко отметить одну и ту же группу в обоих. Список один, а у каждой строки три состояния:
+  // не участвует, показывать, кроме. Противоречие тогда невозможно по построению, строк вдвое
+  // меньше, и видно сразу, что с группой происходит. Сверху поиск по названию и итог словами.
+  //
+  // Панель кладётся в body, а не в карточку: у карточки обрезается всё, что вылезло за края.
   function выборГрупп(img, якорь) {
     document.querySelectorAll(".groups-pop").forEach(function (n) { n.remove(); });
     var панель = el("div", "groups-pop");
     панель.addEventListener("click", function (e) { e.stopPropagation(); });
-    панель.appendChild(el("div", "groups-pop-title", "Где показывать картинку"));
-    панель.appendChild(el("div", "groups-pop-hint", "Ничего не отмечено - картинка идёт на все планшеты. Запрет сильнее разрешения: группа из «кроме» перебивает выбор."));
 
-    if (!(state.groups || []).length) {
-      панель.appendChild(el("div", "groups-pop-empty", "Групп пока нет. Создайте их на вкладке «Группы», тогда картинку можно будет направить в нужные места."));
+    var шапка = el("div", "groups-pop-head");
+    шапка.appendChild(el("div", "groups-pop-title", "Где показывать картинку"));
+    var итог = el("div", "groups-pop-sum", "");
+    шапка.appendChild(итог);
+    панель.appendChild(шапка);
+
+    var группы = (state.groups || []).slice().sort(function (a, b) {
+      return String(a.name || "").localeCompare(String(b.name || ""), "ru");
+    });
+    if (!группы.length) {
+      панель.appendChild(el("div", "groups-pop-empty",
+        "Групп пока нет. Создайте их на вкладке «Группы», тогда картинку можно будет направить в нужные места."));
     }
 
     var только = (img.groupIds || []).slice(), кроме = (img.exceptGroupIds || []).slice();
-    var флажки = [];
-    function раздел(заголовок, набор, другой, ключ) {
-      var b = el("div", "groups-pop-sec");
-      b.appendChild(el("div", "groups-pop-sub", заголовок));
-      (state.groups || []).forEach(function (g) {
-        var l = el("label", "groups-pop-row");
-        var c = el("input"); c.type = "checkbox"; c.checked = набор.indexOf(g.id) >= 0;
-        c.addEventListener("change", function () {
-          var i = набор.indexOf(g.id);
-          if (c.checked) { if (i < 0) набор.push(g.id); } else if (i >= 0) набор.splice(i, 1);
-          // Одна и та же группа не может быть и разрешением, и запретом. Снимаем отметку в
-          // соседнем списке сразу, а не отказом при сохранении: тупика быть не должно.
-          if (c.checked) {
-            var j = другой.indexOf(g.id);
-            if (j >= 0) {
-              другой.splice(j, 1);
-              флажки.forEach(function (ф) { if (ф.ключ !== ключ && ф.id === g.id) ф.вход.checked = false; });
-            }
-          }
-        });
-        флажки.push({ ключ: ключ, id: g.id, вход: c });
-        l.appendChild(c);
-        l.appendChild(el("span", "", g.name));
-        b.appendChild(l);
-      });
-      return b;
+    function состояние(id) {
+      if (только.indexOf(id) >= 0) return "in";
+      if (кроме.indexOf(id) >= 0) return "out";
+      return "";
     }
-    if ((state.groups || []).length) {
-      панель.appendChild(раздел("Показывать в группах", только, кроме, "in"));
-      панель.appendChild(раздел("Кроме групп", кроме, только, "out"));
+    function поставить(id, что) {
+      var i = только.indexOf(id); if (i >= 0) только.splice(i, 1);
+      var j = кроме.indexOf(id); if (j >= 0) кроме.splice(j, 1);
+      if (что === "in") только.push(id);
+      if (что === "out") кроме.push(id);
+    }
+    function обновитьИтог() {
+      if (!только.length && !кроме.length) { итог.textContent = "Сейчас: на всех планшетах"; return; }
+      var т = только.length
+        ? ("в " + только.length + " " + склонение(только.length, "группе", "группах", "группах"))
+        : "на всех планшетах";
+      итог.textContent = "Сейчас: " + т
+        + (кроме.length ? (", кроме " + кроме.length + " " + склонение(кроме.length, "группы", "групп", "групп")) : "");
     }
 
+    // Поиск нужен ровно тогда, когда групп много: на трёх он только занимает место.
+    var поиск = null;
+    if (группы.length > 8) {
+      поиск = el("input", "groups-pop-search");
+      поиск.type = "search";
+      поиск.placeholder = "Поиск по названию";
+      панель.appendChild(поиск);
+    }
+
+    панель.appendChild(el("div", "groups-pop-hint",
+      "Ничего не выбрано - картинка идёт на все планшеты. «Кроме» сильнее «показывать»."));
+
+    var список = el("div", "groups-pop-list");
+    панель.appendChild(список);
+
+    var строки = [];
+    группы.forEach(function (g) {
+      var строка = el("div", "groups-pop-row");
+      var имя = el("span", "groups-pop-name", g.name || g.id);
+      имя.title = g.name || g.id;
+      строка.appendChild(имя);
+      var переключатель = el("span", "groups-pop-switch");
+      [["", "везде", "Группа не участвует в отборе"],
+       ["in", "показывать", "Показывать картинку в этой группе"],
+       ["out", "кроме", "Не показывать картинку в этой группе"]].forEach(function (в) {
+        var b = el("button", "groups-pop-opt", в[1]);
+        b.type = "button";
+        b.title = в[2];
+        b.setAttribute("data-val", в[0]);
+        b.addEventListener("click", function (e) {
+          e.preventDefault();
+          поставить(g.id, в[0]);
+          отрисовать();
+        });
+        переключатель.appendChild(b);
+      });
+      строка.appendChild(переключатель);
+      строки.push({ id: g.id, узел: строка, имя: (g.name || g.id).toLowerCase() });
+      список.appendChild(строка);
+    });
+
+    function отрисовать() {
+      var что = поиск ? String(поиск.value || "").trim().toLowerCase() : "";
+      var видно = 0;
+      строки.forEach(function (r) {
+        var подходит = !что || r.имя.indexOf(что) >= 0;
+        r.узел.classList.toggle("hidden", !подходит);
+        if (подходит) видно++;
+        var сост = состояние(r.id);
+        r.узел.classList.toggle("chosen", сост !== "");
+        r.узел.querySelectorAll(".groups-pop-opt").forEach(function (b) {
+          b.classList.toggle("on", b.getAttribute("data-val") === сост);
+        });
+      });
+      пусто.classList.toggle("hidden", видно > 0 || !что);
+      обновитьИтог();
+    }
+    var пусто = el("div", "groups-pop-empty hidden", "По этому запросу групп не нашлось.");
+    список.appendChild(пусто);
+    if (поиск) поиск.addEventListener("input", отрисовать);
+
     var низ = el("div", "groups-pop-foot");
-    var отмена = el("button", "btn btn-ghost", "Отмена");
+    var сброс = el("button", "btn btn-ghost btn-sm", "Сбросить");
+    сброс.type = "button";
+    сброс.title = "Убрать все ограничения: картинка пойдёт на все планшеты";
+    сброс.addEventListener("click", function () { только = []; кроме = []; отрисовать(); });
+    низ.appendChild(сброс);
+    var промежуток = el("span", "groups-pop-spacer");
+    низ.appendChild(промежуток);
+    var отмена = el("button", "btn btn-ghost btn-sm", "Отмена");
     отмена.type = "button";
     отмена.addEventListener("click", function () { панель.remove(); });
-    var ок = el("button", "btn btn-primary", "Сохранить");
+    var ок = el("button", "btn btn-primary btn-sm", "Сохранить");
     ок.type = "button";
     ок.addEventListener("click", function () {
       ок.disabled = true;
@@ -452,6 +537,7 @@
     панель.appendChild(низ);
 
     document.body.appendChild(панель);
+    отрисовать();
     // Панель ставится под кнопкой и подтягивается внутрь окна, если у края не помещается:
     // у крайней правой карточки она иначе уезжала бы за экран.
     var r = якорь.getBoundingClientRect();
@@ -461,6 +547,7 @@
     if (y + в > window.innerHeight - 8) y = Math.max(8, r.top - в - 6);
     панель.style.left = x + "px";
     панель.style.top = y + "px";
+    if (поиск) setTimeout(function () { try { поиск.focus(); } catch (e) { /* окно уже закрыли */ } }, 0);
     setTimeout(function () {
       document.addEventListener("click", function убрать() {
         панель.remove();
@@ -833,7 +920,12 @@
     if (!поле) return;
     поле.addEventListener("input", function () {
       var своя = document.querySelector(".doc-tab.on .doc-tab-name");
-      if (своя) своя.textContent = поле.value.trim() || "без заголовка";
+      if (!своя) return;
+      // Пустой заголовок возвращает закладке имя из списка, то самое, что она покажет после
+      // перерисовки. Слово «без заголовка» на её месте держалось только до первой перерисовки,
+      // и имя менялось само собой.
+      var изСписка = docList.filter(function (x) { return x.id === state.docId; })[0];
+      своя.textContent = поле.value.trim() || (изСписка && (изСписка.name || изСписка.code)) || "без заголовка";
     });
   })();
 
@@ -970,7 +1062,12 @@
       closeModal();
       renderLibrary();   // закладки перерисовываются: своя остаётся выделенной
     });
-    c.appendChild(сохранить); c.appendChild(без); c.appendChild(отмена);
+    // Главное действие своей строкой во всю ширину, два запасных ниже в общем ряду с зазором.
+    // Раньше все три висели подряд прямо в окне: кнопки сходились вплотную и читались как одна.
+    c.appendChild(сохранить);
+    var ряд = el("div", "modal-actions modal-actions-left");
+    ряд.appendChild(без); ряд.appendChild(отмена);
+    c.appendChild(ряд);
     openModal(c);
   }
 
@@ -1100,7 +1197,10 @@
         if (r.color && /^#[0-9a-fA-F]{6}$/.test(r.color)) sty.push("color:" + r.color);
         var cls = r.size === "l" ? "rt-l" : r.size === "h" ? "rt-h" : "";
         if (r.mark && /^#[0-9a-fA-F]{6}$/.test(r.mark)) sty.push("background-color:" + r.mark);
-        if (r.sizePt >= 8 && r.sizePt <= 40) sty.push("font-size:" + r.sizePt + "pt");
+        // Свой размер в точках сильнее ступени: так же считают планшет, предпросмотр и PDF.
+        // Класс ступени рядом с ним не пишется, иначе правило оформления с !important перебило
+        // бы точки, и редактор один показывал бы не тот размер, что все остальные.
+        if (r.sizePt >= 8 && r.sizePt <= 40) { cls = ""; sty.push("font-size:" + r.sizePt + "pt"); }
         return br + "<span" + (cls ? ' class="' + cls + '"' : "") + (sty.length ? ' style="' + sty.join(";") + '"' : "") + ">" + escapeHtml(seg) + "</span>";
       }).join("");
     }).join("");
@@ -1128,6 +1228,7 @@
     function nl(f) { push("\n", f); atStart = true; }
     function derive(elm, f) {
       var g = { bold: f.bold, italic: f.italic, color: f.color, size: f.size, mark: f.mark, sizePt: f.sizePt }, t = elm.tagName;
+      var свои = 0;
       if (t === "B" || t === "STRONG") g.bold = true;
       if (t === "I" || t === "EM") g.italic = true;
       var st = elm.style;
@@ -1144,14 +1245,18 @@
         // размеров нужно сколько угодно.
         if (st.fontSize && /pt$/.test(st.fontSize)) {
           var pt = parseInt(st.fontSize, 10);
-          if (pt >= 8 && pt <= 40) g.sizePt = pt;
+          if (pt >= 8 && pt <= 40) свои = pt;
         }
       }
+      // Ступень и точки это два способа сказать про один и тот же размер, поэтому побеждает
+      // тот, что ближе к тексту: последнее, что оператор задал этому куску. Раньше точки
+      // побеждали всегда, и кнопка «A++» поверх куска с заданными точками не делала ничего.
       if (elm.classList) {
-        if (elm.classList.contains("rt-h")) g.size = "h";
-        else if (elm.classList.contains("rt-l")) g.size = "l";
-        else if (elm.classList.contains("rt-n")) g.size = null;
+        if (elm.classList.contains("rt-h")) { g.size = "h"; if (!свои) g.sizePt = 0; }
+        else if (elm.classList.contains("rt-l")) { g.size = "l"; if (!свои) g.sizePt = 0; }
+        else if (elm.classList.contains("rt-n")) { g.size = null; if (!свои) g.sizePt = 0; }
       }
+      if (свои) { g.sizePt = свои; g.size = null; }
       return g;
     }
     (function walk(node, f) {
@@ -1350,18 +1455,52 @@
   }
   var RT_SIZE_CLASSES = ["rt-n", "rt-l", "rt-h"];
 
+  /// Выделение, подрезанное по границам поля.
+  /// Тройной щелчок по заголовку и Ctrl+A уводят край выделения за пределы поля: браузер
+  /// прихватывает начало следующего узла. Такое выделение отбрасывалось целиком, и оформление
+  /// не применялось, хотя оператор выделил весь текст. Отсюда и жалоба «выделяю слово - работает,
+  /// выделяю заголовок целиком - число в поле меняется, а в редакторе ничего».
+  function диапазонВПоле(ed) {
+    var s = window.getSelection();
+    if (!ed || !s || !s.rangeCount) return null;
+    var r = s.getRangeAt(0);
+    var задевает;
+    try { задевает = r.intersectsNode(ed); } catch (e) { задевает = ed.contains(r.commonAncestorContainer); }
+    if (!задевает) return null;
+    var к = r.cloneRange();
+    if (!ed.contains(к.startContainer)) к.setStart(ed, 0);
+    if (!ed.contains(к.endContainer)) к.setEnd(ed, ed.childNodes.length);
+    return к.collapsed ? null : к;
+  }
+
+  /// Всё содержимое поля одним диапазоном.
+  function всёПоле(ed) {
+    if (!ed || !ed.childNodes.length) return null;
+    var r = document.createRange(); r.selectNodeContents(ed);
+    return r.collapsed ? null : r;
+  }
+
   /// Wrap the selection in a span the caller configures. A size or colour set on the new span has
   /// to win, so anything of the same kind already inside the selection is stripped first;
   /// otherwise an older nested span kept overriding the button that was just pressed.
   function wrapSelection(ed, applyFn, kind) {
     var s = window.getSelection();
-    if (!insideEditor(ed)) { ed.focus(); return; }
-    var range = s.getRangeAt(0); if (range.collapsed) return;
+    var range = диапазонВПоле(ed);
+    // Размер без выделения применяется ко всему полю: оператор ставит курсор в заголовок и
+    // задаёт размер, ожидая, что изменится заголовок. Цвет и маркер так не делают: ими
+    // помечают кусок, и покрасить заодно весь блок было бы неожиданно.
+    if (!range && (kind === "size" || kind === "sizept")) range = всёПоле(ed);
+    if (!range) { ed.focus(); return; }
     var span = document.createElement("span"); applyFn(span);
-    try { span.appendChild(range.extractContents()); range.insertNode(span); } catch (e) { return; }
-    if (kind === "size")
+    try { span.appendChild(range.extractContents()); range.insertNode(span); }
+    catch (e) { toast("Это выделение оформить не получилось, выделите текст внутри одного поля", true); return; }
+    // Ступень и точки это два способа задать один и тот же размер, поэтому при любой установке
+    // размера с вложенных кусков снимаются оба: иначе внутренняя обёртка остаётся сильнее, и
+    // нажатие не делает ровно ничего.
+    if (kind === "size" || kind === "sizept")
       span.querySelectorAll("span").forEach(function (inner) {
         RT_SIZE_CLASSES.forEach(function (c) { inner.classList.remove(c); });
+        inner.style.fontSize = "";
         if (!inner.className && !inner.getAttribute("style")) unwrap(inner);
       });
     if (kind === "color")
@@ -1374,11 +1513,6 @@
     if (kind === "mark")
       span.querySelectorAll("span").forEach(function (inner) {
         inner.style.backgroundColor = "";
-        if (!inner.className && !inner.getAttribute("style")) unwrap(inner);
-      });
-    if (kind === "sizept")
-      span.querySelectorAll("span").forEach(function (inner) {
-        inner.style.fontSize = "";
         if (!inner.className && !inner.getAttribute("style")) unwrap(inner);
       });
     s.removeAllRanges(); var nr = document.createRange(); nr.selectNodeContents(span); s.addRange(nr);
@@ -1470,6 +1604,78 @@
   }
   function alignOf(ed) { return ed ? (ed.getAttribute("data-align") || "") : ""; }
 
+  // Ступени размера в точках ровно те же, что печатает PdfService: 11/15/20 для текста и
+  // 14/18/24 для заголовка. Показывать экранный размер нельзя: на экране текст рисуется
+  // крупнее бумаги, и число не сошлось бы с PDF.
+  var РОЛИ_ЗАГОЛОВКА = { heading: 1, gtitle: 1, thanksheading: 1 };
+  function ступеньВТочках(ed, шаг) {
+    var заг = !!(ed && РОЛИ_ЗАГОЛОВКА[ed.getAttribute("data-role") || ""]);
+    if (шаг === "h") return заг ? 24 : 20;
+    if (шаг === "l") return заг ? 18 : 15;
+    return заг ? 14 : 11;
+  }
+
+  /// Размер куска текста в точках. Читается так же, как читает editorToRuns: ближний к тексту
+  /// кусок оформления сильнее дальнего, а на одном узле точки сильнее ступени.
+  function точкиУзла(ed, node) {
+    var n = node && node.nodeType === 3 ? node.parentNode : node;
+    while (n && n !== ed && n.nodeType === 1) {
+      var st = n.style;
+      if (st && st.fontSize && /pt$/.test(st.fontSize)) {
+        var pt = parseInt(st.fontSize, 10);
+        if (pt >= 8 && pt <= 40) return pt;
+      }
+      if (n.classList) {
+        if (n.classList.contains("rt-h")) return ступеньВТочках(ed, "h");
+        if (n.classList.contains("rt-l")) return ступеньВТочках(ed, "l");
+        if (n.classList.contains("rt-n")) return ступеньВТочках(ed, "");
+      }
+      n = n.parentNode;
+    }
+    return ступеньВТочках(ed, "");
+  }
+
+  /// Размер выделенного текста или того места, где стоит курсор. Ноль, если в выделении
+  /// сошлись разные размеры: показывать одно из них значило бы соврать.
+  function точкиВыделения(ed) {
+    if (!ed) return 0;
+    var s = window.getSelection();
+    var r = диапазонВПоле(ed), найдено = [];
+    if (!r) {
+      if (!s || !s.rangeCount) return 0;
+      var д = s.getRangeAt(0), n = д.startContainer;
+      if (!ed.contains(n)) return 0;
+      if (n.nodeType === 1) n = n.childNodes[Math.max(0, д.startOffset - 1)] || n.childNodes[д.startOffset] || n;
+      найдено.push(точкиУзла(ed, n));
+    } else {
+      var w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT, null), t;
+      while ((t = w.nextNode())) {
+        if (!t.nodeValue || !t.nodeValue.trim()) continue;
+        var нр = document.createRange(); нр.selectNode(t);
+        // Настоящее пересечение, а не касание краями: иначе соседний кусок другого размера
+        // считался бы выделенным и поле молча пустело.
+        if (r.compareBoundaryPoints(Range.START_TO_END, нр) <= 0) continue;
+        if (r.compareBoundaryPoints(Range.END_TO_START, нр) >= 0) continue;
+        найдено.push(точкиУзла(ed, t));
+      }
+      if (!найдено.length) найдено.push(ступеньВТочках(ed, ""));
+    }
+    for (var i = 1; i < найдено.length; i++) if (найдено[i] !== найдено[0]) return 0;
+    return найдено[0] || 0;
+  }
+
+  /// Показать в панели размер того текста, где сейчас стоит курсор.
+  function обновитьПолеРазмера() {
+    if (!rtBar) return;
+    var поле = rtBar.querySelector(".rt-pt input");
+    // Пока в поле вводят, не мешаем. И пока в нём стоит набранное, но ещё не применённое
+    // число, тоже: браузер шлёт blur раньше change, и обновление успевало затереть набранное
+    // прежним размером - применялся он, а не то, что задал оператор.
+    if (!поле || поле.__своё || document.activeElement === поле) return;
+    var т = rtTarget ? точкиВыделения(rtTarget) : 0;
+    поле.value = т ? String(т) : "";
+  }
+
   function rtCommand(fn) {
     return function () { if (rtTarget) fn(rtTarget); };
   }
@@ -1482,9 +1688,9 @@
     bar.appendChild(tbBtn("К", "Курсив", rtCommand(function (ed) {
       if (insideEditor(ed)) { document.execCommand("italic", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); }
     }), true));
-    bar.appendChild(tbBtn("A", "Обычный размер", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-n"; }, "size"); })));
-    bar.appendChild(tbBtn("A+", "Крупный", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-l"; }, "size"); })));
-    bar.appendChild(tbBtn("A++", "Огромный", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-h"; }, "size"); })));
+    bar.appendChild(tbBtn("A", "Обычный размер: выделенному куску или всему полю, если ничего не выделено", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-n"; }, "size"); })));
+    bar.appendChild(tbBtn("A+", "Крупный: выделенному куску или всему полю, если ничего не выделено", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-l"; }, "size"); })));
+    bar.appendChild(tbBtn("A++", "Огромный: выделенному куску или всему полю, если ничего не выделено", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-h"; }, "size"); })));
     RT_COLORS.forEach(function (c) {
       var sw = el("button", "rt-swatch"); sw.type = "button"; sw.style.background = c; sw.title = "Цвет " + c;
       sw.addEventListener("mousedown", function (e) { e.preventDefault(); });
@@ -1544,26 +1750,38 @@
 
     var ptWrap = el("span", "rt-pt");
     var pt = el("input"); pt.type = "number"; pt.min = "8"; pt.max = "40"; pt.placeholder = "пт";
-    pt.title = "Свой размер в точках: выделите текст и введите число";
+    pt.title = "Размер в точках. Показывает размер текста под курсором. Введите своё число: "
+      + "выделенному куску или всему полю, если ничего не выделено";
     var ptRange = null, ptEd = null;
     function запомнитьВыделение() {
-      var s = window.getSelection();
-      if (!rtTarget || !s.rangeCount) return;
-      var r = s.getRangeAt(0);
-      if (r.collapsed || !rtTarget.contains(r.commonAncestorContainer)) return;
-      ptRange = r.cloneRange(); ptEd = rtTarget;
+      if (!rtTarget) return;
+      // Курсор без выделения значит «этот текст целиком»: оператор ставит курсор в заголовок и
+      // задаёт размер, ожидая, что изменится заголовок.
+      var r = диапазонВПоле(rtTarget) || всёПоле(rtTarget);
+      if (!r) return;
+      ptRange = r; ptEd = rtTarget;
     }
     // И мышью, и с клавиатуры: до поля можно дойти табуляцией.
     pt.addEventListener("mousedown", запомнитьВыделение);
     pt.addEventListener("focus", запомнитьВыделение);
+    pt.addEventListener("input", function () { pt.__своё = true; });
+    // Уход из поля: набранное либо уже применилось, либо оператор передумал. И то, и другое
+    // значит, что поле снова показывает размер под курсором.
+    pt.addEventListener("blur", function () {
+      setTimeout(function () { pt.__своё = false; обновитьПолеРазмера(); }, 0);
+    });
     pt.addEventListener("change", function () {
+      if (!ptRange || !ptEd) запомнитьВыделение();
       if (!ptRange || !ptEd) return;
       var s = window.getSelection();
       s.removeAllRanges(); s.addRange(ptRange);
       var n = parseInt(pt.value, 10);
       if (n >= 8 && n <= 40) wrapSelection(ptEd, function (sp) { sp.style.fontSize = n + "pt"; }, "sizept");
       else wrapSelection(ptEd, function (sp) { sp.style.fontSize = ""; }, "sizept");
-      ptRange = null;
+      // Выделение остаётся на том же куске: второе число подряд применялось в пустоту, потому
+      // что диапазон обнулялся после первого применения, а нового фокуса в поле уже не было.
+      ptRange = диапазонВПоле(ptEd);
+      pt.__своё = false;
     });
     ptWrap.appendChild(pt);
     bar.appendChild(ptWrap);
@@ -1623,9 +1841,10 @@
     });
     // Общая блокировка идёт первой, своя после неё: раньше было наоборот, и кнопки списков
     // выглядели рабочими там, где список поставить некуда, например в заголовке страницы.
-    Array.prototype.forEach.call(rtBar.querySelectorAll("button, select"), function (c) {
+    Array.prototype.forEach.call(rtBar.querySelectorAll("button, select, input"), function (c) {
       c.disabled = !rtTarget;
     });
+    обновитьПолеРазмера();
     rtBar.querySelectorAll("[data-list-btn]").forEach(function (b) {
       b.disabled = !селСп;
       b.classList.toggle("on", !!селСп && селСп.value === b.getAttribute("data-list-btn"));
@@ -1678,6 +1897,12 @@
     if (ed) { showRtBar(ed); return; }
     if (rtBar && rtBar.contains(e.target)) return;
     hideRtBar();
+  });
+
+  // Размер под курсором показывается сразу, как курсор переехал. Панель до этого обновлялась
+  // только при смене поля, и число в ней относилось к прошлому месту.
+  document.addEventListener("selectionchange", function () {
+    if (rtBar && rtTarget) обновитьПолеРазмера();
   });
 
   // Высота шапки нужна панели, чтобы прилипать точно под ней. При узком окне вкладки
@@ -2330,12 +2555,20 @@
     var шапкаЕсть = !t || t.headerRow !== false;
     var ширины = (t && t.widths) ? t.widths.slice() : [];
 
+    // Что делает отметка, видно из самой надписи, а не из подсказки под курсором. Слово «шапка»
+    // ничего не объясняло: непонятно было ни что с этой строкой станет, ни где это будет видно.
+    var шапкаСтрока = el("div", "table-head-row");
     var шапкаLabel = el("label", "check-inline");
     var шапкаCb = el("input"); шапкаCb.type = "checkbox"; шапкаCb.checked = шапкаЕсть;
     шапкаCb.setAttribute("data-role", "tblhead");
     шапкаLabel.appendChild(шапкаCb);
-    шапкаLabel.appendChild(document.createTextNode(" Первая строка это шапка"));
-    wrap.appendChild(шапкаLabel);
+    шапкаLabel.appendChild(document.createTextNode(" Первая строка это заголовки столбцов"));
+    шапкаСтрока.appendChild(шапкаLabel);
+    шапкаСтрока.appendChild(помощь(
+      "Первая строка таблицы будет напечатана как строка заголовков: полужирным шрифтом и на "
+      + "серой плашке, одинаково на планшете и в PDF. В самом редакторе она тоже видна серой. "
+      + "Снимите отметку, если первая строка это обычные данные."));
+    wrap.appendChild(шапкаСтрока);
 
     var холст = el("div", "table-grid");
     wrap.appendChild(холст);
@@ -2360,26 +2593,51 @@
       var cols = столбцов();
       холст.style.gridTemplateColumns = "repeat(" + cols + ", 1fr) auto";
 
-      // Строка ширин: пусто означает поровну.
+      // Строка ширин. Подпись видна всегда: без неё ряд полей с заглушкой «%» читался как
+      // первая строка таблицы, в которой почему-то стоят проценты. Занимает всю ширину сетки,
+      // поэтому стоит над полями ширин, а не сбоку от них.
+      var подписьШирин = el("div", "table-width-cap");
+      подписьШирин.appendChild(el("span", "table-width-cap-name", "Ширина столбцов, проценты"));
+      подписьШирин.appendChild(el("span", "table-width-hint",
+        "это не строка таблицы. Ширины действуют, только когда заданы у всех столбцов сразу; "
+        + "если хоть одно поле пустое, столбцы будут поровну"));
+      холст.appendChild(подписьШирин);
+
       for (var c = 0; c < cols; c++) {
         var w = el("input", "table-width"); w.type = "number"; w.min = "5"; w.max = "90";
-        w.placeholder = "%"; w.setAttribute("data-width", String(c));
+        w.placeholder = "поровну"; w.setAttribute("data-width", String(c));
         if (ширины[c] > 0) w.value = ширины[c];
-        w.title = "Ширина столбца в процентах. Пусто у всех означает поровну.";
+        w.title = "Ширина столбца " + (c + 1) + " в процентах от ширины таблицы, от 5 до 90. "
+          + "Пусто хотя бы у одного столбца означает, что все столбцы будут поровну.";
         холст.appendChild(w);
       }
       холст.appendChild(el("span"));
+
+      // Единственный столбец убрать нельзя: кнопка гаснет, а не молчит в ответ на нажатие.
+      // Присваивание безопасно и до первой отрисовки: переменная объявлена через var и на
+      // момент первого вызова уже получила значение.
+      if (минусСтолбец) минусСтолбец.disabled = cols <= 1;
 
       данные.forEach(function (row, ri) {
         row.forEach(function (cell, ci) {
           var i = el("input", "table-cell"); i.type = "text";
           i.value = cell == null ? "" : cell;
           i.setAttribute("data-cell", ri + ":" + ci);
+          i.placeholder = (шапкаCb.checked && ri === 0)
+            ? "заголовок столбца " + (ci + 1)
+            : "строка " + (ri + 1) + ", столбец " + (ci + 1);
           if (шапкаCb.checked && ri === 0) i.classList.add("table-cell-head");
           холст.appendChild(i);
         });
         var del = el("button", "btn btn-danger btn-sm", "×"); del.type = "button";
-        del.title = "Убрать строку";
+        // Номер строки в подсказке: кнопок в столбик много, и по одному крестику не видно, какую
+        // именно строку он уберёт. Единственную строку убрать нельзя, и кнопка это показывает
+        // видом, а не молчаливым бездействием в ответ на нажатие.
+        var шапкаЗдесь = шапкаCb.checked && ri === 0;
+        del.title = данные.length <= 1
+          ? "Это единственная строка таблицы, убрать её нельзя"
+          : "Убрать строку " + (ri + 1) + (шапкаЗдесь ? " (строку заголовков)" : "");
+        del.disabled = данные.length <= 1;
         del.addEventListener("click", function () {
           собрать();
           if (данные.length <= 1) return;
@@ -2389,21 +2647,27 @@
       });
     }
 
+    // Надписи кнопок говорят, куда именно добавится и что именно уберётся: строка встаёт снизу,
+    // столбец справа, а убирается всегда последний столбец. Прежде из надписи «Убрать столбец»
+    // нельзя было понять, какой из них исчезнет.
     var кнопки = el("div", "table-actions");
-    var плюсСтрока = iconBtn("plus", "Строка", "btn-ghost btn-sm");
+    var плюсСтрока = iconBtn("plus", "Строка снизу", "btn-ghost btn-sm");
+    плюсСтрока.title = "Добавить пустую строку в конец таблицы";
     плюсСтрока.addEventListener("click", function () {
       собрать();
       данные.push(new Array(столбцов()).fill(""));
       нарисовать(); markDirty();
     });
-    var плюсСтолбец = iconBtn("plus", "Столбец", "btn-ghost btn-sm");
+    var плюсСтолбец = iconBtn("plus", "Столбец справа", "btn-ghost btn-sm");
+    плюсСтолбец.title = "Добавить пустой столбец в конец таблицы. Столбцов может быть не больше восьми";
     плюсСтолбец.addEventListener("click", function () {
       собрать();
       if (столбцов() >= 8) { toast("Больше восьми столбцов не читается ни на планшете, ни на бумаге", true); return; }
       данные.forEach(function (r) { r.push(""); });
       нарисовать(); markDirty();
     });
-    var минусСтолбец = iconBtn("trash", "Убрать столбец", "btn-ghost btn-sm");
+    var минусСтолбец = iconBtn("trash", "Убрать последний столбец", "btn-ghost btn-sm");
+    минусСтолбец.title = "Убрать самый правый столбец вместе со всем, что в нём набрано";
     минусСтолбец.addEventListener("click", function () {
       собрать();
       if (столбцов() <= 1) return;
@@ -2487,7 +2751,11 @@
 
     var pick = el("button", "btn btn-ghost btn-sm", "Выбрать картинку"); pick.type = "button";
     pick.addEventListener("click", function () {
-      openImagePicker(function (url) { img.src = url; img.style.display = ""; bc.setAttribute("data-imgurl", url); });
+      // Выбор идёт в модальном окне, вне панели документа, поэтому общий слушатель правок его
+      // не видит: без этой пометки оператор ставил печать и уходил, теряя работу без вопроса.
+      openImagePicker(function (url) {
+        img.src = url; img.style.display = ""; bc.setAttribute("data-imgurl", url); markDirty();
+      });
     });
     var wLabel = el("label", "field-sm", "Ширина, %");
     var wRange = el("input"); wRange.type = "range"; wRange.min = "10"; wRange.max = "100"; wRange.step = "5";
@@ -2655,9 +2923,13 @@
       btnImg.classList.toggle("mode-on", m === "image");
       btnTable.classList.toggle("mode-on", m === "table");
     }
-    btnText.addEventListener("click", function () { setMode("text"); });
-    btnImg.addEventListener("click", function () { setMode("image"); });
-    btnTable.addEventListener("click", function () { setMode("table"); });
+    // Смена вида блока это правка документа, и она бывает разрушительной: набранный текст
+    // в режиме картинки не читается и при сохранении пропадёт. Пометка ставится в самих
+    // обработчиках, а не внутри setMode: setMode зовётся ещё и при построении карточки, и
+    // тогда только что открытый документ помечался бы правленым.
+    btnText.addEventListener("click", function () { setMode("text"); markDirty(); });
+    btnImg.addEventListener("click", function () { setMode("image"); markDirty(); });
+    btnTable.addEventListener("click", function () { setMode("table"); markDirty(); });
     setMode(isTable ? "table" : isImage ? "image" : "text");
 
     var подписьУсл = el("div", "sub-label", "Условие показа блока");
@@ -3140,6 +3412,7 @@
       document.removeEventListener("mousemove", onMove, true);
       document.removeEventListener("mouseup", onUp, true);
       document.body.classList.remove("dragging-now");
+      document.documentElement.style.overflowAnchor = "";
       stopEdge();
       if (!item) return;
       item.classList.remove("dragging");
@@ -3155,20 +3428,36 @@
         // положили, иначе в одном из них полосы окажутся подряд.
         normalizeBars(list);
         if (landed && landed !== list && landed.getAttribute("data-role") === "itemlist") normalizeBars(landed);
+        // Пункт могли унести на другую страницу: признак «в PDF» пересчитывается у обеих, иначе
+        // страница, с которой ушла последняя отметка, так и осталась бы запертой в PDF, а та,
+        // куда её принесли, показывала бы снятую галочку, вопреки тому, что напечатает сервер.
+        обновитьПризнакPdf(list.closest('[data-role="pagecard"]'));
+        if (landed && landed !== list) обновитьПризнакPdf(landed.closest('[data-role="pagecard"]'));
       }
       updatePlaceholders();
     }
 
     list.addEventListener("mousedown", function (e) {
       if (e.button !== 0) return;
+      // Один жест это одно перетаскивание. Список элементов страницы лежит внутри списка
+      // страниц, событие всплывает из первого во второй, и оба брались за дело разом: оператор
+      // тащил пункт, а вместе с ним ехала и вся его страница. Кто ближе к ручке, тот и берёт.
+      if (e.__перетаскиваниеЗанято) return;
       var handle = e.target.closest && e.target.closest(".drag-handle");
       if (!handle || !list.contains(handle)) return;
       var target = handle.closest(itemSelector);
       // Ручка вложенного списка не должна тащить внешний элемент.
       if (!target || target.parentNode !== list) return;
+      e.__перетаскиваниеЗанято = true;
       item = target; moved = false;
       item.classList.add("dragging");
       document.body.classList.add("dragging-now");
+      // Пока элемент тащат, страница не должна подкручиваться сама. Браузер держит на месте
+      // видимое содержимое (scroll anchoring), а перетаскивание меняет высоту как раз выше окна:
+      // страница уезжала под неподвижным курсором, и элемент ложился не туда, куда оператор
+      // целился, а на соседа. Своё правило оформления для этого не нужно, свойство ставится на
+      // время жеста и снимается на отпускании.
+      document.documentElement.style.overflowAnchor = "none";
       document.addEventListener("mousemove", onMove, true);
       document.addEventListener("mouseup", onUp, true);
       // Иначе браузер начнёт выделять текст соседних блоков вместо перетаскивания.
@@ -3182,9 +3471,45 @@
   // две соседние полосы оказываются подряд и выглядят как ошибка. Пересобираем их сразу.
   function removeItem(node) {
     var list = node.closest('[data-role="itemlist"]');
+    // Карточку страницы запоминаем до удаления: у вынутого узла соседей уже нет.
+    var card = node.closest('[data-role="pagecard"]');
     node.remove();
     if (list) normalizeBars(list);
+    обновитьПризнакPdf(card);
     updatePlaceholders();
+  }
+
+  // Подсказки к признаку «в PDF». Их две, и они меняются местами прямо во время работы, поэтому
+  // текст лежит здесь, а не только там, где его однажды поставили.
+  var ПОДСКАЗКА_PDF_ЗАПЕРТ = "На этой странице клиент что-то подтверждает, поэтому она обязана быть в PDF: " +
+    "иначе в бумаге окажется отметка без того, под чем она стоит.";
+  var ПОДСКАЗКА_PDF_СВОБОДЕН = "Снимите, если эта страница нужна только на экране: вступление, пояснение, " +
+    "заставка. В записи она останется целиком, в PDF не попадёт.";
+
+  /// Признак «в PDF» на карточке страницы, посчитанный по тому, что на странице стоит СЕЙЧАС.
+  /// Раньше он считался только при полной перерисовке списка страниц, а вставка, удаление и
+  /// перетаскивание список не перерисовывают, и галочка врала. На странице, куда добавили
+  /// отметку, она оставалась снятой и доступной, хотя сервер такую страницу печатает всегда
+  /// (DocumentTemplating.NormalizeScreens: HasInteraction значит InPdf = true). После удаления
+  /// последнего пункта она, наоборот, оставалась стоящей и выключенной, и вернуть страницу
+  /// «только на экран» было уже нельзя.
+  function обновитьПризнакPdf(card) {
+    if (!card) return;
+    var cb = card.querySelector('[data-role="pageinpdf"]');
+    if (!cb) return;
+    var метка = cb.closest(".pdf-flag");
+    var значок = метка ? метка.querySelector(".help-dot") : null;
+    // Блок текста клиента ни о чём не спрашивает, всё остальное спрашивает. Считаем по разметке,
+    // а не по state.doc: между сборами документа страница меняется прямо в списке. Собственное
+    // поле экрана подписи или сканирования лежит вне списка элементов, но в карточке, и тоже
+    // считается.
+    var взаимодействие = card.querySelectorAll('.page-item:not([data-kind="block"])').length > 0;
+    cb.disabled = взаимодействие;
+    // Решение оператора возвращается, как только держать галочку больше нечему.
+    cb.checked = взаимодействие || cb.getAttribute("data-own") !== "0";
+    var текст = взаимодействие ? ПОДСКАЗКА_PDF_ЗАПЕРТ : ПОДСКАЗКА_PDF_СВОБОДЕН;
+    if (метка) метка.title = текст;
+    if (значок) значок.title = текст;
   }
 
   function normalizeBars(list) {
@@ -3195,8 +3520,8 @@
     var kind = list.getAttribute("data-pagekind") || "";
     Array.prototype.slice.call(list.querySelectorAll(":scope > .insert-bar")).forEach(function (b) { b.remove(); });
     var nodes = Array.prototype.slice.call(list.children).filter(function (n) { return n.classList.contains("page-item"); });
-    list.insertBefore(insertBar(list, null, kind), list.firstChild);
-    nodes.forEach(function (n) { list.insertBefore(insertBar(list, n, kind), n.nextSibling); });
+    list.insertBefore(insertBar(list, kind), list.firstChild);
+    nodes.forEach(function (n) { list.insertBefore(insertBar(list, kind), n.nextSibling); });
   }
 
   // Прокрутка к странице с поправкой на закреплённую шапку. Обычный scrollIntoView ставит
@@ -3219,18 +3544,25 @@
   // Полоса вставки между элементами страницы. Нужна потому, что дотащить новый пункт из конца
   // длинной страницы на нужное место мышью тяжело: проще поставить его сразу туда, где он нужен.
   // Полоса видна всегда, а не только при наведении: иначе о ней просто не догадаться.
-  function insertBar(list, afterNode, pageKind) {
+  function insertBar(list, pageKind) {
     var bar = el("div", "insert-bar");
     var chip = el("button", "insert-chip"); chip.type = "button";
     chip.appendChild(icon("plus"));
     chip.appendChild(el("span", null, "вставить сюда"));
     bar.appendChild(chip);
 
+    // Новый элемент встаёт сразу ЗА нажатой полосой, и своя полоса появляется уже за ним. Раньше
+    // он вставлялся ПЕРЕД полосой: нажатая полоса уезжала за новый элемент, между ним и прежним
+    // соседом не оставалось ничего, а в конце списка две полосы вставали подряд. С каждым
+    // добавлением разъезд накапливался, и полоса переставала показывать место, куда попадёт
+    // элемент, то есть переставала делать то единственное, ради чего она есть.
     function place(node) {
-      if (afterNode && afterNode.parentNode === list) list.insertBefore(node, bar);
-      else list.insertBefore(node, list.firstChild === bar ? bar.nextSibling : bar);
-      list.insertBefore(insertBar(list, node, pageKind), node.nextSibling);
+      // Полосу могли вынуть из списка, пока его пересобирали. Тогда элемент идёт в конец: это
+      // честнее, чем отказ вставки с ошибкой прямо в руках у оператора.
+      list.insertBefore(node, bar.parentNode === list ? bar.nextSibling : null);
+      list.insertBefore(insertBar(list, pageKind), node.nextSibling);
       collapse();
+      обновитьПризнакPdf(list.closest('[data-role="pagecard"]'));
       updatePlaceholders();
     }
 
@@ -3447,7 +3779,8 @@
     }
     if (c.op === "annivwithin") return true;   // срок считается от сегодняшнего дня службы
     switch (c.op) {
-      case "ne": return val !== target;
+      // Как на планшете и на сервере: «не равно» не выполняется, когда значения нет вовсе.
+      case "ne": return val.length > 0 && val !== target;
       case "empty": return val.length === 0;
       case "notempty": return val.length > 0;
       case "in": return target.split(",").map(function (x) { return x.trim(); })
@@ -3512,6 +3845,34 @@
     });
   }
 
+  /// Имена, для которых панель проверки условий спрашивает значения: теги документа плюс имена
+  /// чекбоксов и групп, потому что условие может смотреть и на них. Документ перечитывается с
+  /// экрана: тег, дописанный только что, живёт пока в разметке, а не в state.doc.
+  function именаПрожектора() {
+    collectDoc();
+    var имена = previewFields();
+    var dk = docKeys();
+    dk.checks.forEach(function (k) { if (имена.indexOf(k) < 0) имена.push(k); });
+    Object.keys(dk.groups).forEach(function (k) { if (имена.indexOf(k) < 0) имена.push(k); });
+    return { имена: имена, ключи: dk };
+  }
+
+  /// Пересобрать список полей панели, если состав имён изменился. Раньше он не пересобирался
+  /// никогда: тег, дописанный при включённой панели, в ней не появлялся, а на другом документе
+  /// панель показывала теги прошлого вместе с его значениями. Пересборка пропускается, пока
+  /// оператор набирает прямо в панели: поле под курсором исчезло бы вместе с набранным.
+  function обновитьПоляПрожектора() {
+    if (!прожектор.вкл) return;
+    var box = document.querySelector("#spotlightHost .spotlight");
+    if (!box || !box.__refresh) return;
+    var где = document.activeElement;
+    if (где && box.contains(где)) return;
+    var было = Array.prototype.slice.call(box.querySelectorAll(".spotlight-fields label.field-sm"))
+      .map(function (l) { return l.childNodes[0].nodeValue; }).join("\n");
+    if (именаПрожектора().имена.join("\n") === было) return;
+    box.__refresh();
+  }
+
   function прожекторПанель() {
     var box = el("div", "spotlight");
     var шапка = el("div", "spotlight-head");
@@ -3541,12 +3902,8 @@
 
     function нарисоватьПоля() {
       поля.innerHTML = "";
-      collectDoc();
-      var имена = previewFields();
-      var dk = docKeys();
-      // Чекбоксы и группы это тоже имена: условие может смотреть и на них.
-      dk.checks.forEach(function (k) { if (имена.indexOf(k) < 0) имена.push(k); });
-      Object.keys(dk.groups).forEach(function (k) { if (имена.indexOf(k) < 0) имена.push(k); });
+      var состав = именаПрожектора();
+      var имена = состав.имена, dk = состав.ключи;
       if (!имена.length) {
         поля.appendChild(el("div", "sig-meta", "В документе нет ни одного условия и ни одного тега."));
         return;
@@ -3680,7 +4037,9 @@
         collapsedPages = сдвинутые;
         renderPages(); updatePlaceholders();
       });
-      title.appendChild(delPage); card.appendChild(title);
+      // Кнопка удаления стоит в том же ряду, что пометки: так у всего ряда одна высота и один
+      // отступ, а не у каждого свой. Раньше она висела отдельно, и ряд выглядел прыгающим.
+      флаги.appendChild(delPage); card.appendChild(title);
 
       var body = el("div", "page-body");
       card.appendChild(body);
@@ -3730,8 +4089,8 @@
       // Вид страницы запоминается на списке: полосы вставки пересобираются и при удалении, и
       // при перетаскивании, а вида страницы там взять больше неоткуда.
       items.setAttribute("data-pagekind", kind || "");
-      items.appendChild(insertBar(items, null, kind));
-      built.forEach(function (node) { items.appendChild(node); items.appendChild(insertBar(items, node, kind)); });
+      items.appendChild(insertBar(items, kind));
+      built.forEach(function (node) { items.appendChild(node); items.appendChild(insertBar(items, kind)); });
       makeSortable(items, ".page-item");
       body.appendChild(items);
 
@@ -3748,26 +4107,23 @@
       // Признак «в PDF». Страницу, на которой клиент что-то подтверждает, исключить нельзя:
       // в бумаге оказалась бы отметка без того, под чем она стоит. Переключатель тогда не
       // прячется, а гаснет с объяснением: спрятанный оставил бы оператора гадать, куда он делся.
-      var взаимодействие = (page.checkboxes || []).length || (page.groups || []).length ||
-        (page.signatures || []).length || (page.scans || []).length || (page.inputs || []).length;
-      var вPdf = el("label", "check-inline pdf-flag");
+      var вPdf = el("label", "check-inline pdf-flag head-flag");
       var вPdfCb = el("input"); вPdfCb.type = "checkbox";
-      вPdfCb.checked = page.inPdf !== false || !!взаимодействие;
       вPdfCb.setAttribute("data-role", "pageinpdf");
-      if (взаимодействие) {
-        вPdfCb.checked = true;
-        вPdfCb.disabled = true;
-        вPdf.title = "На этой странице клиент что-то подтверждает, поэтому она обязана быть в PDF: " +
-          "иначе в бумаге окажется отметка без того, под чем она стоит.";
-      } else {
-        вPdf.title = "Снимите, если эта страница нужна только на экране: вступление, пояснение, заставка. " +
-          "В записи она останется целиком, в PDF не попадёт.";
-      }
-      вPdf.classList.add("head-flag");
+      // Решение оператора хранится отдельно от того, что показано: взаимодействие поднимает
+      // галочку насильно, и когда взаимодействие уберут со страницы, вернуть надо именно его
+      // выбор, а не то, что галочку когда-то подняло.
+      вPdfCb.setAttribute("data-own", page.inPdf !== false ? "1" : "0");
+      вPdfCb.addEventListener("change", function () {
+        if (!вPdfCb.disabled) вPdfCb.setAttribute("data-own", вPdfCb.checked ? "1" : "0");
+      });
       вPdf.appendChild(вPdfCb);
       вPdf.appendChild(document.createTextNode(" в PDF"));
-      вPdf.appendChild(помощь(вPdf.title || "Печатать эту страницу в PDF."));
+      вPdf.appendChild(помощь(ПОДСКАЗКА_PDF_СВОБОДЕН));
       флаги.appendChild(вPdf);
+      // Состояние галочки и её подсказку ставит тот же счёт, что работает при вставке, удалении
+      // и перетаскивании: два разных счёта одного и того же однажды разошлись бы.
+      обновитьПризнакPdf(card);
 
       if (!kind) {
         var dyn = el("label", "check-inline dyn-anchor head-flag");
@@ -3782,9 +4138,10 @@
         var всё = el("label", "check-inline dyn-anchor head-flag");
         var всёCb = el("input"); всёCb.type = "checkbox"; всёCb.checked = !!page.showCheckAll;
         всёCb.setAttribute("data-role", "checkall");
-        всё.title = "Кнопка «отметить всё» над пунктами страницы. Нужна, когда пунктов от трёх.";
+        всё.title = "Показать клиенту кнопку «Отметить всё» над пунктами этой страницы: одним "
+          + "нажатием он отметит их все. Имеет смысл, когда пунктов от трёх.";
         всё.appendChild(всёCb);
-        всё.appendChild(document.createTextNode(" отметить всё"));
+        всё.appendChild(document.createTextNode(" кнопка «Отметить всё»"));
         всё.appendChild(помощь(
           "Кнопка над пунктами страницы, которая отмечает их разом. Имеет смысл от трёх пунктов: "
           + "на двух она только мешает."));
@@ -3872,7 +4229,9 @@
     // «Спасибо» уже стоят в разметке. Раньше это делалось сразу после списка страниц, а
     // прожектор внутри себя перечитывает документ с экрана: списков блоков подписи и прощания
     // в разметке ещё не было, и они вычитывались пустыми, то есть стирались из документа.
-    if (прожектор.вкл) прожекторПрименить();
+    // Здесь же пересобирается и состав полей панели: сюда приходит и открытие другого
+    // документа, а его теги не имеют ничего общего с тегами прошлого.
+    if (прожектор.вкл) { обновитьПоляПрожектора(); прожекторПрименить(); }
   }
   // Имя для API у группы и у её вариантов обязательно: без него выбор неадресуем извне, и сервер
   // такой вариант не сохранит. Раньше оператор видел на экране два варианта, а проверка говорила,
@@ -4591,7 +4950,12 @@
     // С задержкой, потому что правка идёт по букве, а пересчёт трогает весь список страниц.
     if (прожектор.вкл) {
       clearTimeout(прожекторТаймер);
-      прожекторТаймер = setTimeout(прожекторПрименить, 400);
+      прожекторТаймер = setTimeout(function () {
+        // Сначала состав полей, потом подсветка: тег, дописанный только что, обязан появиться
+        // в панели, иначе оператор задаёт значения не для всего документа, сам того не зная.
+        обновитьПоляПрожектора();
+        прожекторПрименить();
+      }, 400);
     }
   }
   var прожекторТаймер = null;
@@ -4641,6 +5005,16 @@
     return api(путь, { method: "PUT", headers: headers, body: JSON.stringify(state.doc) }).then(function (r) {
       state.docRev = r.headers.get("X-Doc-Rev") || state.docRev;
       dirty = false; syncDirty(); dropDraft();
+      // Имя документа в списке идёт от его заголовка, и сервер обновил его при сохранении.
+      // Свой список надо поправить здесь же: иначе в нём остаётся прежнее имя, закладка берёт
+      // его при переходе на другой документ, и выглядит это как самовольное переименование.
+      docList.forEach(function (d) {
+        if (d.id !== state.docId) return;
+        var заг = String((state.doc && state.doc.title) || "").trim();
+        if (заг) d.name = заг;                       // пустой заголовок имя не затирает, как и на сервере
+        d.kind = (state.doc && state.doc.kind) || d.kind;
+      });
+      renderLibrary();
       // Сервер рассказывает, что он выбросил при разборе: вложенные условия, части сверх
       // предела. Это меняет смысл документа, и раньше об этом не говорилось вовсе.
       return r.json().catch(function () { return {}; }).then(function (j) {
@@ -5148,30 +5522,24 @@
     }
   }
 
-  // Что подставить в поле предпросмотра: сперва то, что оператор задал в проверке условий,
-  // и только потом вымышленный пример. Он эти значения уже набрал, и набирать их второй раз
-  // ради того же самого документа незачем.
-  function изПроверкиИлиПример(имя) {
-    var v = прожектор.значения[имя];
-    v = v == null ? "" : String(v).trim();
-    return v.length ? v : previewDefault(имя);
-  }
-
   function openPreviewSetup(placeholders) {
     var c = el("div", "preview-setup");
     c.appendChild(el("h3", null, "Предпросмотр документа"));
-    var изПроверки = placeholders.filter(function (k) {
-      var v = прожектор.значения[k];
-      return v != null && String(v).trim().length;
-    });
-    if (изПроверки.length)
-      c.appendChild(el("p", "sig-meta pv-from-spot",
-        "Значения взяты из проверки условий над редактором: " + изПроверки.join(", ") + ". Их можно поправить здесь."));
+    // Надпись собирается по факту подстановки, а не по факту непустого значения в панели:
+    // раньше она перечисляла и те теги, чьё значение предпросмотр подменил на своё, и уверенно
+    // выдавала подменённое за набранное оператором.
+    var откуда = el("p", "sig-meta pv-from-spot");
+    c.appendChild(откуда);
     c.appendChild(el("p", "sig-meta", "Укажите тестовые значения тегов. Документ будет показан так, как его увидит клиент на планшете, включая условия показа блоков и страниц. На планшеты ничего не отправляется."));
 
     var inputs = {};
+    var изПанели = [];
     if (!placeholders.length) c.appendChild(el("p", "sig-meta", "В шаблоне нет тегов - будет показан документ как есть."));
     placeholders.forEach(function (k) {
+      // Сперва то, что оператор задал в проверке условий, и только потом вымышленный пример:
+      // эти значения он уже набрал, и набирать их второй раз ради того же документа незачем.
+      var своё = подобратьЗначение(k, прожектор.значения[k]);
+      if (своё) изПанели.push(k);
       // A tag with a fixed set of values gets a dropdown here too, so a preview cannot be run
       // against a value the real system would never send.
       var known = fieldValues(k);
@@ -5179,15 +5547,21 @@
         var wrap = el("label", "field", k);
         var sel = el("select");
         known.forEach(function (v) { sel.appendChild(new Option(valueLabel(k, v), v)); });
-        var хочу = изПроверкиИлиПример(k);
-        sel.value = known.indexOf(хочу) >= 0 ? хочу : known[0];
+        // Не подошло ни набранное, ни пример: список остаётся на своём первом значении, но в
+        // надписи такой тег не назван, потому что оператор его не задавал.
+        var хочу = своё || подобратьЗначение(k, previewDefault(k));
+        if (хочу) sel.value = хочу;
         wrap.appendChild(sel);
         c.appendChild(wrap); inputs[k] = sel;
       } else {
-        var f = labeledInput(k, изПроверкиИлиПример(k));
+        var f = labeledInput(k, своё || previewDefault(k));
         c.appendChild(f.wrap); inputs[k] = f.input;
       }
     });
+    if (изПанели.length)
+      откуда.textContent = "Значения взяты из проверки условий над редактором: "
+        + изПанели.join(", ") + ". Их можно поправить здесь.";
+    else откуда.remove();
 
     // Внешняя система задаёт и состояние именованных чекбоксов, и выбор в двойных зависимых
     // чекбоксах. Раньше проверить это в предпросмотре было нельзя, хотя по API оно приходит
@@ -5303,6 +5677,23 @@
     var lv = String(value || "").toLowerCase();
     for (var v in map) if (v.toLowerCase() === lv) return map[v];
     return value;
+  }
+
+  /// Набранное оператором значение тега, приведённое к тому, что этот тег принимает. У тега со
+  /// своим набором значений сравнение идёт сначала по самому значению, потом по его подписи, и
+  /// в обоих случаях без учёта регистра. Не подошло ничего это пусто, а НЕ первое значение из
+  /// набора: молчаливая подмена «Ж» на «M» меняет смысл на противоположный, и документ уходит
+  /// живому человеку с чужим полом. Пустое поле оператор увидит и поправит, подменённое нет.
+  function подобратьЗначение(имя, значение) {
+    var v = значение == null ? "" : String(значение).trim();
+    if (!v.length) return "";
+    var known = fieldValues(имя);
+    if (!known) return v;
+    var lv = v.toLowerCase();
+    for (var i = 0; i < known.length; i++) if (String(known[i]).toLowerCase() === lv) return known[i];
+    for (var j = 0; j < known.length; j++)
+      if (String(valueLabel(имя, known[j]) || "").trim().toLowerCase() === lv) return known[j];
+    return "";
   }
 
   function fieldValues(name) {
@@ -5476,7 +5867,10 @@
       var ia = (b.align || "").toLowerCase();
       if (ia === "right") fig.style.textAlign = "right";
       else if (ia === "center") fig.style.textAlign = "center";
-      else if (ia === "justify") fig.style.textAlign = "left";
+      // «Слева» и «по обоим краям» для картинки это одно и то же: прижать к левому полю.
+      // Раньше ветки для «слева» не было вовсе, и картинка, которой оператор явно задал левое
+      // выравнивание, вставала по центру: экран не выполнял заданное.
+      else if (ia === "left" || ia === "justify") fig.style.textAlign = "left";
       var wrap = (b.wrap || "").toLowerCase();
       var im = el("img"); im.src = b.imageUrl;
       if (wrap === "left" || wrap === "right") {
@@ -5545,7 +5939,8 @@
       var val = String(liveValue(c.field) || "").trim().toLowerCase();
       var target = String(c.value || "").trim().toLowerCase();
       switch (c.op) {
-        case "ne": return val !== target;
+        // Как на планшете: «не равно» не выполняется, когда значения нет вовсе.
+        case "ne": return val.length > 0 && val !== target;
         case "empty": return val.length === 0;
         case "notempty": return val.length > 0;
         case "in": return target.split(",").map(function (x) { return x.trim(); })
@@ -5782,10 +6177,14 @@
         // Порядок ровно как на планшете: блоки над подписью, надпись, само поле, блоки под
         // подписью. Раньше здесь рисовались два поля подписи, а нижние блоки оказывались выше
         // надписи, и предпросмотр обещал не тот экран, который увидит клиент.
-        shown(doc.signBlocks).forEach(function (b) { previewBlock(body, b); });
+        // Блоки экрана подписи на планшете стоят по центру: поле подписи по центру, и текст
+        // вокруг него тоже. Здесь они прижимались влево, и предпросмотр обещал не тот экран.
+        var сверху = el("div", "pv-sign-custom"); body.appendChild(сверху);
+        shown(doc.signBlocks).forEach(function (b) { previewBlock(сверху, b); });
         body.appendChild(el("div", "pv-prompt", doc.signPrompt || ""));
         body.appendChild(el("div", "pv-pad", "Распишитесь здесь"));
-        shown(doc.signBlocksBelow).forEach(function (b) { previewBlock(body, b); });
+        var снизу = el("div", "pv-sign-custom"); body.appendChild(снизу);
+        shown(doc.signBlocksBelow).forEach(function (b) { previewBlock(снизу, b); });
       }
       var ok = s.type !== "page" || requiredOk(s.index);
       back.disabled = step(idx, -1) < 0;
@@ -5926,38 +6325,49 @@
       c.appendChild(el("div", "note-box note-warn",
         "Планшет «" + dev.name + "» сейчас не на связи. Документ сохранится и появится на нём, как только он подключится. " +
         "Если нужно показать прямо сейчас, выберите другой планшет в списке над кнопками."));
+    // Окно открывается уже заполненным тем, что оператор набрал в проверке условий над
+    // редактором. Раньше оно открывалось пустым, а взять оттуда значения предлагала кнопка,
+    // которую надо было заметить: оператор набирал данные в панели, жал «Отправить на планшет»
+    // и отправлял клиенту документ с пустыми тегами и без блоков, которые держатся на условиях.
+    // Вымышленные примеры сюда по-прежнему не подставляются: подписать чужое имя хуже, чем
+    // набрать своё. Само окно тоже остаётся: это последняя проверка перед отправкой живому
+    // человеку.
     var inputs = {};
+    var изПанели = [];
     placeholders.forEach(function (k) {
+      var своё = подобратьЗначение(k, прожектор.значения[k]);
+      if (своё) изПанели.push(k);
       var known = fieldValues(k);
       if (known) {
         var wrap = el("label", "field", k);
         var sel = el("select");
         sel.appendChild(new Option("не передавать", ""));
         known.forEach(function (v) { sel.appendChild(new Option(valueLabel(k, v), v)); });
+        sel.value = своё;
         wrap.appendChild(sel); c.appendChild(wrap); inputs[k] = sel;
       } else {
-        var f = labeledInput(k, ""); c.appendChild(f.wrap); inputs[k] = f.input;
+        var f = labeledInput(k, своё); c.appendChild(f.wrap); inputs[k] = f.input;
       }
     });
+    if (изПанели.length)
+      c.appendChild(el("p", "sig-meta",
+        "Подставлено из проверки условий над редактором: " + изПанели.join(", ")
+        + ". Проверьте перед отправкой: это уйдёт живому человеку."));
 
-    // Это окно отправляет документ живому человеку, поэтому вымышленные значения сами тут не
-    // подставляются: подписать чужое имя хуже, чем набрать своё. Но для проверки они нужны, и
-    // одна кнопка заполняет всё сразу.
     var естьИзПроверки = placeholders.some(function (k) {
-      var v = прожектор.значения[k];
-      return v != null && String(v).trim().length;
+      return !!подобратьЗначение(k, прожектор.значения[k]);
     });
     if (естьИзПроверки) {
-      var изПров = iconBtn("copy", "Взять значения из проверки условий", "btn-ghost");
-      изПров.title = "Подставить то, что вы задали в проверке условий над редактором. Проверьте перед отправкой: это уйдёт живому человеку.";
+      // Возврат после ручной правки: значения уже подставлены выше, а эта кнопка нужна тому,
+      // кто поправил поле и передумал.
+      var изПров = iconBtn("copy", "Вернуть значения из проверки условий", "btn-ghost");
+      изПров.title = "Вернуть то, что вы задали в проверке условий над редактором. Проверьте перед отправкой: это уйдёт живому человеку.";
       изПров.addEventListener("click", function () {
         var взято = 0;
         placeholders.forEach(function (k) {
-          var v = прожектор.значения[k];
-          if (v == null || !String(v).trim().length) return;
-          var input = inputs[k], known = fieldValues(k);
-          if (known && known.indexOf(String(v)) < 0) return;
-          input.value = String(v); взято++;
+          var v = подобратьЗначение(k, прожектор.значения[k]);
+          if (!v) return;
+          inputs[k].value = v; взято++;
         });
         toast(взято ? ("Подставлено значений: " + взято + ". Проверьте перед отправкой.") : "Нечего подставлять", !взято);
       });
@@ -6566,7 +6976,7 @@
     if (r.lastRunUtc) {
       var bad = /не ответил|выключено|нет/.test(r.lastResult || "");
       row.appendChild(el("div", "sch-last" + (bad ? " bad" : ""),
-        "Последний запуск: " + new Date(r.lastRunUtc).toLocaleString("ru-RU") + " — " + (r.lastResult || "")));
+        "Последний запуск: " + new Date(r.lastRunUtc).toLocaleString("ru-RU") + ", " + (r.lastResult || "")));
     }
 
     // Поля значения и текста нужны не всякому действию: лишние поля в строке только мешают.
@@ -7198,111 +7608,1890 @@
       .catch(function () { /* already reported by api() */ });
   });
 
-  // ---------------- API docs ----------------
-  var API_ENDPOINTS = [
+  // ==================================================================
+  // Вкладка «API»
+  // ==================================================================
+  // Эту вкладку читает не оператор, а программист чужой системы, и читает он её один раз, перед
+  // тем как написать первый запрос. Поэтому здесь два слоя, а не один:
+  //
+  //   1. Руководство: что делать по шагам, с полными примерами, которые можно скопировать и
+  //      выполнить. Оно отвечает на вопрос «я вижу эту систему впервые, с чего начать».
+  //   2. Справочник: каждый путь, который обслуживает сервер, с полями запроса, полями ответа,
+  //      кодами и точными текстами отказов. Он отвечает на вопрос «что именно вернётся».
+  //
+  // Справочник собран по обработчикам Program.cs, а не по памяти: там же живут и тексты отказов,
+  // и пределы. Набор e2e_v75_apidoc снимает список путей прямо с Program.cs и требует, чтобы
+  // каждый был описан здесь: иначе новый метод появлялся бы в сервере, а интегратор узнавал бы о
+  // нём из переписки.
+  //
+  // Статьи справочника свёрнуты: путей девять десятков, и развёрнутыми они превращаются в
+  // простыню, по которой нельзя ориентироваться. Разделы руководства раскрыты: их читают
+  // подряд. Сверху оглавление и поиск по всей вкладке сразу.
+
+  /// Абзац (или иной узел) с кусками кода: `вот так` становится <code>. Текст пишется как текст,
+  /// а не собирается из склеенных узлов на каждое имя поля.
+  function апиФраза(текст, тег, класс) {
+    var узел = el(тег || "p", класс == null ? "api-desc" : класс);
+    String(текст).split("`").forEach(function (часть, i) {
+      if (часть === "") return;
+      if (i % 2) узел.appendChild(el("code", null, часть));
+      else узел.appendChild(document.createTextNode(часть));
+    });
+    return узел;
+  }
+
+  /// Таблица справочника. Ширина всегда по месту: колонки фиксированные, длинное слово
+  /// переносится. Иначе таблица с текстом отказа распирала бы вкладку и страница ехала бы вбок.
+  function апиТаблица(шапка, строки, класс) {
+    var t = el("table", "api-tbl api-tbl-" + шапка.length + (класс ? " " + класс : ""));
+    var thead = el("thead"), tr = el("tr");
+    // Шапка это простой текст: обратные кавычки в ней не разметка, а видимые знаки. Снимаем их,
+    // чтобы описка не превращалась в «ЧТО СКАЖЕТ `DROPPED`» на экране.
+    шапка.forEach(function (h) { tr.appendChild(el("th", null, String(h).replace(/`/g, ""))); });
+    thead.appendChild(tr);
+    t.appendChild(thead);
+    var tb = el("tbody");
+    строки.forEach(function (r) {
+      var row = el("tr");
+      r.forEach(function (c) {
+        var td = el("td");
+        td.appendChild(апиФраза(c, "span", "api-cell"));
+        row.appendChild(td);
+      });
+      tb.appendChild(row);
+    });
+    t.appendChild(tb);
+    return t;
+  }
+
+  /// Заголовок подраздела внутри статьи или раздела.
+  function апиПодзаголовок(текст) { return el("h4", "api-h4", текст); }
+
+  /// Врезка: то, на чём чужие системы спотыкаются чаще всего.
+  function апиВрезка(текст, вид) {
+    return апиФраза(текст, "div", "api-note" + (вид ? " api-note-" + вид : ""));
+  }
+
+  /// Образец запроса. Адрес подставляется настоящий, чтобы строку можно было скопировать и
+  /// выполнить, не редактируя.
+  function апиОбразец(текст) {
+    return el("pre", "api-code", String(текст).replace(/\{BASE\}/g, window.location.origin));
+  }
+
+  /// Ряд действий под образцом: скопировать и, где это уместно, выполнить прямо отсюда.
+  function апиДействия(образец, отправка) {
+    var ряд = el("div", "api-ep-actions");
+    var копия = iconBtn("copy", "Копировать", "btn-ghost btn-sm");
+    var текст = String(образец).replace(/\{BASE\}/g, window.location.origin);
+    копия.addEventListener("click", function () { copyText(текст); });
+    ряд.appendChild(копия);
+    if (отправка) {
+      var go = iconBtn("send", "Отправить запрос", "btn-primary btn-sm");
+      go.addEventListener("click", function () { openApiSend(отправка); });
+      ряд.appendChild(go);
+    }
+    return ряд;
+  }
+
+  /// Свёртка: шапка-кнопка и тело. Одна на разделы руководства и на статьи справочника, чтобы
+  /// раскрывались они одинаково и поиск умел раскрывать и то и другое.
+  function апиСвёртка(префикс, шапка, тело, открыта) {
+    var карточка = el("div", префикс);
+    var head = el("button", префикс + "-head");
+    head.type = "button";
+    шапка.forEach(function (n) { head.appendChild(n); });
+    var шеврон = el("span", "api-chev");
+    шеврон.appendChild(icon("down"));
+    head.appendChild(шеврон);
+    var body = el("div", префикс + "-body");
+    тело.forEach(function (n) { body.appendChild(n); });
+    карточка.appendChild(head);
+    карточка.appendChild(body);
+    карточка.раскрыть = function (да) {
+      body.classList.toggle("hidden", !да);
+      карточка.classList.toggle("open", !!да);
+      head.setAttribute("aria-expanded", да ? "true" : "false");
+    };
+    head.addEventListener("click", function () { карточка.раскрыть(body.classList.contains("hidden")); });
+    карточка.раскрыть(!!открыта);
+    return карточка;
+  }
+
+  // ---- Отказы, общие для целого контура ----
+  // Они одинаковы у каждого пути своего контура, поэтому дописываются к списку отказов каждой
+  // статьи, а не пересказываются в ней руками: пересказ разошёлся бы с кодом на первом же
+  // изменении.
+  var API_ОТКАЗЫ_EXT = [
+    ["401", "`{\"error\":\"invalid api key\"}` на неверный, выключенный и отсутствующий ключ. Текст один на все три случая нарочно: по разнице в ответе было бы видно, что ключ угадан верно и просто выключен."],
+    ["429", "`{\"error\":\"Слишком много запросов с этого адреса. Повторите через N с.\",\"retryAfterSec\":N}` и заголовок `Retry-After`. Предел 600 запросов в минуту с одного адреса."],
+    ["400", "Пустое тело там, где ждут JSON: «Тело запроса пустое, а этот запрос ждёт JSON. Пришлите заголовок Content-Type: application/json и тело запроса, например {\"deviceId\":\"...\"}.»"],
+    ["400", "Значение в строке запроса не того вида (`?limit=abc`): «Запрос не разобран. Проверьте, что тело это правильный JSON, а значения в строке запроса нужного вида (например limit это число).»"],
+    ["400", "Битый JSON в теле: пустой ответ без текста. Разбор тела к этому моменту уже случился, и объяснить отказ своими словами тут нечем"],
+    ["415", "`Content-Type` не `application/json`: пустой ответ без текста"]
+  ];
+  var API_ОТКАЗЫ_ADMIN = [
+    ["401", "Куки входа нет или она не годится. Тело ответа пустое: это отказ платформы, до обработчика запрос не доходит."]
+  ];
+  var API_ОТКАЗЫ_ПЛАНШЕТ = [
+    ["401", "Нет заголовка `Authorization: Bearer` с токеном планшета или токен не годится. Тело ответа пустое."],
+    ["429", "`{\"error\":\"Слишком много запросов с этого адреса. Повторите через N с.\",\"retryAfterSec\":N}` и заголовок `Retry-After`."]
+  ];
+
+  // ==================================================================
+  // Руководство: что делать по шагам
+  // ==================================================================
+  // Порядок разделов повторяет порядок, в котором чужая система пишет свою первую интеграцию:
+  // получить ключ, найти планшет, выбрать документ, собрать данные, разобрать ответ.
+
+  var API_РАЗДЕЛЫ = [
     {
-      method: "GET", path: "/api/ext/devices",
-      desc: "Список всех планшетов: статус (онлайн/офлайн), группы и привязанное рабочее место.",
-      sample: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  {BASE}/api/ext/devices'
+      id: "api-start", заголовок: "1. С чего начать",
+      строить: function (х) {
+        х.appendChild(апиФраза("В системе два отдельных контура, и путать их не нужно. `/api/ext/*` это то, ради чего API существует: чужая программа показывает клиенту документ, просит отсканировать код, возвращает планшет к рекламе. Доступ по ключу. `/api/admin/*` это внутреннее API самой админки: тот же набор действий плюс всё, что оператор делает руками, от загрузки рекламы до чтения журнала. Доступ по куке входа, ключ там не работает."));
+        х.appendChild(апиФраза("Базовый адрес этой установки: `" + window.location.origin + "`. Все примеры ниже уже собраны с ним, их можно копировать как есть."));
+        х.appendChild(апиПодзаголовок("Ключ доступа"));
+        х.appendChild(апиФраза("Ключ создаётся на вкладке «API-ключи» кнопкой «Создать». Ключ показывается один раз, при создании: на сервере хранится только его SHA-256, и восстановить потерянный нельзя, можно только создать новый. Выглядит он как `sk_` и 30 случайных байт."));
+        х.appendChild(апиФраза("Передаётся ключ заголовком `X-Api-Key`. Ни строкой запроса, ни в теле он не принимается: строка запроса попадает в журналы прокси, и ключ оттуда уже не убрать."));
+        х.appendChild(апиОбразец('curl -H "X-Api-Key: ВАШ_КЛЮЧ" {BASE}/api/ext/devices'));
+        х.appendChild(апиФраза("Это и есть первый запрос, с которого стоит начать: он ничего не меняет и сразу показывает, годится ключ или нет."));
+        х.appendChild(апиПодзаголовок("Что будет с плохим ключом"));
+        х.appendChild(апиТаблица(["Случай", "Ответ"], [
+          ["ключа нет вовсе", "401 `{\"error\":\"invalid api key\"}`"],
+          ["ключ неверный", "401 `{\"error\":\"invalid api key\"}`"],
+          ["ключ выключен на вкладке «API-ключи»", "401 `{\"error\":\"invalid api key\"}`"],
+          ["ключ удалён", "401 `{\"error\":\"invalid api key\"}`"]
+        ]));
+        х.appendChild(апиФраза("Текст один на все случаи намеренно. Сравнение ключа идёт с постоянным временем, причём выключенный ключ сравнивается наравне с остальными и только потом отбрасывается: иначе по времени ответа было бы видно, что ключ угадан верно и просто выключен."));
+        х.appendChild(апиФраза("Выключить ключ, не удаляя, можно там же. Это сделано затем, что «перекрыть доступ на время разбирательства» и «забыть, что такой доступ был» это разные действия: удаление необратимо и требует заново настраивать чужую систему, поэтому доступ чаще оставляли включённым."));
+        х.appendChild(апиВрезка("Вошедший в админку администратор проходит по `/api/ext/*` и без ключа, по своей куке. Он проверяет свой же документ из админки, а права у него и так шире, чем у любого ключа. Именно поэтому кнопка «Отправить запрос» на этой вкладке работает без ключа."));
+        х.appendChild(апиПодзаголовок("Частота запросов"));
+        х.appendChild(апиФраза("Пределы считаются по адресу отправителя, окном в одну минуту: внешнее API 600 запросов, сканирование планшета 60, отправка подписи 60, диагностика планшета 30, активация планшета 20, вход в админку 10. Это сделано не ради экономии, а чтобы поток запросов не занял ту же блокировку хранилища, которая нужна подписанию."));
+        х.appendChild(апиФраза("При переборе приходит 429, тело `{\"error\":\"Слишком много запросов с этого адреса. Повторите через N с.\",\"retryAfterSec\":N}` и заголовок `Retry-After`."));
+        х.appendChild(апиПодзаголовок("Вид запроса"));
+        х.appendChild(апиФраза("Тело только JSON, кодировка UTF-8, заголовок `Content-Type: application/json`."));
+        х.appendChild(апиТаблица(["Что не так с самим запросом", "Ответ"], [
+          ["тела нет вовсе", "400 с текстом: «Тело запроса пустое, а этот запрос ждёт JSON. Пришлите заголовок Content-Type: application/json и тело запроса, например {\"deviceId\":\"...\"}.»"],
+          ["в строке запроса не то значение (`?limit=abc`)", "400 с текстом: «Запрос не разобран. Проверьте, что тело это правильный JSON, а значения в строке запроса нужного вида (например limit это число).»"],
+          ["тело не разбирается как JSON", "400 и ПУСТОЕ тело ответа"],
+          ["`Content-Type` не `application/json`", "415 и ПУСТОЕ тело ответа"],
+          ["такого адреса нет", "404 и пустое тело ответа"]
+        ]));
+        х.appendChild(апиВрезка("Два случая объяснения не получают, и это стоит знать заранее. Пустое тело и негодное значение в строке запроса система разбирает сама и называет словами. А битый JSON и чужой `Content-Type` отвергает платформа ещё до обработчика: к тому моменту тело уже прочитано разбором параметров, и второй раз его не прочитать, поэтому сказать своими словами нечего. Пустой ответ 400 или 415 читайте как «запрос не разобран»: проверьте JSON и заголовок.", "warn"));
+      }
     },
     {
-      method: "GET", path: "/api/ext/workstations",
-      desc: "Список рабочих мест с внешними идентификаторами (externalId).",
-      sample: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  {BASE}/api/ext/workstations'
+      id: "api-target", заголовок: "2. Как адресовать планшет",
+      строить: function (х) {
+        х.appendChild(апиФраза("Это место, где чужие системы ошибаются чаще всего, поэтому правило названо прямо: документ всегда показывается ровно на одном планшете, и если выбрать однозначно нельзя, сервер отказывает, а не угадывает. Чужие данные перед чужим человеком не исправишь."));
+        х.appendChild(апиФраза("Адресовать можно двумя способами, и в запросе достаточно одного из них:"));
+        х.appendChild(апиТаблица(["Поле", "Что это", "Когда удобно"], [
+          ["`deviceId`", "внутренний номер планшета, его выдаёт система при активации", "когда чужая система хранит номера планшетов у себя"],
+          ["`workstationExternalId`", "код рабочего места, его задаёте вы сами (`WS-204`, `KAB-12`)", "почти всегда: код ваш, он переживает замену планшета и не меняется при перенастройке"]
+        ]));
+        х.appendChild(апиФраза("Код рабочего места сравнивается без учёта регистра и окружающих пробелов, поэтому `WS-204`, `ws-204` и ` WS-204 ` это одно и то же место. Раньше сравнение было разным в разных местах, и `ROOM-12` заводил место, но не находил его."));
+        х.appendChild(апиПодзаголовок("Что будет в каждом случае"));
+        х.appendChild(апиТаблица(["Случай", "Код", "Что придёт"], [
+          ["не прислано ни `deviceId`, ни `workstationExternalId`", "400", "`pass deviceId or workstationExternalId`"],
+          ["планшета с таким `deviceId` нет", "404", "`device not found`"],
+          ["планшет отозван", "404", "`this tablet is revoked`. Отозванный не выбирается и по прямому номеру: раньше документ с данными клиента уезжал на устройство, которое ничего не покажет, а система получала «ок»"],
+          ["рабочего места с таким кодом нет", "404", "`workstation not found: WS-204`"],
+          ["на месте нет ни одного планшета", "404", "`no tablet is assigned to this workstation`"],
+          ["на месте только отозванные", "404", "`the only tablet(s) assigned to this workstation are revoked`"],
+          ["прислано и то и другое, но они не сходятся", "409", "`deviceId and workstationExternalId disagree: tablet '...' is not at workstation '...'. Pass one of them, not both.`"],
+          ["на месте несколько живых планшетов", "409", "`several tablets are assigned to this workstation; pass deviceId to choose one:` и перечень: имя, номер и «на связи» или «не на связи» по каждому"]
+        ], "api-tbl-case"));
+        х.appendChild(апиВрезка("Прислать `deviceId` и `workstationExternalId` сразу можно, но они обязаны сходиться. Раньше второе молча отбрасывалось, а это самый опасный вид расхождения: заказ несёт вчерашний номер планшета, который с тех пор перевезли в другой кабинет, и правильный код кабинета. Документ уезжал в чужой кабинет, а в ответе стояло «ок».", "warn"));
+        х.appendChild(апиФраза("Когда на месте несколько живых планшетов, но на связи ровно один, документ уйдёт на него без всякого вопроса: остальные сейчас не могут показать вообще ничего, и вопрос «кто это увидит» имеет единственный ответ. На связи несколько или ни одного означает настоящую неоднозначность, и это отказ."));
+        х.appendChild(апиПодзаголовок("Если планшет не на связи"));
+        х.appendChild(апиФраза("Показ документа и сканирование ведут себя по-разному, и это не недосмотр, а разная природа действия."));
+        х.appendChild(апиТаблица(["Что делаем", "Планшет выключен", "Почему так"], [
+          ["`POST /api/ext/show-document`", "200, но `shown: false` и `deviceOnline: false`, плюс готовое пояснение в `note`. Документ сохранён и появится на экране, как только планшет подключится, но не позже чем через два часа, потом он стирается сам", "документ это состояние: его можно сохранить и показать позже"],
+          ["`POST /api/ext/scan-request`", "409 сразу, с текстом «Планшет «...» сейчас не на связи, команда сканирования до него не дойдёт.»", "сканирование это живая команда: она не сохраняется и до выключенного планшета не дойдёт, а ждать до таймаута значило бы вернуть «код не отсканирован» вместо причины"]
+        ]));
+        х.appendChild(апиВрезка("`ok: true` в ответе показа не значит «клиент видит документ». Это значит «заказ принят и адресат выбран однозначно». Видит ли клиент документ прямо сейчас, говорит поле `shown`.", "warn"));
+      }
     },
     {
-      method: "POST", path: "/api/ext/workstations",
-      desc: "Создать рабочее место. Поле externalId - ключ в вашей учётной системе.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"externalId":"WS-204","name":"Касса 4","location":"1 этаж"}\' \\\n  {BASE}/api/ext/workstations'
+      id: "api-doc-pick", заголовок: "3. Как выбрать документ",
+      строить: function (х) {
+        х.appendChild(апиФраза("Документов в системе может быть несколько: согласие на обработку данных, согласие на процедуру, памятка. Каждый адресуется своим кодом, и код задаёт оператор в админке на вкладке «Документ»."));
+        х.appendChild(апиТаблица(["Что прислали", "Что покажется"], [
+          ["`documentCode` с известным кодом", "этот документ. Ответ вернёт тот же код в поле `document`"],
+          ["`documentCode` не прислан или пустой", "документ, помеченный в админке как документ по умолчанию"],
+          ["`documentCode` с неизвестным кодом", "400 «Документ с кодом «X» не найден. Доступные коды: ...» с перечнем всех кодов"]
+        ]));
+        х.appendChild(апиФраза("Молча подставить документ по умолчанию вместо незнакомого кода было бы худшим из решений: внешняя система опечаталась, человек подписал не то, а запись при этом выглядит подлинной."));
+        х.appendChild(апиФраза("Какие коды есть прямо сейчас, отвечает `GET /api/ext/documents`: по каждому документу приходят `code`, `name` и `isDefault`. Спрашивать коды у оператора по переписке не нужно, и переименование документа связь не ломает."));
+        х.appendChild(апиОбразец('curl -H "X-Api-Key: ВАШ_КЛЮЧ" {BASE}/api/ext/documents'));
+        х.appendChild(апиФраза("Ещё один отказ по документу: если в нём нет ни одной страницы, приходит 400 «В документе «...» нет ни одной страницы: показывать нечего.» Планшет иначе остался бы с прежним экраном, а вызывающая сторона решила бы, что отправка сработала."));
+      }
     },
     {
-      method: "POST", path: "/api/ext/enrollments",
-      desc: "Сгенерировать код активации нового планшета. Можно сразу привязать к месту через workstationExternalId. Ответ: { code, expiresUtc }.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"Ресепшн 1","workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/enrollments'
+      id: "api-fields", заголовок: "4. Что слать в fields",
+      строить: function (х) {
+        х.appendChild(апиФраза("`fields` это набор «имя тега: значение». Оператор ставит в текст документа `{{имя тега}}`, а сервер подставляет туда присланное значение. По этим же тегам работают условия показа блоков и целых страниц."));
+        х.appendChild(апиФраза("Список тегов задан системой и общий на все документы:"));
+        var tags = el("div", "api-tags");
+        KNOWN_FIELDS.forEach(function (f) { tags.appendChild(el("code", "ph-tag", "{{" + f + "}}")); });
+        х.appendChild(tags);
+        х.appendChild(апиФраза("Тот же список отдаёт `GET /api/admin/field-schema` вместе с допустимыми значениями: интерфейс читает его оттуда, а не держит свою копию, поэтому список тегов в админке и на сервере разойтись не могут."));
+        х.appendChild(апиПодзаголовок("В каком виде слать значения"));
+        х.appendChild(апиТаблица(["Тег", "Что принимается", "Что будет при другом значении"], [
+          ["`ФИО`, `Адрес регистрации`, `email`, `telephone`, `document`, `text1`..`text10`", "любая строка до 4000 знаков", "длиннее обрезается, и обрезка называется в списке потерь"],
+          ["`Пол`", "`M` или `F`. Принимаются также `m`, `М`, `м`, `муж` и `f`, `Ж`, `ж`, `жен`: латинская `M` и русская `М` на глаз неразличимы, и требовать одного написания значило бы собирать ошибки на ровном месте", "значение остаётся как есть, условие на него просто не совпадёт"],
+          ["`ДР`, `date`", "`01.01.1990` или `1990-01-01`", "если тег участвует в условии по возрасту или по годовщине, приходит 400 с именем тега"],
+          ["`cross-border`, `urine`, `UG`", "только `true` или `false`: настоящий JSON-булев `true`, либо строка `\"true\"` в кавычках, регистр не важен", "400 «Тег «urine» принимает только true или false, получено: 1»"]
+        ]));
+        х.appendChild(апиФраза("Телефон, адрес электронной почты и номер документа не проверяются никак: они попадают в текст документа как есть, и вид у них тот, который принят у вас. Проверяются только те теги, у которых набор значений задан: пол и три булевых."));
+        х.appendChild(апиФраза("Значение можно прислать строкой, настоящим JSON-булевым или числом: разработчик пишет `new { urine = true }`, и такой запрос обязан работать. Без этого весь запрос отклонялся бы ещё до обработчика, документ не появился бы вовсе, а зацепиться было бы не за что. Объект и массив в значении тега подставить некуда, поэтому такое значение пропускается, а остальной запрос остаётся годным."));
+        х.appendChild(апиФраза("Имена тегов сравниваются без учёта регистра: `пол`, `Пол` и `ПОЛ` это один и тот же тег и в запросе, и в условии, и в подстановке."));
+        х.appendChild(апиПодзаголовок("Неизвестный тег, пустое значение и пропущенное значение"));
+        х.appendChild(апиТаблица(["Случай", "Что происходит"], [
+          ["прислали тег, которого в документе нет", "он никуда не подставляется и ничего не ломает. Запрос принимается"],
+          ["в документе есть `{{тег}}`, а в запросе его нет", "в тексте остаётся `{{тег}}` как есть, чтобы пропуск было видно, и имя тега приходит в ответе в `missingPlaceholders`"],
+          ["в документе есть `{{тег}}`, а в запросе он с пустым значением", "подставляется пустота, и в тексте остаётся дыра («Я, , согласен»). В `missingPlaceholders` такой тег НЕ попадает: ключ был прислан. Условие на этот тег гаснет"]
+        ]));
+        х.appendChild(апиВрезка("Пустая строка и отсутствие ключа это разные вещи. Если значение неизвестно, лучше не присылать ключ вовсе: тогда пропуск виден и в документе, и в ответе.", "warn"));
+        х.appendChild(апиПодзаголовок("Условия показа"));
+        х.appendChild(апиФраза("Оператор может показывать блок или целую страницу по условию на тег: равно, не равно, пусто, не пусто, одно из. Условий может быть несколько через «и» и несколько наборов через «или», а любую часть можно отрицать. Пример: страницу «Трансграничная передача» показывать, если `cross-border` равно `true`."));
+        х.appendChild(апиФраза("Есть условия по возрасту: он считается на сервере из даты рождения, поэтому присылать нужно только `ДР`, а документ сам решит, показывать ли блок для законных представителей. Есть условие по сроку: «до годовщины не больше N дней» считает день и месяц, год не важен, и это случай дня рождения; окно задаётся отдельно до годовщины и после неё."));
+        х.appendChild(апиФраза("Блок, который этому клиенту не положен, на планшет не уходит вообще, а не прячется там. В подпись и в PDF попадает только то, что клиент действительно видел."));
+      }
     },
     {
-      method: "PUT", path: "/api/ext/devices/{id}/workstation",
-      desc: "Привязать планшет к рабочему месту по externalId места. Так внешняя система задаёт, какой планшет на каком месте.",
-      sample: 'curl -X PUT -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"externalId":"WS-204"}\' \\\n  {BASE}/api/ext/devices/DEVICE_ID/workstation'
+      id: "api-checks", заголовок: "5. Пункты для отметки и группы выбора",
+      строить: function (х) {
+        х.appendChild(апиФраза("Пункты согласия приходят массивом `checkboxes`, а вопросы с выбором одного ответа массивом `groups`. И там и там всё держится на имени: имя задаёт оператор в редакторе документа, а внешняя система по нему адресуется."));
+        х.appendChild(апиПодзаголовок("Два разных действия"));
+        х.appendChild(апиТаблица(["Что нужно", "Как", "Куда встанет"], [
+          ["отметить пункт, который УЖЕ есть в документе", "`{\"key\":\"consent\",\"checked\":true}` с именем из редактора", "на своё место в документе, там, где его поставил оператор"],
+          ["прислать СВОЙ пункт, которого в документе нет", "`{\"label\":\"Согласен на рассылку\",\"checked\":false}`", "в конец страницы, помеченной галочкой «Показывать здесь чекбоксы, присланные по API». Если такой страницы нет, в конец последней"]
+        ]));
+        х.appendChild(апиФраза("Галочка «Показывать здесь чекбоксы, присланные по API» нужна потому, что место присланного пункта в шаблоне не задано: оператор его туда не ставил, и сам собой он никуда не встанет. Галочка и говорит, на какой странице ему быть, а внутри страницы он встаёт последним, следом за всем, что оператор расставил сам. Если галочки нет ни на одной странице, пункт встаёт в конец последней: потерять согласие, которое просила прислать чужая система, хуже, чем поставить его не совсем там. Страница с присланным пунктом при этом обязательно попадает в PDF, даже если её пометили «не печатать»: иначе в бумаге остался бы один список отметок без текста, под которым человек расписался."));
+        х.appendChild(апиВрезка("Пункт с незнакомым именем считается своим присланным пунктом и дописывается вниз, а не теряется. Поэтому опечатка в `key` не отказ, а лишний пункт на экране: сверяйтесь с именами из редактора."));
+        х.appendChild(апиПодзаголовок("Поля пункта"));
+        х.appendChild(апиТаблица(["Поле", "Вид", "Что делает"], [
+          ["`key`", "строка", "имя пункта в документе. Косая черта в имени не допускается и снимается при разборе"],
+          ["`checked`", "булев", "начальное состояние отметки"],
+          ["`required`", "булев", "обязательность. Не прислали, значит НЕ обязателен. Это обратно тому, как ведёт себя пункт, поставленный оператором: он обязателен по умолчанию, потому что оператор ставит пункт затем, чтобы клиент его отметил"],
+          ["`label`", "строка до 2000 знаков", "заменяет текст пункта целиком"],
+          ["`labelAppend`", "строка до 2000 знаков", "дописывает к тому тексту, который стоит в документе сейчас. Внешняя система не обязана знать формулировку документа"],
+          ["`visibleWhen`", "условие", "условие показа, такое же, как в редакторе: `{\"field\":\"Пол\",\"op\":\"eq\",\"value\":\"F\"}`. Части про теги считаются на сервере, части про отметки уезжают на планшет"]
+        ], "api-tbl-req"));
+        х.appendChild(апиФраза("Дописка присоединяется через пробел, но если она начинается со знака препинания (`, . ; : ! ? )` или закрывающей кавычки), пробел не ставится: получается «НЕТ, не соблюдал», а не «НЕТ , не соблюдал». Если в одном запросе пришли и `label`, и `labelAppend`, дописка присоединяется к присланному тексту."));
+        х.appendChild(апиПодзаголовок("Группы выбора"));
+        х.appendChild(апиФраза("Группа это набор, где выбрать можно только один вариант, и «ни одного» тоже допустимое состояние."));
+        х.appendChild(апиТаблица(["Поле", "Вид", "Что делает"], [
+          ["`key`", "строка", "имя группы в документе"],
+          ["`selected`", "строка", "имя выбранного варианта. Пустая строка снимает выбор"],
+          ["`title`", "строка до 2000 знаков", "заменяет заголовок группы целиком"],
+          ["`titleAppend`", "строка до 2000 знаков", "дописывает к заголовку из документа"],
+          ["`options`", "массив `{key, label, labelAppend}`", "подписи вариантов. Если прислан непустой список, он и становится набором ответов вместо того, что стоит в документе: складывать два набора значило бы показать клиенту оба сразу"]
+        ], "api-tbl-req"));
+        х.appendChild(апиФраза("Присланный текст живёт до конца этого показа: он попадает в запись подписи и в PDF, но в сам шаблон не записывается, иначе документ дописывал бы сам к себе при каждом показе. Оформление (жирный, цвет) у присланного текста снимается: внешняя система прислала другую формулировку, а не другой её вид."));
+        х.appendChild(апиФраза("Имена чекбоксов и групп живут отдельно от имён тегов: одно имя никогда не значит две вещи. В условии показа можно сослаться и на имя пункта или группы, и тогда условие считается прямо на планшете, пока клиент отмечает. Обязательный пункт, скрытый условием, кнопку «Далее» не блокирует."));
+        х.appendChild(апиВрезка("Группы с незнакомым именем в документе не появляется вовсе, и выбор несуществующего варианта превращается в «ничего не выбрано». Молчания тут нет: и то и другое приходит в списке потерь `dropped`, вместе с перечнем имён, которые есть. Иначе клиент подписал бы документ без ответа на вопрос, который ему задали в заказе.", "warn"));
+      }
     },
     {
-      method: "POST", path: "/api/ext/show-document",
-      desc: "Показать документ на планшете с данными подписанта. Плейсхолдеры {{тег}} в шаблоне (текст задаётся в админке) заполняются из fields. Поддерживаемые теги: ФИО, ДР, Адрес регистрации, Пол (M/F), email, telephone, document, date, cross-border, urine, UG (true/false), text1..text10. Булевы теги принимают только true или false, в любом виде: настоящий JSON-булев true, либо строку true в кавычках, регистр не важен. Другое значение возвращает ошибку с именем тега, а не молчаливо скрытый блок. По этим же тегам работают условия показа блоков и страниц (см. раздел «Условия показа»). Есть условия по возрасту: он считается из даты рождения на сервере, поэтому присылать нужно только ДР, а документ сам решит, показывать ли блок для законных представителей (например «возраст меньше 14 лет»). Есть и условие по сроку: «до годовщины не больше N дней» считает день и месяц из даты, год не важен, и это случай дня рождения. Окно задаётся отдельно до годовщины и после неё, например четырнадцать дней до и один после. Дата принимается как 01.01.1990 или 1990-01-01; если её не удалось разобрать, приходит ошибка с именем тега, а не молча скрытый блок. Имена тегов сравниваются без учёта регистра: пол, Пол и ПОЛ это один и тот же тег. Массив checkboxes задаёт пункты согласия: если key совпадает с именем чекбокса в документе, задаётся его начальное состояние прямо на своём месте; если такого имени в документе нет, пункт добавляется в конец страницы, помеченной как приёмник, и тогда нужен label. Обязательность у присланного пункта только та, о которой сказали явно: не прислали required, значит пункт не обязателен и клиент может его пропустить. Присланному пункту можно задать и условие показа полем visibleWhen, как в редакторе. Массив groups задаёт выбор в двойных зависимых чекбоксах: key - имя группы в документе, selected - имя выбранного варианта, пустая строка означает, что не выбрано ничего. Текст тоже можно прислать: label у чекбокса и title у группы заменяют формулировку документа целиком, а labelAppend и titleAppend дописывают к ней, если внешняя система не знает, что именно написано в документе. Подписи вариантов группы задаются так же: groups[].options[] с key варианта и label или labelAppend. Если прислать options, они и становятся списком вариантов вместо того, что стоит в документе: заказ может приходить со своим набором ответов, а складывать два набора значило бы показать клиенту оба сразу. Дописка, начинающаяся со знака препинания, прилипает к предыдущему слову без пробела. Присланный текст живёт до конца этого показа и в шаблон не попадает. Цель: deviceId или workstationExternalId (если на месте несколько планшетов - ответ 409, укажите deviceId: показать документ не на том экране хуже, чем вернуть ошибку). В ответе: missingPlaceholders - какие теги не переданы; shown и deviceOnline - был ли планшет на связи прямо сейчас (false означает, что документ сохранён и покажется при подключении, но не позже чем через два часа, потом стирается сам), note - готовое пояснение к этому случаю; dropped - что не поместилось в пределы и до клиента не доехало, пустой список означает «доехало всё». Прислать deviceId и workstationExternalId сразу можно, но они должны сходиться: планшет, стоящий не на том рабочем месте, даст 409, а не молчаливый показ в чужом кабинете.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","Пол":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026",\n                 "cross-border":true,"urine":true,"UG":false,\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"key":"consent","checked":true},\n                     {"key":"golod","labelAppend":"(с 22:00)"},\n                     {"label":"Согласен на рассылку","checked":false,"required":false}],\n       "groups":[{"key":"transfer","selected":"deny","title":"Передача данных",\n                  "options":[{"key":"deny","label":"Запрещаю"}]}]}\' \\\n  {BASE}/api/ext/show-document'
+      id: "api-images", заголовок: "6. Картинка вместе с заказом",
+      строить: function (х) {
+        х.appendChild(апиФраза("Картинку можно не хранить в системе, а прислать вместе с заказом: печать, штрихкод направления, снимок. Оператор ставит в документ блок картинки и задаёт ему имя тега, например `ПЕЧАТЬ`, а запрос присылает поле `images`, где ключ это имя тега, а значение сама картинка строкой BASE64."));
+        х.appendChild(апиОбразец('"images": { "ПЕЧАТЬ": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" }'));
+        х.appendChild(апиТаблица(["Правило", "Значение"], [
+          ["приставка `data:image/png;base64,`", "не обязательна, голый BASE64 принимается так же"],
+          ["виды", "PNG, JPG и BMP. Вид определяется по первым байтам, а не по написанному в приставке"],
+          ["размер одной картинки", "до 2 МБ, считая длину самой строки BASE64"],
+          ["картинок в одном запросе", "не больше 8"],
+          ["имена тегов", "сравниваются без учёта регистра, как и обычные теги"]
+        ]));
+        х.appendChild(апиФраза("Разрешены только те виды, которые умеет вложить в себя PDF: иначе клиент увидел бы картинку, а в подписанном документе её бы не оказалось, и запись перестала бы совпадать с подписанным."));
+        х.appendChild(апиПодзаголовок("Отказы по картинке"));
+        х.appendChild(апиТаблица(["Что не так", "Код", "Текст"], [
+          ["картинок больше восьми", "400", "«Слишком много картинок в одном запросе: не больше 8.»"],
+          ["пустое имя тега", "400", "«У картинки не задано имя тега: непонятно, куда её ставить.»"],
+          ["пустое значение", "400", "«Картинка «ПЕЧАТЬ» пришла пустой.»"],
+          ["больше 2 МБ", "400", "«Картинка «ПЕЧАТЬ» слишком большая: не больше двух мегабайт в BASE64.»"],
+          ["значение не BASE64", "400", "«Картинка «ПЕЧАТЬ» это не BASE64.»"],
+          ["не PNG, JPG и не BMP", "400", "«Картинка «ПЕЧАТЬ» не PNG, не JPG и не BMP. Другие виды нельзя вложить в PDF, и подписанный документ не совпал бы с тем, что видел клиент.»"],
+          ["тега с таким именем в документе нет", "200", "запрос принят, но в списке потерь: «картинка «ПЕЧАТЬ» не показана: в документе «CODE» нет такого тега. Есть: ...»"]
+        ], "api-tbl-case"));
+        х.appendChild(апиФраза("Картинка, выбранная оператором в редакторе, при заданном теге становится запасной: она показывается, когда заказ картинку не принёс. Нет ни присланной, ни запасной, и блока не будет вовсе: пустая рамка посреди документа выглядит поломкой."));
+      }
     },
     {
-      method: "GET", path: "/admin/#watch={код рабочего места}",
-      desc: "Не метод API, а прямая ссылка: открывает в админке наблюдение за экраном нужного планшета. Внешняя система может дать её оператору рядом со своим заказом, чтобы он не искал планшет в списке. Адресуется код рабочего места (workstationExternalId), как и везде; имя планшета и внутренний идентификатор тоже принимаются. Оператор должен быть уже вошедшим в админку. Окно только для просмотра: оттуда на планшет не уходит ничего, камера у оператора не открывается, запись не ведётся.",
-      sample: '{BASE}/admin/#watch=WS-204'
-    },
-    {
-      method: "POST", path: "/api/ext/scan-request",
-      desc: "Запросить сканирование ШК/QR и ДОЖДАТЬСЯ результата: на планшете открывается камера, клиент показывает код, код возвращается в ответе и сохраняется. Поддерживаются QR, Data Matrix, EAN-13, EAN-8, Code-128 и ITF (Interleaved 2 of 5, только цифры и только чётное их количество). Цель: deviceId или workstationExternalId. timeoutSec - сколько ждать (по умолчанию 60, максимум 300). Ответ: { ok, code, format, scanId, createdUtc }. Если код не показали за отведённое время - 408 и камера на планшете закрывается. Если планшет не на связи - сразу 409 с объяснением, а не ожидание до таймаута: команда сканирования живёт только в момент отправки и до выключенного планшета не дойдёт. Заявка может кончиться и по другой причине: если на тот же планшет пришла ещё одна заявка, первая получает 409 и прямо об этом говорит, а не выдаёт себя за таймаут; отменённая через scan-cancel заявка тоже получает 409, а не висит до своего времени.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204","timeoutSec":60}\' \\\n  {BASE}/api/ext/scan-request'
-    },
-    {
-      method: "POST", path: "/api/ext/scan-cancel",
-      desc: "Отменить сканирование на планшете и вернуть его к обычному экрану. Ожидающая заявка scan-request будится сразу и получает 409: раньше она висела до своего таймаута, все эти минуты считалась живой и не давала закрыть камеру. В ответе cancelledWaiter говорит, была ли такая заявка.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/scan-cancel'
-    },
-    {
-      method: "GET", path: "/api/ext/scans",
-      desc: "Последние считанные коды (сначала новые). Параметр limit (по умолчанию 50, максимум 500). Подходит, если удобнее опрашивать список, а не ждать ответа scan-request.",
-      sample: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  "{BASE}/api/ext/scans?limit=20"'
-    },
-    {
-      method: "POST", path: "/api/ext/return-slides",
-      desc: "Вернуть планшет к рекламе и очистить данные подписанта. Цель: deviceId или workstationExternalId.",
-      sample: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/return-slides'
+      id: "api-answer", заголовок: "7. Как понять, что запрос доехал не полностью",
+      строить: function (х) {
+        х.appendChild(апиФраза("Внешней системе нельзя показать предупреждение, как оператору: у неё есть только ответ. Поэтому всё, что не доехало до клиента, названо в ответе словами, а не подразумевается."));
+        х.appendChild(апиТаблица(["Поле ответа", "Что означает"], [
+          ["`ok`", "заказ принят и адресат выбран однозначно. Это НЕ «клиент видит документ»"],
+          ["`deviceId`", "на какой планшет ушёл документ. Полезно, когда адресовались кодом места"],
+          ["`document`", "код документа, который в итоге ушёл на планшет"],
+          ["`shown`, `deviceOnline`", "был ли планшет на связи прямо сейчас. `false` означает, что документ сохранён и покажется при подключении, но не позже чем через два часа"],
+          ["`note`", "готовое к показу оператору пояснение к `shown: false`. При `shown: true` приходит `null`"],
+          ["`missingPlaceholders`", "теги, которые документ использует, а вы не передали. Они останутся в тексте как `{{вот так}}` и вернутся в том написании, в каком стоят в документе"],
+          ["`dropped`", "список потерь: что не поместилось в пределы или никуда не встало. Пустой список означает «доехало всё»"]
+        ]));
+        х.appendChild(апиПодзаголовок("Пределы и что попадает в список потерь"));
+        х.appendChild(апиФраза("Данные подписанта хранятся на каждый планшет отдельно и перечитываются на каждое подключение, отправку подписи и возврат с камеры, поэтому они обязаны оставаться небольшими. Пределы взяты заведомо выше любой настоящей формы согласия."));
+        х.appendChild(апиТаблица(["Что", "Предел", "Что скажет список потерь"], [
+          ["тегов в запросе", "100", "«тегов прислано N, взято 100: лишние не подставлены»"],
+          ["длина имени тега", "200 знаков", "обрезается молча"],
+          ["длина значения тега", "4000 знаков", "«значение тега «X» обрезано до 4000 знаков»"],
+          ["присланных пунктов", "100", "«пункт «X» не показан: пунктов сверх 100 не бывает»"],
+          ["надпись пункта, заголовок группы, подпись варианта", "2000 знаков", "«надпись «X» обрезана до 2000 знаков»"],
+          ["групп в запросе и вариантов в группе", "по 100", "лишние просто не берутся"],
+          ["картинок в запросе", "8", "отказ 400, а не потеря"],
+          ["размер картинки", "2 МБ в BASE64", "отказ 400, а не потеря"]
+        ], "api-tbl-case"));
+        х.appendChild(апиФраза("Кроме обрезки, в список потерь попадает то, что не встало никуда: «группы «X» в документе «CODE» нет: ни вопрос, ни выбор клиенту не показаны. Есть: ...», «варианта «Y» в группе «X» нет: выбор не применён, клиент увидит вопрос без ответа. Есть: ...», «картинка «ПЕЧАТЬ» не показана: в документе «CODE» нет такого тега. Есть: ...»."));
+        х.appendChild(апиВрезка("Проверять после каждого показа стоит три вещи: `shown` (клиент видит или увидит позже), `dropped` (пустой ли), `missingPlaceholders` (нет ли там тега, который вы собирались прислать). Ответ «ок» с непустым `dropped` означает, что клиент подписывает документ, из которого части он не увидел.", "warn"));
+      }
     }
   ];
+
+  // ---- Полные примеры на живые случаи ----
+  // Каждый пример это целое тело запроса, а не кусок: его копируют и выполняют. Кнопка
+  // «Отправить запрос» отправляет ровно это тело на тот же адрес, куда его прислала бы внешняя
+  // система, подставив планшет с этого стенда, если он есть. Так пример проверяется на месте, а
+  // не на словах.
+  var API_ПРИМЕРЫ = [
+    {
+      id: "primer-device",
+      заголовок: "Показать согласие клиенту на планшете у стойки",
+      текст: "Самый частый случай: чужая система знает номер планшета и шлёт на него согласие с данными клиента. Документ выбран кодом, поля подставлены, ничего лишнего.",
+      метод: "POST", путь: "/api/ext/show-document",
+      тело: {
+        deviceId: "DEVICE_ID",
+        documentCode: "main",
+        fields: {
+          "ФИО": "Иванова Анна Петровна",
+          "ДР": "01.01.1990",
+          "Пол": "F",
+          "email": "anna@example.by",
+          "telephone": "+375291234567",
+          "document": "MP1234567",
+          "date": "20.08.2026",
+          "Адрес регистрации": "г. Минск, ул. Ленина 1"
+        }
+      }
+    },
+    {
+      id: "primer-ws",
+      заголовок: "То же самое, но адресуясь по коду рабочего места",
+      текст: "Так делают почти всегда: код кабинета задаёте вы, он переживает замену планшета и не меняется при перенастройке. Ответ вернёт `deviceId` того планшета, который в итоге выбран.",
+      метод: "POST", путь: "/api/ext/show-document",
+      тело: {
+        workstationExternalId: "WS-204",
+        documentCode: "main",
+        fields: { "ФИО": "Иванова Анна Петровна", "ДР": "01.01.1990", "Пол": "F" }
+      }
+    },
+    {
+      id: "primer-checkbox",
+      заголовок: "Заказ со своим пунктом и условием показа",
+      текст: "Пункт `consent` уже стоит в документе, ему задаётся только отметка. Пункт про рассылку прислан заказом: он встанет на странице с галочкой «Показывать здесь чекбоксы, присланные по API» и покажется только женщинам. Группа `transfer` отвечает на вопрос документа.",
+      метод: "POST", путь: "/api/ext/show-document",
+      тело: {
+        workstationExternalId: "WS-204",
+        fields: { "ФИО": "Иванова Анна Петровна", "Пол": "F", "cross-border": true },
+        checkboxes: [
+          { key: "consent", checked: true },
+          { label: "Согласен на рассылку", checked: false, required: false,
+            visibleWhen: { field: "Пол", op: "eq", value: "F" } }
+        ],
+        groups: [
+          { key: "transfer", selected: "deny", title: "Передача данных за границу",
+            options: [{ key: "deny", label: "Запрещаю" }, { key: "allow", label: "Разрешаю" }] }
+        ]
+      }
+    },
+    {
+      id: "primer-image",
+      заголовок: "Заказ с картинкой",
+      текст: "В документе стоит блок картинки с именем тега `ПЕЧАТЬ`. Здесь прислана точка 1x1 в PNG: годная картинка минимального размера, на ней видно, что тег сработал. Тега с таким именем в документе может не быть, тогда запрос примут, а в списке потерь будет сказано, что картинке некуда встать.",
+      метод: "POST", путь: "/api/ext/show-document",
+      тело: {
+        workstationExternalId: "WS-204",
+        fields: { "ФИО": "Иванова Анна Петровна" },
+        images: { "ПЕЧАТЬ": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" }
+      }
+    },
+    {
+      id: "primer-slides",
+      заголовок: "Вернуть планшет к рекламе",
+      текст: "Этим заканчивается приём: данные подписанта стираются с планшета, экран возвращается к рекламе. Вызывать стоит всегда, даже если клиент подписал: подпись очищает сессию сама, а вот брошенный заказ иначе провисит до автовозврата.",
+      метод: "POST", путь: "/api/ext/return-slides",
+      тело: { workstationExternalId: "WS-204" }
+    }
+  ];
+
+  /// Пример как строка curl: то же тело, тот же адрес.
+  function апиПримерCurl(п) {
+    return 'curl -X ' + п.метод + ' -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \''
+      + JSON.stringify(п.тело, null, 2) + '\' \\\n  {BASE}' + п.путь;
+  }
+
+  API_РАЗДЕЛЫ.push({
+    id: "api-samples", заголовок: "8. Полные рабочие примеры",
+    строить: function (х) {
+      х.appendChild(апиФраза("Примеры целые: их копируют и выполняют, ничего не дописывая, кроме ключа и адресата. Кнопка «Отправить запрос» выполняет пример прямо отсюда, от имени вошедшего администратора, и подставляет планшет этой установки, если он заведён. Это настоящая отправка: если на планшете сейчас подписывается человек, документ у него сменится."));
+      API_ПРИМЕРЫ.forEach(function (п) {
+        var блок = el("div", "api-sample");
+        блок.appendChild(el("h4", "api-h4", п.заголовок));
+        блок.appendChild(апиФраза(п.текст));
+        var образец = апиПримерCurl(п);
+        блок.appendChild(апиОбразец(образец));
+        блок.appendChild(апиДействия(образец, { метод: п.метод, путь: п.путь, тело: п.тело, заголовок: п.заголовок }));
+        х.appendChild(блок);
+      });
+    }
+  });
+
+  API_РАЗДЕЛЫ.push({
+    id: "api-mistakes", заголовок: "9. Частые ошибки и что они значат",
+    строить: function (х) {
+      х.appendChild(апиФраза("Список собран по тому, на чём спотыкаются чужие системы. Слева то, что видит интегратор, справа то, что надо поправить."));
+      х.appendChild(апиТаблица(["Что видно", "Отчего это", "Что поправить"], [
+        ["401 `invalid api key` на каждый запрос",
+         "ключа нет в заголовке, он неверный, выключен или удалён. Текст один на все четыре случая",
+         "проверьте заголовок `X-Api-Key` (именно заголовок, не строку запроса) и состояние ключа на вкладке «API-ключи»"],
+        ["401 с пустым телом на `/api/admin/*`",
+         "админское API не принимает ключ: оно ходит по куке входа",
+         "для чужой системы нужен `/api/ext/*`. Админские пути существуют для самой админки"],
+        ["400 «Тело запроса пустое, а этот запрос ждёт JSON»",
+         "тело не отправлено или отправлено без `Content-Type`",
+         "добавьте `Content-Type: application/json` и тело"],
+        ["400 «Запрос не разобран»",
+         "в строке запроса значение не того вида (`limit=abc`)",
+         "проверьте виды значений в строке запроса"],
+        ["400 или 415 с пустым телом ответа",
+         "тело не разобралось как JSON, либо `Content-Type` не `application/json`. Эти два случая отвергает платформа до обработчика, и объяснить их своими словами нечем",
+         "проверьте JSON целиком и заголовок `Content-Type`"],
+        ["404 с пустым телом ответа",
+         "такого адреса на сервере нет: опечатка в пути или лишняя косая черта",
+         "сверьтесь со справочником ниже: там перечислен каждый путь"],
+        ["400 `pass deviceId or workstationExternalId`",
+         "в теле нет ни номера планшета, ни кода места. Так бывает, когда в шаблоне запроса поле осталось пустым",
+         "пришлите одно из двух. Пустая строка не считается заполненным полем"],
+        ["404 `workstation not found: WS-204`",
+         "места с таким кодом в системе нет. Код сравнивается без учёта регистра и пробелов, значит дело не в написании",
+         "заведите место `POST /api/ext/workstations` или возьмите список `GET /api/ext/workstations`"],
+        ["409 `several tablets are assigned to this workstation`",
+         "на месте несколько живых планшетов и на связи не один. Сервер не угадывает, кому показать документ",
+         "пришлите `deviceId` одного из перечисленных в тексте отказа, либо разнесите планшеты по разным местам"],
+        ["409 `deviceId and workstationExternalId disagree`",
+         "прислали и номер планшета, и код места, а планшет стоит не там",
+         "присылайте что-то одно. Обычно верен код места: планшет могли перевезти"],
+        ["`ok: true`, а на планшете ничего не изменилось",
+         "`shown: false`: планшет не на связи, документ сохранён и покажется при подключении",
+         "смотрите `shown` и `note` в ответе, а не только `ok`"],
+        ["документ показался, но части текста нет",
+         "условие показа не выполнилось: тег не прислан, прислан пустым или в другом виде",
+         "сверьтесь с `missingPlaceholders` в ответе и с видом значения (булев только `true` или `false`)"],
+        ["в тексте видно `{{ФИО}}`",
+         "тег документа не прислан вовсе. Так и задумано: пропуск должен быть виден, а не скрыт",
+         "имя тега придёт в `missingPlaceholders` ответа, пришлите его"],
+        ["клиент не увидел вопроса, который был в заказе",
+         "группы с таким именем в документе нет, либо варианта нет в группе",
+         "смотрите `dropped`: там названы и потеря, и имена, которые в документе есть"],
+        ["400 «Тег «urine» принимает только true или false, получено: 1»",
+         "булев тег прислан числом или словом",
+         "пришлите `true`, `false` или те же слова строкой"],
+        ["408 `timeout: код не был отсканирован`",
+         "клиент не показал код за отведённое время, камера закрыта",
+         "повторите запрос, при необходимости увеличьте `timeoutSec` (до 300)"],
+        ["409 «На этот планшет пришла другая заявка на сканирование»",
+         "две интеграции спорят за один планшет: новая заявка вытеснила вашу",
+         "повторите, когда планшет освободится. Это не поломка камеры"],
+        ["429 и `Retry-After`",
+         "перебор частоты: 600 запросов в минуту с адреса на внешнее API",
+         "повторите через `retryAfterSec` секунд, разнесите поток по времени"]
+      ], "api-tbl-mistakes"));
+    }
+  });
+
+  API_РАЗДЕЛЫ.push({
+    id: "api-nearby", заголовок: "10. Что есть рядом, помимо запросов",
+    строить: function (х) {
+      х.appendChild(апиПодзаголовок("Прямая ссылка на наблюдение за экраном"));
+      х.appendChild(апиФраза("`" + window.location.origin + "/admin/#watch=WS-204` это не метод API, а ссылка для оператора: она открывает наблюдение за экраном нужного планшета. Внешняя система может дать её оператору рядом со своим заказом, чтобы он не искал планшет в списке. Адресуется код рабочего места, имя планшета или его внутренний номер. Оператор должен быть уже вошедшим в админку."));
+      х.appendChild(апиФраза("Окно только для просмотра: оттуда на планшет не уходит ничего, камера у оператора не открывается, запись не ведётся. Картинка не передаётся: документ берётся с сервера один раз, а планшет присылает только то, что меняется."));
+      х.appendChild(апиПодзаголовок("Резервная копия шаблона"));
+      х.appendChild(апиФраза("На вкладке «Документ» кнопки «Экспорт» и «Импорт» сохраняют все страницы в файл и восстанавливают их обратно. Импорт заводит НОВЫЙ документ, а не затирает открытый: файл шаблона это отдельный документ, а не замена всему. Перед правками полезно сделать экспорт."));
+      х.appendChild(апиПодзаголовок("Журнал"));
+      х.appendChild(апиФраза("Вкладка «Логи» показывает сбои сервиса и планшетов: ошибки отправки подписи, отказ камеры, сбои сборки PDF, перезапуски сервиса. Записи хранятся на сервере и переживают перезапуск. Планшет сообщает о своих бедах сам, запросом `POST /api/log`."));
+      х.appendChild(апиПодзаголовок("Управление планшетами по локальной сети"));
+      х.appendChild(апиФраза("Приложение FreeKiosk на планшете принимает команды по своему адресу в локальной сети (по умолчанию порт 8080). Включите управление на вкладке «Планшеты», и на карточке планшета появится кнопка «Управление»: обновить страницу, очистить кэш, перезапустить приложение, перезагрузить планшет, включить или выключить экран, яркость, звуковой сигнал, произнести текст, показать сообщение, снимок экрана."));
+      х.appendChild(апиФраза("Сервер сам опрашивает планшеты каждые 5 минут и предупреждает о низком заряде и нехватке места, а при включённом автолечении поднимает зависший планшет: сначала перезапуском приложения, затем перезагрузкой. Если планшет не вернулся и после этого, автолечение останавливается и оператор получает уведомление, что планшет требует осмотра."));
+      х.appendChild(апиФраза("Перезагрузка планшета и надёжное выключение экрана работают, когда FreeKiosk назначен владельцем устройства (Device Owner). Это делается один раз при настройке планшета: на чистом устройстве, без добавленных аккаунтов Google, командой `adb shell dpm set-device-owner com.freekiosk/.DeviceAdminReceiver`. В том же режиме FreeKiosk блокирует кнопки «Домой» и «Недавние» и шторку уведомлений, поэтому клиент не может выйти из киоска."));
+      х.appendChild(апиФраза("Те же действия умеет расписание: правило на время и дни недели, с оговоркой «не трогать планшет, на котором сейчас открыт документ». Правила живут на вкладке «Планшеты»."));
+    }
+  });
+
+  // ==================================================================
+  // Справочник: каждый путь, который обслуживает сервер
+  // ==================================================================
+  // Группы совпадают с тем, как пути разложены в Program.cs: сначала внешнее API, потом админское
+  // по разделам, потом то, что живёт вне обеих групп. Порядок внутри группы тот же, что в коде,
+  // чтобы сверять было по чему.
+
+  var API_ГРУППЫ = [
+    { id: "ref-ext", заголовок: "Внешнее API: /api/ext", общие: "ext",
+      note: "Ключ в заголовке `X-Api-Key`. Ограничение 600 запросов в минуту с адреса. Вошедший администратор проходит и без ключа." },
+    { id: "ref-adm-devices", заголовок: "Админка: планшеты", общие: "admin",
+      note: "Всё под `/api/admin/*` и требует куки входа. Частота не ограничена: за этими путями уже стоит проверка куки." },
+    { id: "ref-adm-control", заголовок: "Админка: управление планшетами по локальной сети", общие: "admin",
+      note: "Каждый вызов идёт с сервера на планшет, поэтому работает, только пока планшеты доступны по сети. Неудача здесь никогда не влияет на подписание: о ней сообщается, и только." },
+    { id: "ref-adm-catalog", заголовок: "Админка: группы, места, ключи", общие: "admin" },
+    { id: "ref-adm-slides", заголовок: "Админка: реклама и плейлист", общие: "admin" },
+    { id: "ref-adm-docs", заголовок: "Админка: документы", общие: "admin" },
+    { id: "ref-adm-show", заголовок: "Админка: показ и сканирование", общие: "admin" },
+    { id: "ref-adm-sign", заголовок: "Админка: подписи", общие: "admin" },
+    { id: "ref-adm-schedule", заголовок: "Админка: расписание", общие: "admin" },
+    { id: "ref-adm-alerts", заголовок: "Админка: уведомления и журнал", общие: "admin" },
+    { id: "ref-open", заголовок: "Вне обеих групп: вход, планшет, проверка живости", общие: "нет",
+      note: "Здесь у каждого пути свой доступ, и он назван в статье." }
+  ];
+
+  // Отказы выбора адресата: они одинаковы у всех путей внешнего API, которые обращаются к
+  // одному планшету. Пересказывать их в каждой статье значило бы разойтись с кодом.
+  var API_ОТКАЗЫ_АДРЕСАТ = [
+    ["400", "`pass deviceId or workstationExternalId`, если не прислано ни то, ни другое"],
+    ["404", "`device not found`, если планшета с таким `deviceId` нет"],
+    ["404", "`this tablet is revoked`, если планшет отозван"],
+    ["404", "`workstation not found: WS-204`, если места с таким кодом нет"],
+    ["404", "`no tablet is assigned to this workstation`, если на месте нет планшетов"],
+    ["404", "`the only tablet(s) assigned to this workstation are revoked`, если на месте только отозванные"],
+    ["409", "`deviceId and workstationExternalId disagree: tablet '...' is not at workstation '...'. Pass one of them, not both.`"],
+    ["409", "`several tablets are assigned to this workstation; pass deviceId to choose one:` и перечень имён, номеров и состояния связи"]
+  ];
+  var API_ЦЕЛЬ_ПОЛЯ = [
+    ["`deviceId`", "строка", "внутренний номер планшета"],
+    ["`workstationExternalId`", "строка", "код рабочего места. Сравнивается без учёта регистра и окружающих пробелов"]
+  ];
+
+  var API_ПУТИ = [
+    // ---------------------------------------------------------------- внешнее API
+    {
+      g: "ref-ext", m: "GET", p: "/api/ext/devices", who: "Ключ API",
+      d: "Все планшеты системы: состояние связи, группы и рабочее место. С этого запроса удобно начинать: он ничего не меняет и сразу показывает, годится ключ или нет.",
+      req: null,
+      res: [
+        ["`deviceId`", "внутренний номер планшета"],
+        ["`name`", "имя, которое видит оператор"],
+        ["`status`", "`active` или `revoked`"],
+        ["`online`", "на связи ли планшет прямо сейчас"],
+        ["`lastSeenUtc`", "когда его видели в последний раз, UTC"],
+        ["`lastIp`", "у подключённого планшета адрес его живого соединения, у остальных последний известный"],
+        ["`groups`", "имена групп, в которых он состоит"],
+        ["`workstation`", "рабочее место: `id`, `externalId`, `name`, `location`, либо `null`"]
+      ],
+      fail: [], s: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  {BASE}/api/ext/devices', try: true
+    },
+    {
+      g: "ref-ext", m: "GET", p: "/api/ext/documents", who: "Ключ API",
+      d: "Какие документы есть в библиотеке и какими кодами они адресуются. Без этого коды живут в переписке и ломаются при первом же переименовании.",
+      req: null,
+      res: [
+        ["`code`", "код, которым документ адресуется в `documentCode`"],
+        ["`name`", "название документа"],
+        ["`isDefault`", "показывается ли он, когда код не прислали"]
+      ],
+      fail: [], s: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  {BASE}/api/ext/documents', try: true
+    },
+    {
+      g: "ref-ext", m: "GET", p: "/api/ext/workstations", who: "Ключ API",
+      d: "Рабочие места с их кодами. Код это то, чем внешняя система адресует кабинет.",
+      req: null,
+      res: [["`id`", "внутренний номер места"], ["`externalId`", "код места, заданный вами"],
+            ["`name`", "название"], ["`location`", "пояснение, где это"]],
+      fail: [], s: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  {BASE}/api/ext/workstations', try: true
+    },
+    {
+      g: "ref-ext", m: "POST", p: "/api/ext/workstations", who: "Ключ API",
+      d: "Завести рабочее место. Запрос идемпотентен по коду: повторный запрос с тем же `externalId` возвращает уже существующее место, а не заводит второе. Медсистема обычно шлёт «создай, если нет» на каждый заказ, и без этого копились места с одинаковым кодом, а планшет, привязанный ко второму такому месту, становился недостижим.",
+      req: [
+        ["`externalId`", "строка", "код места в вашей системе. Необязателен, но без него идемпотентности нет"],
+        ["`name`", "строка", "название. Без него место называется «Рабочее место»"],
+        ["`location`", "строка", "пояснение, где это"]
+      ],
+      res: [["`id`", "внутренний номер"], ["`externalId`", "код"], ["`name`", "название"], ["`location`", "пояснение"]],
+      fail: [],
+      s: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"externalId":"WS-204","name":"Касса 4","location":"1 этаж"}\' \\\n  {BASE}/api/ext/workstations',
+      try: { тело: { externalId: "WS-204", name: "Касса 4", location: "1 этаж" } }
+    },
+    {
+      g: "ref-ext", m: "POST", p: "/api/ext/enrollments", who: "Ключ API",
+      d: "Код активации нового планшета. Код вводится на самом планшете один раз, после чего планшет получает свой токен. Можно сразу привязать планшет к месту.",
+      req: [
+        ["`name`", "строка", "имя будущего планшета"],
+        ["`workstationExternalId`", "строка", "код места, к которому его привязать. Необязателен"]
+      ],
+      res: [["`code`", "код активации"], ["`expiresUtc`", "до какого момента он годен. Срок жизни 60 минут"]],
+      fail: [["404", "«Рабочего места с кодом «...» нет (workstationExternalId). Заведите его запросом POST /api/ext/workstations.»"]],
+      s: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"Ресепшн 1","workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/enrollments',
+      try: { тело: { name: "Ресепшн 1" } }
+    },
+    {
+      g: "ref-ext", m: "PUT", p: "/api/ext/devices/{id}/workstation", who: "Ключ API",
+      d: "Привязать планшет к рабочему месту по коду места. Пустой код здесь не принимается намеренно: раньше такой запрос молча отвязывал планшет и отвечал «ок», а внешняя система, забывшая подставить код в шаблон запроса, узнавала об этом только тогда, когда документ переставал находить планшет в кабинете. Отвязка это отдельное, названное вслух действие.",
+      req: [["`externalId`", "строка", "код рабочего места. Пустой не принимается"]],
+      res: [["`ok`", "`true`"], ["`deviceId`", "номер планшета"], ["`workstationExternalId`", "код места"]],
+      fail: [
+        ["400", "«Не задан externalId рабочего места. Чтобы отвязать планшет от места, вызовите DELETE /api/ext/devices/{id}/workstation.»"],
+        ["404", "«Планшета «...» в системе нет (deviceId).»"],
+        ["404", "«Рабочего места с кодом «...» нет (workstationExternalId). Заведите его запросом POST /api/ext/workstations.»"]
+      ],
+      s: 'curl -X PUT -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"externalId":"WS-204"}\' \\\n  {BASE}/api/ext/devices/DEVICE_ID/workstation'
+    },
+    {
+      g: "ref-ext", m: "DELETE", p: "/api/ext/devices/{id}/workstation", who: "Ключ API",
+      d: "Отвязать планшет от рабочего места. Отдельный вызов, а не пустое поле в запросе выше: отвязка должна быть названа вслух, иначе она случается по недосмотру.",
+      req: null,
+      res: [["`ok`", "`true`"], ["`deviceId`", "номер планшета"], ["`workstationExternalId`", "`null`"]],
+      fail: [["404", "«Планшета «...» в системе нет (deviceId).»"]],
+      s: 'curl -X DELETE -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  {BASE}/api/ext/devices/DEVICE_ID/workstation'
+    },
+    {
+      g: "ref-ext", m: "POST", p: "/api/ext/show-document", who: "Ключ API",
+      d: "Показать документ на одном планшете с данными подписанта. Это главный запрос всего API. Подробный разбор полей в разделах 2 по 7 руководства выше.",
+      req: API_ЦЕЛЬ_ПОЛЯ.concat([
+        ["`documentCode`", "строка", "код документа из библиотеки. Без него документ по умолчанию"],
+        ["`fields`", "объект", "значения тегов. Не больше 100 тегов, имя до 200 знаков, значение до 4000 знаков"],
+        ["`checkboxes`", "массив", "пункты согласия: `key`, `label`, `labelAppend`, `required`, `checked`, `visibleWhen`. Не больше 100 присланных пунктов, текст до 2000 знаков"],
+        ["`groups`", "массив", "выбор в группах: `key`, `selected`, `title`, `titleAppend`, `options[]`. Не больше 100 групп, по 100 вариантов, текст до 2000 знаков"],
+        ["`images`", "объект", "картинки заказа: «имя тега: BASE64». Не больше 8 картинок, до 2 МБ каждая в BASE64"]
+      ]),
+      res: [
+        ["`ok`", "`true`, заказ принят и адресат выбран однозначно"],
+        ["`deviceId`", "на какой планшет ушёл документ"],
+        ["`document`", "код показанного документа"],
+        ["`missingPlaceholders`", "теги документа, которые не передали"],
+        ["`shown`", "виден ли документ прямо сейчас"],
+        ["`deviceOnline`", "то же значение: был ли планшет на связи в момент запроса"],
+        ["`note`", "пояснение к `shown: false`, готовое к показу оператору. Иначе `null`"],
+        ["`dropped`", "список потерь. Пустой означает «доехало всё»"]
+      ],
+      fail: [
+        ["400", "«Тег «urine» принимает только true или false, получено: 1»"],
+        ["400", "«Документ с кодом «X» не найден. Доступные коды: ...»"],
+        ["400", "«Тег «ДР» используется в условии по возрасту, но значение «...» не похоже на дату рождения. Подойдёт 01.01.1990 или 1990-01-01.»"],
+        ["400", "«Тег «date» используется в условии по сроку, но значение «...» не похоже на дату. Подойдёт 01.01.1990 или 1990-01-01.»"],
+        ["400", "«В документе «...» нет ни одной страницы: показывать нечего.»"],
+        ["400", "«Слишком много картинок в одном запросе: не больше 8.»"],
+        ["400", "«У картинки не задано имя тега: непонятно, куда её ставить.»"],
+        ["400", "«Картинка «ПЕЧАТЬ» пришла пустой.»"],
+        ["400", "«Картинка «ПЕЧАТЬ» слишком большая: не больше двух мегабайт в BASE64.»"],
+        ["400", "«Картинка «ПЕЧАТЬ» это не BASE64.»"],
+        ["400", "«Картинка «ПЕЧАТЬ» не PNG, не JPG и не BMP. Другие виды нельзя вложить в PDF, и подписанный документ не совпал бы с тем, что видел клиент.»"]
+      ].concat(API_ОТКАЗЫ_АДРЕСАТ),
+      s: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204","documentCode":"SOGLASIE",\n       "fields":{"ФИО":"Иванова Анна","ДР":"01.01.1990","Пол":"F",\n                 "email":"a@example.by","telephone":"+375291234567",\n                 "document":"MP1234567","date":"20.08.2026",\n                 "cross-border":true,"urine":true,"UG":false,\n                 "Адрес регистрации":"г. Минск, ул. Ленина 1","text1":"доп. текст"},\n       "checkboxes":[{"key":"consent","checked":true},\n                     {"key":"golod","labelAppend":"(с 22:00)"},\n                     {"label":"Согласен на рассылку","checked":false,"required":false}],\n       "groups":[{"key":"transfer","selected":"deny","title":"Передача данных",\n                  "options":[{"key":"deny","label":"Запрещаю"}]}],\n       "images":{"ПЕЧАТЬ":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}}\' \\\n  {BASE}/api/ext/show-document',
+      try: { тело: { workstationExternalId: "WS-204", fields: { "ФИО": "Иванова Анна Петровна", "ДР": "01.01.1990", "Пол": "F" } } }
+    },
+    {
+      g: "ref-ext", m: "POST", p: "/api/ext/scan-request", who: "Ключ API",
+      d: "Попросить планшет отсканировать штрихкод или QR и ДОЖДАТЬСЯ результата: на планшете открывается камера, клиент показывает код, код возвращается в этом же ответе и сохраняется в списке. Поддерживаются QR, Data Matrix, EAN-13, EAN-8, Code-128 и ITF (только цифры и только чётное их количество).",
+      req: API_ЦЕЛЬ_ПОЛЯ.concat([
+        ["`timeoutSec`", "число", "сколько ждать. По умолчанию 60, не меньше 5 и не больше 300. Значение вне предела приводится к нему. Сам планшет не снимает дольше 90 секунд подряд без результата, поэтому ожидание длиннее полутора минут почти наверняка кончится таймаутом, а не кодом"]
+      ]),
+      res: [["`ok`", "`true`"], ["`deviceId`", "какой планшет сканировал"], ["`code`", "считанное значение"],
+            ["`format`", "вид кода: `QR_CODE`, `EAN_13`, `CODE_128` и прочие"],
+            ["`scanId`", "номер записи в списке считанных"], ["`createdUtc`", "когда считали, UTC"]],
+      fail: [
+        ["409", "«Планшет «...» сейчас не на связи, команда сканирования до него не дойдёт.» Ответ приходит сразу, а не после таймаута: команда живёт только в момент отправки"],
+        ["409", "«На этот планшет пришла другая заявка на сканирование, ваша снята. Повторите запрос, когда планшет освободится.»"],
+        ["409", "«Сканирование отменено.», если заявку сняли запросом `scan-cancel`"],
+        ["408", "`timeout: код не был отсканирован`. Камера на планшете закрывается, если её больше никто не ждёт"]
+      ].concat(API_ОТКАЗЫ_АДРЕСАТ),
+      s: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204","timeoutSec":60}\' \\\n  {BASE}/api/ext/scan-request'
+    },
+    {
+      g: "ref-ext", m: "POST", p: "/api/ext/scan-cancel", who: "Ключ API",
+      d: "Отменить сканирование и вернуть планшет к обычному экрану. Ожидающая заявка `scan-request` будится сразу и получает 409: раньше она висела до своего таймаута, все эти минуты считалась живой и не давала закрыть камеру даже чужому таймауту.",
+      req: API_ЦЕЛЬ_ПОЛЯ,
+      res: [["`ok`", "`true`"], ["`deviceId`", "номер планшета"],
+            ["`cancelledWaiter`", "была ли разбужена ожидающая заявка"]],
+      fail: [].concat(API_ОТКАЗЫ_АДРЕСАТ),
+      s: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/scan-cancel',
+      try: { тело: { workstationExternalId: "WS-204" } }
+    },
+    {
+      g: "ref-ext", m: "GET", p: "/api/ext/scans", who: "Ключ API",
+      d: "Последние считанные коды, новые сверху. Подходит, если удобнее опрашивать список, а не ждать ответа `scan-request`.",
+      req: [["`limit`", "число в строке запроса", "сколько записей вернуть. По умолчанию 50, не меньше 1 и не больше 500"]],
+      res: [["`id`", "номер записи"], ["`createdUtc`", "когда считали, UTC"], ["`code`", "значение кода"],
+            ["`format`", "вид кода"], ["`deviceId`", "номер планшета"], ["`deviceName`", "имя планшета"],
+            ["`workstationId`", "номер места"], ["`workstationName`", "название места"]],
+      fail: [],
+      s: 'curl -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  "{BASE}/api/ext/scans?limit=20"',
+      try: { путь: "/api/ext/scans?limit=20" }
+    },
+    {
+      g: "ref-ext", m: "POST", p: "/api/ext/return-slides", who: "Ключ API",
+      d: "Вернуть планшет к рекламе и стереть данные подписанта. Этим заканчивается приём. Отозванный и удалённый планшет молча не трогается: на его экране нет ни документа, ни рекламы, а запись состояния для удалённого планшета завела бы данные о том, кого в системе нет.",
+      req: API_ЦЕЛЬ_ПОЛЯ,
+      res: [["`ok`", "`true`"], ["`deviceId`", "номер планшета"]],
+      fail: [].concat(API_ОТКАЗЫ_АДРЕСАТ),
+      s: 'curl -X POST -H "X-Api-Key: ВАШ_КЛЮЧ" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"workstationExternalId":"WS-204"}\' \\\n  {BASE}/api/ext/return-slides',
+      try: { тело: { workstationExternalId: "WS-204" } }
+    },
+    // ---------------------------------------------------------------- админка: планшеты
+    {
+      g: "ref-adm-devices", m: "GET", p: "/api/admin/devices", who: "Кука админа",
+      d: "Список планшетов для админки, по имени. Состояние читается один раз на весь список: при двухстах планшетах чтение на каждый означало бы двести разборов одного и того же файла на каждое событие сети.",
+      req: null,
+      res: [
+        ["`id`, `name`, `status`", "номер, имя, `active` или `revoked`"],
+        ["`groupIds`, `groups`", "номера групп и их имена"],
+        ["`workstationId`, `workstationName`, `workstation`", "рабочее место: номер, название и объект `externalId`, `name`, `location`"],
+        ["`online`, `lastSeenUtc`, `lastIp`", "состояние связи и адрес"],
+        ["`controlIp`, `controlPort`", "адрес управления по локальной сети, если задан вручную"],
+        ["`health`", "последнее показание планшета: заряд, место, Wi-Fi. `null`, если не опрашивали"],
+        ["`appVersion`", "сборка страницы киоска, которую планшет сейчас держит. Пусто на старой странице, которая её не сообщает"],
+        ["`screen`", "что на экране: `slides` или `document`"],
+        ["`enrolledUtc`", "когда планшет активировали"]
+      ],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/devices', try: true
+    },
+    {
+      g: "ref-adm-devices", m: "POST", p: "/api/admin/devices/enroll", who: "Кука админа",
+      d: "Код активации нового планшета. То же, что внешнее `POST /api/ext/enrollments`, только место и группы задаются внутренними номерами, а срок жизни кода можно задать.",
+      req: [["`name`", "строка", "имя будущего планшета"],
+            ["`workstationId`", "строка", "внутренний номер места"],
+            ["`groupIds`", "массив строк", "номера групп"],
+            ["`ttlMinutes`", "число", "срок жизни кода в минутах. По умолчанию 60"]],
+      res: [["`code`", "код активации"], ["`expiresUtc`", "до какого момента годен"],
+            ["`name`, `workstationId`, `groupIds`", "то, что запомнено за кодом"]],
+      fail: [],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"Ресепшн 1","ttlMinutes":60}\' \\\n  {BASE}/api/admin/devices/enroll'
+    },
+    {
+      g: "ref-adm-devices", m: "PUT", p: "/api/admin/devices/{id}", who: "Кука админа",
+      d: "Изменить имя планшета, его группы и рабочее место.",
+      req: [["`name`", "строка", "новое имя"], ["`groupIds`", "массив строк", "новый состав групп"],
+            ["`workstationId`", "строка", "номер рабочего места"]],
+      res: [["`ok`", "`true`"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"Ресепшн 2"}\' \\\n  {BASE}/api/admin/devices/DEVICE_ID'
+    },
+    {
+      g: "ref-adm-devices", m: "POST", p: "/api/admin/devices/{id}/revoke", who: "Кука админа",
+      d: "Отозвать планшет. Это не пометка в списке, а «убрать всё с этого экрана прямо сейчас»: данные подписанта стираются, планшет уходит на экран активации, соединение рвётся. Отозванный планшет перестаёт быть адресатом и во внешнем API.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/devices/DEVICE_ID/revoke'
+    },
+    {
+      g: "ref-adm-devices", m: "POST", p: "/api/admin/devices/{id}/unrevoke", who: "Кука админа",
+      d: "Вернуть отозванный планшет в работу. Запись снова становится годной, планшету нужно подключиться заново.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/devices/DEVICE_ID/unrevoke'
+    },
+    {
+      g: "ref-adm-devices", m: "DELETE", p: "/api/admin/devices/{id}", who: "Кука админа",
+      d: "Удалить планшет. Порядок намеренный: сначала очистить экран и оборвать связь, пока планшет ещё числится в системе, потом удалить запись, состояние и снимок сессии. Раньше запись просто исчезала, а на планшете оставался висеть документ с данными клиента, и погасить его было нечем: все команды отбирают адресата по списку планшетов.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"]],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/devices/DEVICE_ID'
+    },
+    {
+      g: "ref-adm-devices", m: "POST", p: "/api/admin/devices/{id}/identify", who: "Кука админа",
+      d: "Показать номер прямо на экране планшета, чтобы найти его в зале. Номер рисует сам планшет, поэтому на выключенном он не появится, и молчаливое «ок» тут выглядело бы как «планшет жив и слушается».",
+      req: null, res: [["`code`", "номер, который сейчас показан на экране планшета"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"],
+             ["409", "«Планшет «...» отозван: он больше не подчиняется серверу и номер на нём не появится.»"],
+             ["409", "«Планшет «...» сейчас не на связи, номер на нём не появится.»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/devices/DEVICE_ID/identify'
+    },
+    {
+      g: "ref-adm-devices", m: "GET", p: "/api/admin/devices/{id}/screen", who: "Кука админа",
+      d: "Что сейчас на экране планшета, в том же виде, в каком это получил он сам. Нужно окну наблюдения: оно рисует документ своим отрисовщиком, а от планшета получает только то, что меняется. Ничего никуда не записывается.",
+      req: null,
+      res: [["`mode`", "`slides` или `document`"],
+            ["`document`", "разобранный документ, если он на экране"],
+            ["`slides`", "список картинок рекламы и интервал"]],
+      fail: [["404", "«Планшет не найден.»"]],
+      s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/devices/DEVICE_ID/screen'
+    },
+
+    // ---------------------------------------------------------------- админка: группы, места, ключи
+    {
+      g: "ref-adm-catalog", m: "GET", p: "/api/admin/groups", who: "Кука админа",
+      d: "Группы планшетов. Группой удобно адресовать рекламу и расписание; документ группе не показывается никогда.",
+      req: null, res: [["`id`", "номер группы"], ["`name`", "название"]], fail: [],
+      s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/groups', try: true
+    },
+    {
+      g: "ref-adm-catalog", m: "POST", p: "/api/admin/groups", who: "Кука админа",
+      d: "Завести группу.",
+      req: [["`name`", "строка", "название группы"]],
+      res: [["`id`", "номер новой группы"], ["`name`", "название"]], fail: [],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"Регистратура"}\' \\\n  {BASE}/api/admin/groups'
+    },
+    {
+      g: "ref-adm-catalog", m: "PUT", p: "/api/admin/groups/{id}", who: "Кука админа",
+      d: "Переименовать группу.",
+      req: [["`name`", "строка", "новое название"]], res: [["`ok`", "`true`"]],
+      fail: [["404", "группы с таким номером нет. Тело пустое"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"Первый этаж"}\' \\\n  {BASE}/api/admin/groups/GROUP_ID'
+    },
+    {
+      g: "ref-adm-catalog", m: "DELETE", p: "/api/admin/groups/{id}", who: "Кука админа",
+      d: "Удалить группу. Ссылки на неё вычищаются из планшетов и из картинок рекламы, а состав рекламы пересобирается и уходит на планшеты заново: они держат выданный им список и о группах сами не знают.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "группы с таким номером нет. Тело пустое"]],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/groups/GROUP_ID'
+    },
+    {
+      g: "ref-adm-catalog", m: "GET", p: "/api/admin/workstations", who: "Кука админа",
+      d: "Рабочие места целиком, с внутренними номерами. Внешнее API отдаёт то же самое, но адресуется кодом.",
+      req: null,
+      res: [["`id`", "внутренний номер"], ["`externalId`", "код места"], ["`name`", "название"], ["`location`", "пояснение"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/workstations', try: true
+    },
+    {
+      g: "ref-adm-catalog", m: "POST", p: "/api/admin/workstations", who: "Кука админа",
+      d: "Завести рабочее место. В отличие от внешнего `POST /api/ext/workstations`, здесь нет идемпотентности по коду: оператор видит список и заводит место сознательно.",
+      req: [["`externalId`", "строка", "код места"], ["`name`", "строка", "название"], ["`location`", "строка", "пояснение"]],
+      res: [["`id`, `externalId`, `name`, `location`", "заведённое место"]], fail: [],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"externalId":"WS-204","name":"Касса 4"}\' \\\n  {BASE}/api/admin/workstations'
+    },
+    {
+      g: "ref-adm-catalog", m: "PUT", p: "/api/admin/workstations/{id}", who: "Кука админа",
+      d: "Изменить код, название или пояснение рабочего места.",
+      req: [["`externalId`", "строка", "код"], ["`name`", "строка", "название"], ["`location`", "строка", "пояснение"]],
+      res: [["`ok`", "`true`"]],
+      fail: [["404", "места с таким номером нет. Тело пустое"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"Касса 5"}\' \\\n  {BASE}/api/admin/workstations/WS_ID'
+    },
+    {
+      g: "ref-adm-catalog", m: "DELETE", p: "/api/admin/workstations/{id}", who: "Кука админа",
+      d: "Удалить рабочее место. Планшеты, стоявшие на нём, остаются, но отвязываются: заказ по коду этого места после удаления получит `workstation not found`.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "места с таким номером нет. Тело пустое"]],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/workstations/WS_ID'
+    },
+    {
+      g: "ref-adm-catalog", m: "GET", p: "/api/admin/apikeys", who: "Кука админа",
+      d: "Список ключей внешнего API. Самого ключа в списке нет и быть не может: на сервере лежит только его SHA-256.",
+      req: null,
+      res: [["`id`", "номер ключа"], ["`label`", "название, заданное при создании"],
+            ["`createdUtc`", "когда создан"], ["`disabled`", "выключен ли"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/apikeys', try: true
+    },
+    {
+      g: "ref-adm-catalog", m: "POST", p: "/api/admin/apikeys", who: "Кука админа",
+      d: "Создать ключ. Открытый ключ возвращается ОДИН раз, в этом ответе: дальше его взять негде.",
+      req: [["`label`", "строка", "название ключа, например имя интеграции"]],
+      res: [["`id`", "номер ключа"], ["`label`", "название"], ["`key`", "сам ключ, `sk_` и 30 случайных байт. Больше не покажется"]],
+      fail: [],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"label":"ERP"}\' \\\n  {BASE}/api/admin/apikeys'
+    },
+    {
+      g: "ref-adm-catalog", m: "POST", p: "/api/admin/apikeys/{id}/disable", who: "Кука админа",
+      d: "Выключить ключ, не удаляя. «Перекрыть доступ на время разбирательства» и «забыть, что такой доступ был» это разные действия: удаление необратимо и требует заново настраивать чужую систему.",
+      req: null, res: [["`ok`", "`true`"], ["`disabled`", "`true`"]],
+      fail: [["404", "ключа с таким номером нет. Тело пустое"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/apikeys/KEY_ID/disable'
+    },
+    {
+      g: "ref-adm-catalog", m: "POST", p: "/api/admin/apikeys/{id}/enable", who: "Кука админа",
+      d: "Включить выключенный ключ обратно.",
+      req: null, res: [["`ok`", "`true`"], ["`disabled`", "`false`"]],
+      fail: [["404", "ключа с таким номером нет. Тело пустое"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/apikeys/KEY_ID/enable'
+    },
+    {
+      g: "ref-adm-catalog", m: "DELETE", p: "/api/admin/apikeys/{id}", who: "Кука админа",
+      d: "Удалить ключ навсегда. Восстановить его нельзя: у сервера есть только хэш.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "ключа с таким номером нет. Тело пустое"]],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/apikeys/KEY_ID'
+    },
+
+    // ---------------------------------------------------------------- админка: реклама
+    {
+      g: "ref-adm-slides", m: "GET", p: "/api/admin/images", who: "Кука админа",
+      d: "Картинки рекламы со сроками показа, областью показа и признаком «показывается сегодня». Признак считает сервер: у него и часы, и правило, а оператор иначе гадал бы, попадает ли сегодняшний день в заданный срок.",
+      req: null,
+      res: [["`id`, `originalName`, `uploadedUtc`", "номер, имя файла при загрузке, когда загружена"],
+            ["`url`", "адрес картинки, `/media/имя`"],
+            ["`showFrom`, `showTo`", "срок показа, `гггг-ММ-дд` или пусто"],
+            ["`groupIds`, `exceptGroupIds`", "где показывать и где не показывать. Пустые списки означают «везде»"],
+            ["`showsToday`", "участвует ли она в рекламе сегодня"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/images', try: true
+    },
+    {
+      g: "ref-adm-slides", m: "POST", p: "/api/admin/images", who: "Кука админа",
+      d: "Загрузить картинки рекламы. Единственный путь во всём API, который принимает не JSON, а `multipart/form-data`. Предел на файл 8 МБ: реклама уезжает на планшеты целиком и хранится на сервере, поэтому снимку с телефона на двадцать мегабайт здесь не место.",
+      req: [["файлы формы", "multipart", "любое число файлов. Годятся `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp`, вид определяется по расширению или по `Content-Type`"]],
+      res: [["`added`", "что загружено: `id`, `originalName`, `url`"],
+            ["`skipped`", "что пропущено и почему: «имя: это не картинка», «имя: N МБ, а больше 8 МБ картинка быть не может»"]],
+      fail: [["400", "`{\"error\":\"expected multipart/form-data\"}`, если тело не форма"],
+             ["400", "«Ничего не загружено. » и перечень причин, если не подошёл ни один файл. Молча пропустить файл нельзя: оператор увидел бы «Картинки загружены» и не понял, почему их в списке нет"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -F "file=@banner.png" \\\n  {BASE}/api/admin/images'
+    },
+    {
+      g: "ref-adm-slides", m: "DELETE", p: "/api/admin/images/{id}", who: "Кука админа",
+      d: "Удалить картинку. Список рекламы пересобирается и уходит на планшеты заново: планшет держит выданный ему список и о том, что файла больше нет, не знает, поэтому показывал бы битую картинку до самой перезагрузки.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "картинки с таким номером нет. Тело пустое"]],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/images/IMAGE_ID'
+    },
+    {
+      g: "ref-adm-slides", m: "PUT", p: "/api/admin/images/{id}/dates", who: "Кука админа",
+      d: "Срок показа картинки: с какого и по какой день она участвует в рекламе. Пустая дата снимает ограничение с этой стороны.",
+      req: [["`showFrom`", "строка", "дата начала, `2026-08-21` или `21.08.2026`. Пусто снимает"],
+            ["`showTo`", "строка", "дата окончания, тот же вид"]],
+      res: [["`ok`", "`true`"], ["`showFrom`, `showTo`", "что сохранено, в виде `гггг-ММ-дд`"]],
+      fail: [["400", "«Дата начала показа не разобрана. Подойдёт 2026-08-21 или 21.08.2026.»"],
+             ["400", "«Дата окончания показа не разобрана. Подойдёт 2026-08-21 или 21.08.2026.»"],
+             ["400", "«Дата окончания раньше даты начала: такая картинка не покажется никогда.»"],
+             ["404", "«Картинка не найдена.»"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"showFrom":"2026-09-01","showTo":"2026-09-30"}\' \\\n  {BASE}/api/admin/images/IMAGE_ID/dates'
+    },
+    {
+      g: "ref-adm-slides", m: "PUT", p: "/api/admin/images/{id}/groups", who: "Кука админа",
+      d: "Где показывать картинку и где не показывать. Пустые списки означают «везде».",
+      req: [["`groupIds`", "массив строк", "показывать только в этих группах"],
+            ["`exceptGroupIds`", "массив строк", "не показывать в этих группах"]],
+      res: [["`ok`", "`true`"], ["`groupIds`, `exceptGroupIds`", "что сохранено"]],
+      fail: [["400", "«Группа указана и в «показывать», и в «кроме»: » и имена спорных групп. Молча выбрать одно из двух значило бы оставить оператора в уверенности, что он задал другое"],
+             ["404", "«Картинка не найдена.»"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"groupIds":["GROUP_ID"],"exceptGroupIds":[]}\' \\\n  {BASE}/api/admin/images/IMAGE_ID/groups'
+    },
+    {
+      g: "ref-adm-slides", m: "GET", p: "/api/admin/playlist", who: "Кука админа",
+      d: "Плейлист адресата. Читается оттуда же, куда пишется: для группы и набора это список первого их планшета. Раньше здесь отдавался общий список, и оператор, сохранивший рекламу для группы, при следующем заходе видел чужой набор, а следующее сохранение затирало то, что он только что задал.",
+      req: [["`target`", "строка в строке запроса", "`all`, `group:{id}`, `device:{id}` или `devices`"],
+            ["`ids`", "строка в строке запроса", "номера планшетов через запятую, когда `target=devices`"]],
+      res: [["`target`", "чей плейлист вернули"], ["`imageIds`", "номера картинок по порядку"],
+            ["`intervalSec`", "сколько секунд держится каждая"], ["`mode`", "`slides` или `document`"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" "{BASE}/api/admin/playlist?target=all"',
+      try: { путь: "/api/admin/playlist?target=all" }
+    },
+    {
+      g: "ref-adm-slides", m: "PUT", p: "/api/admin/playlist", who: "Кука админа",
+      d: "Сохранить плейлист и показать его. Ответ говорит и то и другое отдельно: «Сохранено и отправлено» звучит одинаково и когда реклама поехала на десять планшетов, и когда ни один из них не включён.",
+      req: [["`target`", "строка", "`all`, `group:{id}`, `device:{id}` или `devices`"],
+            ["`imageIds`", "массив строк", "номера картинок по порядку"],
+            ["`intervalSec`", "число", "сколько секунд держится каждая. По умолчанию 8"],
+            ["`deviceIds`", "массив строк", "набор планшетов, когда `target` равен `devices`"]],
+      res: [["`ok`", "`true`"], ["`shown`", "сколько планшетов получили плейлист прямо сейчас"]],
+      fail: [["400", "«Отметьте хотя бы один планшет.», если `target` равен `devices`, а набор пуст"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"target":"all","imageIds":["IMAGE_ID"],"intervalSec":8}\' \\\n  {BASE}/api/admin/playlist'
+    },
+
+    // ---------------------------------------------------------------- админка: документы
+    {
+      g: "ref-adm-docs", m: "GET", p: "/api/admin/field-schema", who: "Кука админа",
+      d: "Какие теги существуют, какие значения они принимают и как эти значения называются для человека. Редактор читает список отсюда, а не держит свою копию: иначе добавленный тег появился бы в одном месте и не появился в другом.",
+      req: null,
+      res: [["`fields[].name`", "имя тега"],
+            ["`fields[].values`", "допустимые значения, если их набор задан (`M`/`F`, `true`/`false`), иначе `null`"],
+            ["`fields[].valueLabels`", "как показать значение человеку: `M` это «М (мужской)». На проводе остаётся `M`"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/field-schema', try: true
+    },
+    {
+      g: "ref-adm-docs", m: "GET", p: "/api/admin/documents", who: "Кука админа",
+      d: "Библиотека документов целиком, с внутренними номерами. Внешнее API отдаёт из неё только код, название и признак «по умолчанию».",
+      req: null,
+      res: [["`id`", "внутренний номер"], ["`code`", "код для API"], ["`name`", "название"],
+            ["`isDefault`", "показывается ли без кода"], ["`kind`", "`info` у информационного документа, иначе пусто"],
+            ["`updatedUtc`", "когда его правили в последний раз"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/documents', try: true
+    },
+    {
+      g: "ref-adm-docs", m: "POST", p: "/api/admin/documents", who: "Кука админа",
+      d: "Завести документ или сделать копию существующего. Новый начинается чистым: одна пустая страница и введённое название. Раньше новый заводился копией образцового согласия, и человек получал чужой готовый текст и не понимал, откуда он взялся.",
+      req: [["`code`", "строка", "код для API. Обязателен"],
+            ["`name`", "строка", "название. Без него берётся код"],
+            ["`copyOfId`", "строка", "номер документа, с которого сделать копию"]],
+      res: [["`id`, `code`, `name`, `isDefault`, `kind`, `updatedUtc`", "заведённый документ"]],
+      fail: [["400", "«Больше 50 документов не бывает: список перестанет быть списком.»"],
+             ["400", "«Код документа обязателен: по нему документ вызывается из внешней системы.»"],
+             ["400", "«Код «X» уже занят другим документом.»"],
+             ["400", "«Документ, с которого делается копия, не найден.»"],
+             ["400", "«Не удалось создать документ.»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"code":"SOGLASIE","name":"Согласие на обработку"}\' \\\n  {BASE}/api/admin/documents'
+    },
+    {
+      g: "ref-adm-docs", m: "PUT", p: "/api/admin/documents/{id}", who: "Кука админа",
+      d: "Сменить код или название документа. Текст документа этим запросом не меняется.",
+      req: [["`code`", "строка", "новый код"], ["`name`", "строка", "новое название"]],
+      res: [["`ok`", "`true`"]],
+      fail: [["400", "«Документ не найден.»"], ["400", "«Код документа не может быть пустым.»"],
+             ["400", "«Код «X» уже занят другим документом.»"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"code":"SOGLASIE-2"}\' \\\n  {BASE}/api/admin/documents/DOC_ID'
+    },
+    {
+      g: "ref-adm-docs", m: "POST", p: "/api/admin/documents/{id}/default", who: "Кука админа",
+      d: "Сделать документ основным: именно он покажется, когда запрос пришёл без `documentCode`.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["400", "«Документ не найден.»"], ["400", "«Не удалось переставить документ по умолчанию.»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/documents/DOC_ID/default'
+    },
+    {
+      g: "ref-adm-docs", m: "DELETE", p: "/api/admin/documents/{id}", who: "Кука админа",
+      d: "Удалить документ вместе с его текстом. Уже подписанные записи не трогаются: в них лежит снимок того, что подписали.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["400", "«Документ не найден.»"],
+             ["400", "«Это документ по умолчанию: он показывается, когда запрос пришёл без кода. Сначала назначьте по умолчанию другой.»"],
+             ["400", "«Последний документ удалить нельзя.»"]],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/documents/DOC_ID'
+    },
+    {
+      g: "ref-adm-docs", m: "GET", p: "/api/admin/document", who: "Кука админа",
+      d: "Текст документа: страницы, блоки, пункты, группы, условия. Без `id` отдаётся документ по умолчанию, так работает всё, написанное до появления библиотеки. Версия документа едет заголовками, а не в теле: тело остаётся самим документом.",
+      req: [["`id`", "строка в строке запроса", "номер документа. Без него документ по умолчанию"]],
+      res: [["тело", "документ целиком: `title`, `kind`, `pages[]` и настройки показа"],
+            ["заголовок `X-Doc-Rev`", "версия текста. Её надо вернуть при сохранении, чтобы сверить"],
+            ["заголовок `X-Doc-Id`", "номер документа, который отдали"]],
+      fail: [["404", "«Документ не найден.»"]],
+      s: 'curl -b "sk_admin=КУКА" "{BASE}/api/admin/document?id=DOC_ID"', try: { путь: "/api/admin/document" }
+    },
+    {
+      g: "ref-adm-docs", m: "PUT", p: "/api/admin/document", who: "Кука админа",
+      d: "Сохранить текст документа целиком. Сверка версий по желанию отправителя: админка шлёт заголовок `X-Doc-Rev` с версией, от которой правила, а внешняя система и ввоз шаблона ничего не шлют и работают перезаписью. Без сверки две открытые админки молча затирали бы работу друг друга.",
+      req: [["`id`", "строка в строке запроса", "какой документ сохранить. Без него документ по умолчанию"],
+            ["заголовок `X-Doc-Rev`", "строка", "версия, от которой правили. Необязателен"],
+            ["тело", "документ", "весь документ целиком, как его отдал `GET /api/admin/document`"]],
+      res: [["`ok`", "`true`"],
+            ["`warnings`", "замечания разбора: то, что стоит знать, но что смысла документа не меняет. Например имя элемента, совпавшее с тегом API"],
+            ["заголовок `X-Doc-Rev`", "новая версия текста"]],
+      fail: [["400", "`{\"error\":\"document required\"}`, если тело пустое"],
+             ["400", "«Условие сложнее, чем документ умеет хранить, и при сохранении оно изменилось бы само: содержимое показалось бы там, где вы его прятали. Упростите условие. Мешает: ...»"],
+             ["400", "«Информационный документ не подписывают и никуда не сохраняют, поэтому поля подписи, сканирование и обязательные пункты на нём работать не будут ... Мешают: ...»"],
+             ["400", "«Эти картинки нельзя использовать в документе: их не удастся вложить в PDF. Подойдут PNG, JPG или BMP. Проблемные файлы: ...»"],
+             ["404", "«Документ не найден.» или «Документ не найден: ID»"],
+             ["409", "«Документ уже изменён в другом окне или другим оператором. Возьмите свежую версию, иначе чужая работа будет затёрта.»"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -H "X-Doc-Rev: ВЕРСИЯ_ИЗ_GET" \\\n  -d @документ.json \\\n  "{BASE}/api/admin/document?id=DOC_ID"'
+    },
+    {
+      g: "ref-adm-docs", m: "POST", p: "/api/admin/document/preview", who: "Кука админа",
+      d: "Разобрать документ с тестовыми значениями РОВНО так, как его увидел бы планшет: теги подставлены, условия применены, присланные пункты вставлены. Ничего не сохраняется и ни один планшет не трогается. Если в теле пришёл документ, разбирается он, а не сохранённый: так предпросматриваются несохранённые правки редактора.",
+      req: [["`document`", "документ", "что разбирать. Без него берётся сохранённый по `documentId`"],
+            ["`documentId`", "строка", "номер сохранённого документа"],
+            ["`fields`", "объект", "значения тегов"],
+            ["`checkboxes`", "массив", "пункты, как во внешнем показе"],
+            ["`groups`", "массив", "выбор в группах"],
+            ["`images`", "объект", "картинки заказа"]],
+      res: [["`document`", "разобранный документ"],
+            ["`placeholders`", "все теги, которые документ использует"],
+            ["`missingPlaceholders`", "те из них, что не передали"],
+            ["`pagesTotal`", "сколько страниц в документе"],
+            ["`pagesShown`", "сколько осталось после условий"]],
+      fail: [["400", "«Тег «X» принимает только true или false, получено: ...»"],
+             ["400", "«Тег «X» используется в условии по возрасту (или по сроку), но значение «...» не похоже на дату.»"],
+             ["400", "отказ по картинке, с именем тега"],
+             ["404", "«Документ не найден: ID»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"fields":{"ФИО":"Иванова Анна","Пол":"F"}}\' \\\n  {BASE}/api/admin/document/preview',
+      try: { тело: { fields: { "ФИО": "Иванова Анна Петровна", "Пол": "F" } } }
+    },
+    {
+      g: "ref-adm-docs", m: "POST", p: "/api/admin/document/pdf-layout", who: "Кука админа",
+      d: "Где именно окажется каждая строка будущего PDF. Считает это тот же генератор, который потом соберёт настоящий файл, поэтому макет в админке не похож на PDF, а совпадает с ним. Рисовать PDF в браузере для этого не нужно.",
+      req: [["`document`", "документ", "что размечать. Без него берётся сохранённый по `documentId`"],
+            ["`documentId`", "строка", "номер сохранённого документа"],
+            ["`fields`", "объект", "значения тегов: от длины текста зависит, на какой странице окажется подпись"],
+            ["`checkboxes`", "массив", "пункты, как во внешнем показе"]],
+      res: [["`pageWidth`, `pageHeight`, `pageCount`", "размеры листа и сколько их вышло"],
+            ["`items`", "каждая строка с её местом на листе"],
+            ["`placements`", "заданные оператором места полей подписи"],
+            ["`fields`", "поля подписи документа. Пустое имя это итоговая подпись под документом"]],
+      fail: [["400", "«Тег «X» принимает только true или false, получено: ...»"],
+             ["400", "«Тег «X» используется в условии по возрасту (или по сроку), но значение «...» не похоже на дату.»"],
+             ["404", "«Документ не найден: ID»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"fields":{"ФИО":"Иванова Анна"}}\' \\\n  {BASE}/api/admin/document/pdf-layout'
+    },
+    {
+      g: "ref-adm-docs", m: "POST", p: "/api/admin/document/import", who: "Кука админа",
+      d: "Ввоз файла шаблона. Заводит НОВЫЙ документ, а не затирает открытый: с библиотекой затирание означало бы «принёс шаблон от коллеги, потерял свой». Картинки из файла кладутся в медиатеку под теми же именами, на которые ссылается документ, иначе перенесённый шаблон показывал бы пустые рамки вместо печатей. Уже существующий файл не трогается: его могли заменить нарочно.",
+      req: [["`code`", "строка в строке запроса", "код нового документа. Без него код сочиняется из названия, а занятый дополняется числом"],
+            ["`title`", "строка в строке запроса", "название нового документа"],
+            ["тело", "файл шаблона", "то, что сохранила кнопка «Экспорт»: `kind`, `version` (1 без картинок, 2 с картинками), `document`, `images[]`"]],
+      res: [["`ok`", "`true`"], ["`pages`", "сколько страниц принято"], ["`images`", "сколько картинок восстановлено"],
+            ["`id`", "номер заведённого документа"], ["`code`", "его код"]],
+      fail: [["400", "«Это не файл шаблона документа HELIX SignTablet.»"],
+             ["400", "«Версия файла шаблона не поддерживается.»"],
+             ["400", "«Условие сложнее, чем документ умеет хранить ...»: правило то же, что при сохранении из редактора"],
+             ["400", "«В файле нет ни одной пригодной страницы документа.»"],
+             ["400", "отказ заведения документа: занятый код, предел в 50 документов"],
+             ["404", "«Документ не найден: ID»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d @шаблон.json \\\n  "{BASE}/api/admin/document/import?code=IMPORT&title=Ввезённый"'
+    },
+
+    // ---------------------------------------------------------------- админка: управление по сети
+    {
+      g: "ref-adm-control", m: "GET", p: "/api/admin/kiosk-control/settings", who: "Кука админа",
+      d: "Настройки управления планшетами по локальной сети. Ключ не отдаётся никогда: вместо него приходит признак «задан или нет», чтобы открытая админка не выставляла напоказ пароль от всего парка.",
+      req: null,
+      res: [["`enabled`", "включено ли управление"], ["`port`", "порт FreeKiosk, по умолчанию 8080"],
+            ["`timeoutSec`", "сколько ждать ответа планшета"],
+            ["`autoHeal`, `autoHealAfterMinutes`", "автолечение и через сколько минут молчания начинать"],
+            ["`batteryWarnPercent`, `storageWarnPercent`", "пороги предупреждений"],
+            ["`apiKeySet`", "задан ли ключ управления. Сам ключ не отдаётся"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/kiosk-control/settings', try: true
+    },
+    {
+      g: "ref-adm-control", m: "PUT", p: "/api/admin/kiosk-control/settings", who: "Кука админа",
+      d: "Сохранить настройки. Пустой ключ означает «оставить прежний», а стереть его это отдельная просьба, поле `clearApiKey`. Смена включения, порта или ключа сбрасывает показания планшетов: снятые через прежний адрес, они описывают состояние, которое уже нечем проверить.",
+      req: [["`enabled`", "булев", "включить управление"], ["`port`", "число", "порт FreeKiosk"],
+            ["`apiKey`", "строка", "ключ управления. Пустой оставляет прежний"],
+            ["`clearApiKey`", "булев", "стереть сохранённый ключ"],
+            ["`timeoutSec`", "число", "сколько ждать ответа планшета"],
+            ["`autoHeal`", "булев", "поднимать зависший планшет"],
+            ["`autoHealAfterMinutes`", "число", "через сколько минут молчания начинать"],
+            ["`batteryWarnPercent`", "число", "порог предупреждения по заряду"],
+            ["`storageWarnPercent`", "число", "порог предупреждения по свободному месту"]],
+      res: [["то же, что у `GET`", "сохранённые настройки, снова без самого ключа"]],
+      fail: [["400", "`{\"error\":\"settings required\"}`, если тело пустое"],
+             ["400", "ключ управления не годится для передачи по HTTP: такой ключ отвергается здесь, а не превращается потом в «планшет не отвечает по сети» на каждой команде"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"enabled":true,"port":8080,"apiKey":"","clearApiKey":false,"timeoutSec":5,\n       "autoHeal":false,"autoHealAfterMinutes":5,"batteryWarnPercent":20,"storageWarnPercent":10}\' \\\n  {BASE}/api/admin/kiosk-control/settings'
+    },
+    {
+      g: "ref-adm-control", m: "PUT", p: "/api/admin/devices/{id}/control-address", who: "Кука админа",
+      d: "Где искать этот планшет в локальной сети. Обычно это тот же адрес, с которого он подключился, но когда планшет ходит через маршрутизатор, виден адрес маршрутизатора, а не планшета. Пустой `ip` снимает переопределение. Прежнее показание забывается: оно снято со старого адреса и о новом ничего не говорит.",
+      req: [["`ip`", "строка", "адрес планшета в локальной сети. Пустой снимает переопределение"],
+            ["`port`", "число", "порт, если он отличается от общего"]],
+      res: [["`ok`", "`true`"]],
+      fail: [["400", "«Укажите IP-адрес планшета в локальной сети, например 192.168.1.50.»"],
+             ["404", "планшета с таким номером нет. Тело пустое"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"ip":"192.168.1.50","port":8080}\' \\\n  {BASE}/api/admin/devices/DEVICE_ID/control-address'
+    },
+    {
+      g: "ref-adm-control", m: "POST", p: "/api/admin/devices/{id}/kiosk/{command}", who: "Кука админа",
+      d: "Команда планшету по локальной сети. Команды перечислены поимённо и сопоставлены путям FreeKiosk на сервере: свободного пути от клиента здесь нет, поэтому запрос нельзя превратить в произвольный вызов к планшету. Каждая команда пишется в журнал, удалась она или нет.",
+      req: [["`{command}`", "часть адреса", "`reboot`, `restart-app`, `reload`, `clear-cache`, `screen-on`, `screen-off`, `beep`, `wake`"]],
+      res: [["`ok`", "`true`, если планшет принял команду"]],
+      fail: [["400", "«Неизвестная команда.»"],
+             ["404", "планшета с таким номером нет. Тело пустое"],
+             ["502", "планшет не ответил: в теле `error` с причиной от сети или от самого FreeKiosk"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/devices/DEVICE_ID/kiosk/reload'
+    },
+    {
+      g: "ref-adm-control", m: "POST", p: "/api/admin/devices/{id}/kiosk/brightness", who: "Кука админа",
+      d: "Яркость экрана планшета.",
+      req: [["`value`", "число", "0..100. Значение вне предела приводится к нему, по умолчанию 100"]],
+      res: [["`ok`", "`true`"], ["`value`", "какое значение ушло на планшет"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"], ["502", "планшет не ответил: в теле `error`"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"value":80}\' \\\n  {BASE}/api/admin/devices/DEVICE_ID/kiosk/brightness'
+    },
+    {
+      g: "ref-adm-control", m: "POST", p: "/api/admin/devices/{id}/kiosk/volume", who: "Кука админа",
+      d: "Громкость планшета.",
+      req: [["`value`", "число", "0..100. Значение вне предела приводится к нему, по умолчанию 50"]],
+      res: [["`ok`", "`true`"], ["`value`", "какое значение ушло на планшет"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"], ["502", "планшет не ответил: в теле `error`"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"value":50}\' \\\n  {BASE}/api/admin/devices/DEVICE_ID/kiosk/volume'
+    },
+    {
+      g: "ref-adm-control", m: "POST", p: "/api/admin/devices/{id}/kiosk/say", who: "Кука админа",
+      d: "Произнести текст вслух на планшете, голосом `ru-RU`. Так зовут человека к стойке или находят планшет на слух.",
+      req: [["`text`", "строка", "что произнести. От 1 до 500 знаков"]],
+      res: [["`ok`", "`true`"]],
+      fail: [["400", "«Текст обязателен (до 500 символов).»"],
+             ["404", "планшета с таким номером нет. Тело пустое"], ["502", "планшет не ответил: в теле `error`"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"text":"Подойдите к стойке номер четыре"}\' \\\n  {BASE}/api/admin/devices/DEVICE_ID/kiosk/say'
+    },
+    {
+      g: "ref-adm-control", m: "POST", p: "/api/admin/devices/{id}/kiosk/toast", who: "Кука админа",
+      d: "Показать короткое сообщение поверх экрана планшета.",
+      req: [["`text`", "строка", "что показать. От 1 до 200 знаков"]],
+      res: [["`ok`", "`true`"]],
+      fail: [["400", "«Текст обязателен (до 200 символов).»"],
+             ["404", "планшета с таким номером нет. Тело пустое"], ["502", "планшет не ответил: в теле `error`"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"text":"Планшет забирают на обслуживание"}\' \\\n  {BASE}/api/admin/devices/DEVICE_ID/kiosk/toast'
+    },
+    {
+      g: "ref-adm-control", m: "GET", p: "/api/admin/devices/{id}/kiosk/health", who: "Кука админа",
+      d: "Опросить планшет прямо сейчас. Это самое свежее показание, какое есть, поэтому оно заодно ложится на карточку планшета, не дожидаясь следующего обхода. Тем же запросом проверяют, верно ли задан адрес управления.",
+      req: null,
+      res: [["`checkedUtc`", "когда снято"], ["`reachable`", "отозвался ли планшет"],
+            ["`error`", "почему не отозвался"],
+            ["`batteryPercent`, `charging`", "заряд и стоит ли на зарядке"],
+            ["`wifiSignalPercent`, `wifiSsid`", "качество связи и сеть"],
+            ["`storageFreePercent`", "сколько свободного места"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"]],
+      s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/devices/DEVICE_ID/kiosk/health'
+    },
+    {
+      g: "ref-adm-control", m: "GET", p: "/api/admin/devices/{id}/kiosk/screenshot", who: "Кука админа",
+      d: "Снимок экрана планшета. Отдаётся как изображение, а не как JSON: это единственный ответ такого вида во всём админском API.",
+      req: null,
+      res: [["тело", "картинка, обычно `image/png`"]],
+      fail: [["404", "планшета с таким номером нет. Тело пустое"],
+             ["502", "планшет не ответил: в теле `error` с причиной"]],
+      s: 'curl -b "sk_admin=КУКА" \\\n  -o snimok.png \\\n  {BASE}/api/admin/devices/DEVICE_ID/kiosk/screenshot'
+    },
+
+    // ---------------------------------------------------------------- админка: расписание
+    {
+      g: "ref-adm-schedule", m: "GET", p: "/api/admin/schedule/actions", who: "Кука админа",
+      d: "Какие действия умеет расписание. Список отдаёт сервер, чтобы интерфейс и исполнитель не могли разойтись в именах.",
+      req: null,
+      res: [["`key`", "имя действия: `screen-on`, `screen-off`, `wake`, `brightness`, `volume`, `return-slides`, `reload`, `restart-app`, `clear-cache`, `reboot`, `beep`, `toast`, `say`"],
+            ["`title`", "как оно называется для человека"],
+            ["`needsValue`", "нужно ли число 0..100 (яркость, громкость)"],
+            ["`needsText`", "нужен ли текст (сообщение, произнести)"],
+            ["`catchUp`", "можно ли выполнить с опозданием, если сервис был выключен в назначенный момент. Включение экрана утром догонять надо, перезагрузку нельзя: опоздавшая на полчаса команда перезагрузит парк посреди рабочего дня"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/schedule/actions', try: true
+    },
+    {
+      g: "ref-adm-schedule", m: "GET", p: "/api/admin/schedule", who: "Кука админа",
+      d: "Правила расписания и часы сервера. Часы здесь потому, что оператор задаёт время по ним, и это должно быть видно, а не подразумеваться: если пояс сервера не тот, в котором живёт оператор, окно открывается со сдвигом, и выглядит это как ошибка на день.",
+      req: null,
+      res: [["`rules[]`", "`id`, `enabled`, `time` (ЧЧ:ММ), `days` (1 понедельник .. 7 воскресенье, пусто означает каждый день), `action`, `value`, `text`, `target`, `deviceIds`, `skipBusy`, `note`, `lastRunUtc`, `lastResult`, `lastRunLocalDate`"],
+            ["`serverDate`, `serverTime`", "дата и время сервера"],
+            ["`serverZone`, `serverOffset`", "пояс сервера и его сдвиг"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/schedule', try: true
+    },
+    {
+      g: "ref-adm-schedule", m: "PUT", p: "/api/admin/schedule", who: "Кука админа",
+      d: "Сохранить весь список правил целиком. Частичного изменения нет: список короткий, и целиком его сохранять честнее, чем сводить правки.",
+      req: [["тело", "массив правил", "тот же вид, что отдаёт `GET /api/admin/schedule` в поле `rules`"]],
+      res: [["`rules`", "сохранённый список, каким он стал"]],
+      fail: [],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'[{"time":"07:30","days":[1,2,3,4,5],"action":"screen-on","target":"all","skipBusy":true}]\' \\\n  {BASE}/api/admin/schedule'
+    },
+    {
+      g: "ref-adm-schedule", m: "POST", p: "/api/admin/schedule/{id}/run", who: "Кука админа",
+      d: "Выполнить правило прямо сейчас, не дожидаясь назначенного времени. Так его и проверяют.",
+      req: null,
+      res: [["`ok`", "`true`"], ["`result`", "что вышло: по скольким планшетам прошло и что не удалось"]],
+      fail: [["404", "правила с таким номером нет. Тело пустое"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/schedule/RULE_ID/run'
+    },
+
+    // ---------------------------------------------------------------- админка: уведомления и журнал
+    {
+      g: "ref-adm-alerts", m: "GET", p: "/api/admin/alerts", who: "Кука админа",
+      d: "Уведомления оператору: планшет пропал со связи, накопились ошибки, дубль кода. У каждого уведомления постоянный номер по его причине, поэтому одна и та же беда не копит записи, а обновляет одну.",
+      req: null,
+      res: [["`unacknowledged`", "сколько непрочитанных"],
+            ["`alerts[]`", "`id`, `kind` (`offline`, `errors`, `duplicate`, `test`), `severity` (`warn` или `error`), `title`, `detail`, `sinceUtc`, `updatedUtc`, `deviceId`, `deviceName`, `acknowledged`"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/alerts', try: true
+    },
+    {
+      g: "ref-adm-alerts", m: "POST", p: "/api/admin/alerts/ack", who: "Кука админа",
+      d: "Отметить уведомление прочитанным. Оно не исчезает: пока причина не ушла, запись остаётся, просто перестаёт мигать.",
+      req: [["`id`", "строка", "какое отметить. Без тела отмечаются все"]],
+      res: [["`ok`", "`true`"]], fail: [],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"id":"offline:DEVICE_ID"}\' \\\n  {BASE}/api/admin/alerts/ack'
+    },
+    {
+      g: "ref-adm-alerts", m: "GET", p: "/api/admin/alerts/settings", who: "Кука админа",
+      d: "Пороги уведомлений.",
+      req: null,
+      res: [["`enabled`", "включены ли уведомления"],
+            ["`offlineMinutes`", "через сколько минут молчания планшет считается пропавшим"],
+            ["`errorCount`, `errorWindowMinutes`", "сколько ошибок и за какое время поднимают уведомление"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/alerts/settings', try: true
+    },
+    {
+      g: "ref-adm-alerts", m: "PUT", p: "/api/admin/alerts/settings", who: "Кука админа",
+      d: "Сохранить пороги уведомлений.",
+      req: [["`enabled`", "булев", "включить уведомления"],
+            ["`offlineMinutes`", "число", "порог молчания планшета"],
+            ["`errorCount`", "число", "сколько ошибок поднимают уведомление"],
+            ["`errorWindowMinutes`", "число", "за какое время они считаются"]],
+      res: [["то же, что у `GET`", "сохранённые пороги"]],
+      fail: [["400", "`{\"error\":\"settings required\"}`, если тело пустое"]],
+      s: 'curl -X PUT -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"enabled":true,"offlineMinutes":10,"errorCount":5,"errorWindowMinutes":10}\' \\\n  {BASE}/api/admin/alerts/settings'
+    },
+    {
+      g: "ref-adm-alerts", m: "POST", p: "/api/admin/alerts/test", who: "Кука админа",
+      d: "Безобидное тестовое уведомление: проверить, доходят ли уведомления до оператора. Номер у него постоянный, поэтому повторные нажатия обновляют одну запись, а не копят их.",
+      req: null, res: [["`ok`", "`true`"]], fail: [],
+      s: 'curl -X POST -b "sk_admin=КУКА" {BASE}/api/admin/alerts/test',
+      try: { тело: null }
+    },
+    {
+      g: "ref-adm-alerts", m: "DELETE", p: "/api/admin/alerts/{id}", who: "Кука админа",
+      d: "Закрыть уведомление руками. Если причина не ушла, оно поднимется снова при следующем обходе.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "уведомления с таким номером нет. Тело пустое"]],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/alerts/ALERT_ID'
+    },
+    {
+      g: "ref-adm-alerts", m: "GET", p: "/api/admin/logs", who: "Кука админа",
+      d: "Журнал сбоев сервиса и планшетов. `total` это сколько записей подошло под отбор, а не сколько их всего: иначе при выбранном уровне оператор читал бы «Показано 12 из 1843» как «остальное от меня спрятали».",
+      req: [["`level`", "строка в строке запроса", "`error`, `warn` или `info`"],
+            ["`q`", "строка в строке запроса", "поиск по тексту, источнику и имени планшета"],
+            ["`limit`", "число в строке запроса", "сколько вернуть. По умолчанию 300"]],
+      res: [["`total`", "сколько записей подошло под отбор"],
+            ["`entries[]`", "`id`, `utc`, `level`, `source`, `message`, `detail`, `deviceId`, `deviceName`"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" "{BASE}/api/admin/logs?level=error&limit=50"',
+      try: { путь: "/api/admin/logs?limit=20" }
+    },
+    {
+      g: "ref-adm-alerts", m: "DELETE", p: "/api/admin/logs", who: "Кука админа",
+      d: "Очистить журнал и оба его файла. Действие необратимое.",
+      req: null, res: [["`ok`", "`true`"]], fail: [],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/logs'
+    },
+
+    // ---------------------------------------------------------------- админка: показ и сканирование
+    {
+      g: "ref-adm-show", m: "POST", p: "/api/admin/show-document", who: "Кука админа",
+      d: "То же, что внешнее `POST /api/ext/show-document`, только адресат задан строкой `device:{id}`, и всегда ровно один планшет: данные подписанта не должны попасть больше никуда. Помощник «Отправить запрос» на вкладке «Документ» шлёт ровно то же тело, что внешняя система.",
+      req: [["`target`", "строка", "`device:{id}` или просто номер планшета"],
+            ["`documentCode`", "строка", "код документа. Без него документ по умолчанию"],
+            ["`fields`", "объект", "значения тегов"],
+            ["`checkboxes`", "массив", "пункты согласия"],
+            ["`groups`", "массив", "выбор в группах"],
+            ["`images`", "объект", "картинки заказа"]],
+      res: [["`ok`", "`true`"], ["`document`", "код показанного документа"],
+            ["`missingPlaceholders`", "теги документа, которые не передали"],
+            ["`dropped`", "список потерь"]],
+      fail: [["400", "«Планшет «X» отозван: показывать на нём ничего нельзя. Верните его в работу на вкладке «Планшеты» или выберите другой.»"],
+             ["400", "«Документ показывается только на один планшет. Выберите планшет.»"],
+             ["400", "«Тег «X» принимает только true или false, получено: ...»"],
+             ["400", "«Документ с кодом «X» не найден. Доступные коды: ...»"],
+             ["400", "«Тег «X» используется в условии по возрасту (или по сроку), но значение «...» не похоже на дату.»"],
+             ["400", "«В документе «...» нет ни одной страницы: показывать нечего. Добавьте страницу на вкладке «Документ».»"],
+             ["400", "отказ по картинке, с именем тега"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"target":"device:DEVICE_ID","fields":{"ФИО":"Иванова Анна"}}\' \\\n  {BASE}/api/admin/show-document'
+    },
+    {
+      g: "ref-adm-show", m: "POST", p: "/api/admin/show-slides", who: "Кука админа",
+      d: "Вернуть один планшет к рекламе. У каждой причины отказа свой текст: «Возврат к рекламе выполняется для одного планшета» в ответ на выбранный планшет читается как поломка формы, а оператор в этот момент пытается убрать с экрана документ с данными клиента и должен понимать, что происходит.",
+      req: [["`target`", "строка", "`device:{id}` или просто номер планшета"]],
+      res: [["`ok`", "`true`"]],
+      fail: [["400", "«Планшет «X» отозван: его экран уже очищен, возвращать к рекламе нечего.»"],
+             ["400", "«Планшета «X» в системе нет: он удалён, а его экран очищен при удалении.»"],
+             ["400", "«Возврат к рекламе выполняется для одного планшета. Выберите планшет.»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"target":"device:DEVICE_ID"}\' \\\n  {BASE}/api/admin/show-slides'
+    },
+    {
+      g: "ref-adm-show", m: "POST", p: "/api/admin/scan/start", who: "Кука админа",
+      d: "Открыть камеру на одном планшете. В отличие от внешнего `scan-request`, ответа с кодом здесь нет: считанное придёт в список сканирований и живьём в админку.",
+      req: [["`target`", "строка", "`device:{id}` или просто номер планшета"]],
+      res: [["`ok`", "`true`"], ["`deviceId`", "на каком планшете открыта камера"]],
+      fail: [["400", "«Выберите планшет для сканирования.» Отозванный планшет сюда тоже не проходит"],
+             ["409", "«Планшет «X» сейчас не на связи, команда сканирования до него не дойдёт. Проверьте, что планшет включён, есть Wi-Fi и открыта страница киоска.»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"target":"device:DEVICE_ID"}\' \\\n  {BASE}/api/admin/scan/start'
+    },
+    {
+      g: "ref-adm-show", m: "POST", p: "/api/admin/scan/stop", who: "Кука админа",
+      d: "Закрыть камеру на планшете.",
+      req: [["`target`", "строка", "`device:{id}` или просто номер планшета"]],
+      res: [["`ok`", "`true`"], ["`deviceId`", "на каком планшете закрыта камера"]],
+      fail: [["400", "«Выберите планшет.»"]],
+      s: 'curl -X POST -b "sk_admin=КУКА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"target":"device:DEVICE_ID"}\' \\\n  {BASE}/api/admin/scan/stop'
+    },
+    {
+      g: "ref-adm-show", m: "GET", p: "/api/admin/scans", who: "Кука админа",
+      d: "Считанные коды, новые сверху. То же, что внешнее `GET /api/ext/scans`, но с другими пределами.",
+      req: [["`limit`", "число в строке запроса", "сколько вернуть. По умолчанию 200, не меньше 1 и не больше 1000"]],
+      res: [["`id`, `createdUtc`, `code`, `format`", "запись сканирования"],
+            ["`deviceId`, `deviceName`, `workstationId`, `workstationName`", "где считали"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" "{BASE}/api/admin/scans?limit=20"',
+      try: { путь: "/api/admin/scans?limit=20" }
+    },
+    {
+      g: "ref-adm-show", m: "DELETE", p: "/api/admin/scans/{id}", who: "Кука админа",
+      d: "Удалить одну запись сканирования.",
+      req: null, res: [["`ok`", "`true`"]],
+      fail: [["404", "записи с таким номером нет. Тело пустое"]],
+      s: 'curl -X DELETE -b "sk_admin=КУКА" {BASE}/api/admin/scans/SCAN_ID'
+    },
+
+    // ---------------------------------------------------------------- админка: подписи
+    {
+      g: "ref-adm-sign", m: "GET", p: "/api/admin/signatures", who: "Кука админа",
+      d: "Список подписей, новые сверху. Список ограничен намеренно: после года работы в архиве десятки тысяч записей, и отдать их все значило бы остановить всякую другую работу с хранилищем.",
+      req: [["`limit`", "число в строке запроса", "сколько вернуть. По умолчанию 200, не меньше 1 и не больше 1000"]],
+      res: [["`id`, `createdUtc`", "номер записи и когда подписали"],
+            ["`documentTitle`, `documentCode`, `documentName`", "что подписали. По коду через год видно, что именно"],
+            ["`deviceId`, `deviceName`, `workstationName`", "где подписали"],
+            ["`checkedCount`, `totalCount`", "сколько пунктов отмечено из скольких"]],
+      fail: [], s: 'curl -b "sk_admin=КУКА" "{BASE}/api/admin/signatures?limit=20"',
+      try: { путь: "/api/admin/signatures?limit=20" }
+    },
+    {
+      g: "ref-adm-sign", m: "GET", p: "/api/admin/signatures/{id}", who: "Кука админа",
+      d: "Вся запись подписи целиком: отмеченные пункты, выбор в группах, вписанные значения, отсканированные коды, данные подписанта и снимок документа, который человек видел.",
+      req: null,
+      res: [["`items[]`", "пункты: надпись и отмечен ли"],
+            ["`groups[]`", "выбор в группах вместе со всеми вариантами, из которых выбирали"],
+            ["`signatures[]`", "подписи, поставленные внутри страниц: имя, надпись, имя файла"],
+            ["`scans[]`, `inputs[]`", "коды и вписанное клиентом"],
+            ["`fields`", "данные подписанта, которые документ действительно использовал"],
+            ["`submissionId`", "номер отправки, по которому распознаётся повтор"]],
+      fail: [["404", "записи с таким номером нет. Тело пустое"]],
+      s: 'curl -b "sk_admin=КУКА" {BASE}/api/admin/signatures/SIGN_ID'
+    },
+    {
+      g: "ref-adm-sign", m: "GET", p: "/api/admin/signatures/{id}/image", who: "Кука админа",
+      d: "Итоговая подпись под документом, картинкой PNG.",
+      req: null, res: [["тело", "`image/png`"]],
+      fail: [["404", "записи или картинки нет. Тело пустое"]],
+      s: 'curl -b "sk_admin=КУКА" \\\n  -o podpis.png \\\n  {BASE}/api/admin/signatures/SIGN_ID/image'
+    },
+    {
+      g: "ref-adm-sign", m: "GET", p: "/api/admin/signatures/{id}/image/{file}", who: "Кука админа",
+      d: "Подпись, поставленная внутри страницы. Имя файла берётся из самой записи и проверяется по ней, поэтому произвольный путь сюда не подставить.",
+      req: [["`{file}`", "часть адреса", "имя файла из поля `signatures[].file` записи"]],
+      res: [["тело", "`image/png`"]],
+      fail: [["404", "записи нет, либо такого файла в ней нет. Тело пустое"]],
+      s: 'curl -b "sk_admin=КУКА" \\\n  -o podpis-sign1.png \\\n  {BASE}/api/admin/signatures/SIGN_ID/image/ИМЯ_ФАЙЛА'
+    },
+    {
+      g: "ref-adm-sign", m: "GET", p: "/api/admin/signatures/{id}/pdf", who: "Кука админа",
+      d: "Готовый PDF подписанного документа. Если он не собрался при подписании, собирается сейчас из той же записи, документа и картинки подписи: разовый сбой не должен оставлять подписанную запись навсегда без бумаги.",
+      req: null, res: [["тело", "`application/pdf`, имя файла это номер записи"]],
+      fail: [["404", "записи нет, либо PDF не удалось собрать даже сейчас. Тело пустое"]],
+      s: 'curl -b "sk_admin=КУКА" \\\n  -o podpis.pdf \\\n  {BASE}/api/admin/signatures/SIGN_ID/pdf'
+    },
+
+    // ---------------------------------------------------------------- вне обеих групп
+    {
+      g: "ref-open", m: "GET", p: "/healthz", who: "Кто угодно",
+      d: "Проверка живости для наблюдения за сервисом (systemd, внешний монитор). Без ключа, без куки и без ограничения частоты: монитор опрашивает её постоянно, и ограничивать его значило бы получать ложные тревоги.",
+      req: null, res: [["`status`", "`ok`"]], fail: [], s: 'curl {BASE}/healthz', try: true
+    },
+    {
+      g: "ref-open", m: "POST", p: "/api/kiosk/enroll", who: "Кто угодно",
+      d: "Активация планшета по коду. Код одноразовый: погашенный второй раз не сработает. В ответе приходит токен, который планшет хранит у себя и присылает дальше заголовком `Authorization: Bearer`.",
+      req: [["`code`", "строка", "код активации из `POST /api/ext/enrollments` или из админки"]],
+      res: [["`deviceId`", "номер планшета"], ["`name`", "имя, заданное при создании кода"],
+            ["`token`", "токен планшета. Показывается один раз"]],
+      fail: [["400", "`{\"error\":\"invalid or expired code\"}`"],
+             ["429", "«Слишком много запросов с этого адреса. Повторите через N с.» Предел 20 в минуту"]],
+      s: 'curl -X POST -H "Content-Type: application/json" \\\n  -d \'{"code":"123456"}\' \\\n  {BASE}/api/kiosk/enroll'
+    },
+    {
+      g: "ref-open", m: "POST", p: "/api/sign", who: "Токен планшета",
+      d: "Отправка подписи. Шлёт её сам планшет, чужой системе тут делать нечего. Подпись имеет смысл только пока на этом планшете открыт документ: отправка вне этого окна была бы записана без данных подписанта и с сырыми `{{тегами}}` в PDF, что выглядит как годное согласие, а стоит ничего.",
+      req: [["`signature`", "строка", "итоговая подпись, PNG в виде data URL. До 3 МБ строкой и до 2 МБ после разбора"],
+            ["`items`", "массив", "отмеченные пункты. Не больше 200, надпись до 2000 знаков"],
+            ["`signatures`", "массив", "подписи внутри страниц. Берутся первые 40, каждая проверяется как итоговая"],
+            ["`scans`", "массив", "коды, считанные внутри документа. Не больше 40, код до 512 знаков"],
+            ["`groups`", "массив", "выбор в группах. Не больше 200, тексты до 2000 знаков"],
+            ["`inputs`", "массив", "вписанное клиентом. Не больше 200, тексты до 2000 знаков"],
+            ["`submissionId`", "строка до 128 знаков", "номер отправки: по нему распознаётся повтор после потери ответа"],
+            ["`sessionId`", "строка", "имя показа, к которому относится подпись"]],
+      res: [["`id`", "номер записи подписи"],
+            ["`duplicate`", "`true`, если это повтор и запись уже была"]],
+      fail: [["400", "`signature required`, `signature image too large`, `invalid signature image`, `invalid submissionId`, `invalid items`, `invalid scans`, `invalid groups`, `invalid inputs`, `device required`"],
+             ["409", "`no document is being signed on this tablet`"],
+             ["409", "`stale submission: another document is open`, если повтор пришёл, когда на планшете уже другой документ"],
+             ["409", "«На планшет уже отправлен другой документ, эта подпись к нему не относится. Отправьте документ на планшет заново.»"]],
+      s: '# Шлёт сам планшет, своим токеном\ncurl -X POST -H "Authorization: Bearer ТОКЕН_ПЛАНШЕТА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"signature":"data:image/png;base64,...","items":[]}\' \\\n  {BASE}/api/sign'
+    },
+    {
+      g: "ref-open", m: "POST", p: "/api/scan", who: "Токен планшета",
+      d: "Считанный код от планшета. Здесь же он передаётся тому, кто ждёт его в `POST /api/ext/scan-request` прямо сейчас.",
+      req: [["`code`", "строка", "значение кода. Обязательно, до 512 знаков"],
+            ["`format`", "строка", "вид кода: `QR_CODE`, `EAN_13` и прочие"]],
+      res: [["`id`", "номер записи сканирования"]],
+      fail: [["400", "`{\"error\":\"code required\"}`"], ["400", "`{\"error\":\"code too long\"}`"],
+             ["429", "«Слишком много запросов с этого адреса. Повторите через N с.» Предел 60 в минуту"]],
+      s: '# Шлёт сам планшет, своим токеном\ncurl -X POST -H "Authorization: Bearer ТОКЕН_ПЛАНШЕТА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"code":"4600000000001","format":"EAN_13"}\' \\\n  {BASE}/api/scan'
+    },
+    {
+      g: "ref-open", m: "POST", p: "/api/log", who: "Токен планшета",
+      d: "Планшет сообщает о своей беде: ошибка на экране, отказ камеры, неудачная отправка. Записи ложатся на вкладку «Логи», и оператор видит беду парка там, а не обходит планшеты по одному. Диагностика ограничена отдельно, чтобы планшет, застрявший в петле ошибок, не съел предел, от которого зависит отправка подписи.",
+      req: [["`message`", "строка", "что случилось. Обязательно"],
+            ["`level`", "строка", "`error`, `warn` или `info`. Всё прочее приводится к `error`"],
+            ["`detail`", "строка", "подробности: стек, обстоятельства"]],
+      res: [["`ok`", "`true`"]],
+      fail: [["400", "`{\"error\":\"message required\"}`"],
+             ["429", "«Слишком много запросов с этого адреса. Повторите через N с.» Предел 30 в минуту"]],
+      s: '# Шлёт сам планшет, своим токеном\ncurl -X POST -H "Authorization: Bearer ТОКЕН_ПЛАНШЕТА" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"level":"error","message":"Камера не открылась"}\' \\\n  {BASE}/api/log'
+    },
+    {
+      g: "ref-open", m: "POST", p: "/api/admin/login", who: "Кто угодно",
+      d: "Вход в админку по паролю. Ставит куку `sk_admin` на 30 дней: `HttpOnly`, `SameSite=Lax`, `Secure` на HTTPS. Значение куки это не случайный номер сессии, а производная от пароля, поэтому вход переживает перезапуск сервиса без серверного хранилища сессий, а смена пароля разом гасит все входы.",
+      req: [["`password`", "строка", "пароль администратора"]],
+      res: [["`ok`", "`true`"], ["кука `sk_admin`", "ставится заголовком `Set-Cookie`"]],
+      fail: [["401", "`{\"ok\":false,\"error\":\"wrong password\"}`"],
+             ["429", "«Слишком много запросов с этого адреса. Повторите через N с.» Предел 10 в минуту: это единственный админский путь с ограничением частоты, потому что пароль можно подбирать"]],
+      s: 'curl -X POST -H "Content-Type: application/json" \\\n  -d \'{"password":"ПАРОЛЬ"}\' \\\n  {BASE}/api/admin/login'
+    },
+    {
+      g: "ref-open", m: "POST", p: "/api/admin/logout", who: "Кто угодно",
+      d: "Выход: кука удаляется. Ограничения частоты нет, проверять нечего.",
+      req: null, res: [["`ok`", "`true`"]], fail: [],
+      s: 'curl -X POST {BASE}/api/admin/logout'
+    },
+    {
+      g: "ref-open", m: "GET", p: "/api/admin/me", who: "Кто угодно",
+      d: "Вошли вы или нет. Отвечает всегда 200: это проверка состояния, а не защищённый путь.",
+      req: null, res: [["`authenticated`", "`true` у вошедшего администратора, иначе `false`"]],
+      fail: [], s: 'curl {BASE}/api/admin/me', try: true
+    },
+    {
+      g: "ref-open", m: "WS", p: "/hub/kiosk", who: "Токен планшета или кука админа",
+      d: "Живой канал SignalR. Планшет получает по нему команды показа, возврата к рекламе и сканирования, а админка узнаёт о событиях без перезагрузки страницы: «список планшетов изменился», «пришла новая подпись», «считан код», «изменились уведомления», «на планшет отправлен документ», а окно наблюдения ещё и состояние экрана планшета. Это не метод REST: обычным запросом его не позвать.",
+      req: [["`access_token`", "строка в строке запроса", "токен планшета. Единственное место, где токен принимается строкой запроса: рукопожатие WebSocket не умеет слать заголовки. Везде остальном это запрещено, чтобы токены не оседали в журналах прокси"]],
+      res: [["события к планшету", "`ShowDocument`, `ShowSlides`, `StartScan`, `StopScan`, `Identify`, `Revoked`"],
+            ["события к админке", "изменения списка планшетов, подписи, коды, уведомления, состояние экрана"]],
+      fail: [["401", "нет токена планшета и нет куки админа. Подписаться на события админки может только администратор"]],
+      s: '# Не REST: подключение SignalR из чужого кода\n# JS: new signalR.HubConnectionBuilder().withUrl("{BASE}/hub/kiosk").build()'
+    }
+  ];
+
+  // ==================================================================
+  // Сборка вкладки
+  // ==================================================================
+  // Все свёртки вкладки лежат одним списком: по нему работают и поиск, и кнопки «Развернуть всё»
+  // и «Свернуть всё». Иначе поиск знал бы про статьи справочника и не знал про разделы
+  // руководства, и слово, написанное в руководстве, вкладка бы «не находила».
+  var апиКарточки = [];
+
+  /// Строка, по которой ищут: метод, адрес, описание, все поля и все отказы сразу. Ищут по тому,
+  /// что человек помнит, а помнит он то имя поля, из-за которого и полез сюда.
+  function апиСтрокаПоиска() {
+    var куски = Array.prototype.slice.call(arguments);
+    return куски.join(" ").toLowerCase().replace(/`/g, "");
+  }
+
+  /// Статья справочника: метод, адрес, кто может звать, описание, поля, отказы, образец.
+  function апиСтатья(ep, общие) {
+    var м = ep.m.toLowerCase();
+    var шапка = [
+      el("span", "api-method api-" + м, ep.m),
+      el("span", "api-path", ep.p),
+      el("span", "api-who", ep.who)
+    ];
+    var тело = [];
+    тело.push(апиФраза(ep.d));
+    if (ep.req && ep.req.length) {
+      тело.push(апиПодзаголовок("Что слать"));
+      тело.push(апиТаблица(["Поле", "Вид", "Что это"], ep.req, "api-tbl-req"));
+    } else {
+      тело.push(апиПодзаголовок("Что слать"));
+      тело.push(апиФраза("Ни тела, ни параметров: всё, что нужно, есть в адресе."));
+    }
+    тело.push(апиПодзаголовок("Что придёт"));
+    тело.push(апиТаблица(["Поле ответа", "Что означает"], ep.res && ep.res.length
+      ? ep.res : [["`ok`", "`true`"]], "api-tbl-res"));
+    var отказы = (ep.fail || []).concat(общие || []);
+    тело.push(апиПодзаголовок("Отказы"));
+    тело.push(апиТаблица(["Код", "Тело ответа и причина"], отказы.length
+      ? отказы : [["нет", "своих отказов у этого пути нет"]], "api-tbl-fail"));
+    тело.push(апиПодзаголовок("Образец"));
+    тело.push(апиОбразец(ep.s));
+    // Кнопка отправки стоит там, где запрос ничего не портит: чтение, показ документа, возврат
+    // к рекламе, предпросмотр, тестовое уведомление. У удаления и отзыва её нет нарочно:
+    // «попробовать» удаление означает удалить.
+    var отправка = null;
+    if (ep.try) {
+      отправка = {
+        метод: ep.m,
+        путь: (ep.try && ep.try.путь) || ep.p,
+        тело: ep.try && ep.try.тело !== undefined ? ep.try.тело : null,
+        заголовок: ep.m + " " + ep.p
+      };
+    }
+    тело.push(апиДействия(ep.s, отправка));
+
+    var карточка = апиСвёртка("api-ep", шапка, тело, false);
+    карточка.поиск = апиСтрокаПоиска(ep.m, ep.p, ep.who, ep.d,
+      JSON.stringify(ep.req || []), JSON.stringify(ep.res || []), JSON.stringify(отказы), ep.s);
+    карточка.вид = "путь";
+    апиКарточки.push(карточка);
+    return карточка;
+  }
+
+  /// Раздел руководства: свёртка, раскрытая по умолчанию.
+  function апиРаздел(р) {
+    var тело = el("div");
+    р.строить(тело);
+    var узлы = Array.prototype.slice.call(тело.childNodes);
+    // Текст снимается здесь, до сборки свёртки: appendChild переносит узлы, и после сборки
+    // временный ящик пуст. Из-за этого поиск не находил ни слова из руководства.
+    var текст = тело.textContent || "";
+    var карточка = апиСвёртка("api-sec", [el("span", "api-sec-title", р.заголовок)], узлы, true);
+    карточка.id = р.id;
+    карточка.поиск = апиСтрокаПоиска(р.заголовок, текст);
+    карточка.вид = "раздел";
+    апиКарточки.push(карточка);
+    return карточка;
+  }
+
+  /// Оглавление: ссылки на разделы руководства и на группы справочника. Именно ссылки, а не
+  /// адреса с решёткой: решётка в адресе переключает вкладки админки, и переход по оглавлению
+  /// уводил бы со вкладки «API» вовсе.
+  function апиОглавление(пункты) {
+    var nav = el("nav", "api-nav");
+    пункты.forEach(function (п) {
+      var a = el("a", "api-nav-link" + (п.вид === "ref" ? " api-nav-ref" : ""), п.заголовок);
+      a.href = "#";
+      a.addEventListener("click", function (e) {
+        e.preventDefault();
+        var цель = document.getElementById(п.id);
+        if (!цель) return;
+        if (цель.раскрыть) цель.раскрыть(true);
+        цель.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      nav.appendChild(a);
+    });
+    return nav;
+  }
 
   function renderApiDocs() {
     var base = window.location.origin;
     var baseEl = $("apiBaseUrl"); if (baseEl) baseEl.textContent = base;
-    var wrap = $("apiDocsList"); if (!wrap) return; wrap.innerHTML = "";
+    var wrap = $("apiDocsList"); if (!wrap) return;
+    wrap.innerHTML = "";
+    апиКарточки = [];
 
-    // Reference: the supported tags, conditions, formatting and checkboxes.
-    var intro = el("div", "api-intro");
-    intro.appendChild(el("h3", null, "Теги (поля) для подстановки"));
-    intro.appendChild(el("p", "api-desc", "Значения передаются в fields запроса show-document, в шаблоне используются как {{тег}}. Неизвестный тег остаётся как есть, поэтому пропущенное поле видно."));
-    var tags = el("div", "api-tags");
-    KNOWN_FIELDS.forEach(function (f) { tags.appendChild(el("code", "ph-tag", "{{" + f + "}}")); });
-    intro.appendChild(tags);
-    intro.appendChild(el("h3", null, "Условия показа блоков и страниц"));
-    intro.appendChild(el("p", "api-desc", "В редакторе документа блок текста или целую страницу можно показывать по условию на тег: равно, не равно, пусто, не пусто, одно из. Пример: блок показывать, если Пол равно F; страницу «Трансграничная передача» - если cross-border равно true."));
-    intro.appendChild(el("p", "api-desc", "Условий может быть несколько, соединённых через «и»: содержимое показывается, только если выполнены все сразу. Например: Пол равно F и UG равно true. Имена тегов сравниваются без учёта регистра, поэтому пол, Пол и ПОЛ это один и тот же тег и в условии, и в запросе, и в подстановке."));
-    intro.appendChild(el("h3", null, "Оформление и чекбоксы"));
-    intro.appendChild(el("p", "api-desc", "Текст заголовков и блоков оформляется в редакторе (жирный, курсив, размер, цвет) и так же выводится на планшете и в PDF. В блок можно вставить картинку и задать её ширину. Чекбоксы из API (массив checkboxes) приходят с полем checked - отмеченным или пустым. На странице подписи блоки размещаются и над полем подписи, и под ним: реквизиты, печать, пояснение. Условия показа работают и там."));
-    intro.appendChild(el("h3", null, "Именованные чекбоксы и группы вариантов"));
-    intro.appendChild(el("p", "api-desc", "У чекбокса в редакторе можно задать имя, и тогда внешняя система задаёт состояние именно ему: {\"key\":\"consent\",\"checked\":true}. Чекбокс без имени и чекбокс с незнакомым именем по-прежнему просто дописываются на страницу с якорем «Показывать здесь чекбоксы, присланные по API». Текст можно переопределить полем label, иначе берётся из шаблона."));
-    intro.appendChild(el("p", "api-desc", "Группа вариантов это набор, где выбрать можно только один, и «ни одного» тоже допустимое состояние. Задаётся массивом groups: {\"key\":\"transfer\",\"selected\":\"deny\"}. Пустое selected снимает выбор. Имена чекбоксов и групп живут отдельно от тегов: одно имя никогда не значит две вещи."));
-    intro.appendChild(el("h3", null, "Условия по тому, что отметил клиент"));
-    intro.appendChild(el("p", "api-desc", "В условии показа можно выбрать не только тег, но и имя чекбокса или группы. Такое условие считается прямо на планшете, пока клиент заполняет документ: блок появляется и исчезает по нажатию. Обязательный пункт, скрытый условием, не блокирует кнопку «Далее», иначе клиент упирался бы в галочку, которой не видит."));
-    intro.appendChild(el("p", "api-desc", "В подпись и в PDF попадает только то, что клиент действительно видел: сервер пересчитывает условия по его финальным отметкам. Скрытый пункт не записывается как сознательный отказ. В записи подписи чекбоксы лежат с ключами, а группы отдельным списком, вместе со всеми вариантами, из которых выбирали."));
-    intro.appendChild(el("h3", null, "Резервная копия шаблона"));
-    intro.appendChild(el("p", "api-desc", "На вкладке «Документ» кнопки «Экспорт» и «Импорт» сохраняют все страницы в файл и восстанавливают их обратно. Импорт заменяет текущие страницы целиком, поэтому перед правками полезно сделать экспорт."));
-    intro.appendChild(el("h3", null, "Логи"));
-    intro.appendChild(el("p", "api-desc", "Вкладка «Логи» показывает сбои сервиса и планшетов: ошибки отправки подписи, отказ камеры, сбои генерации PDF, перезапуски сервиса. Записи хранятся на сервере и переживают перезапуск."));
-    intro.appendChild(el("h3", null, "Управление планшетами по локальной сети"));
-    intro.appendChild(el("p", "api-desc", "Приложение FreeKiosk на планшете принимает команды по своему адресу в локальной сети (по умолчанию порт 8080). Включите управление на вкладке «Планшеты», и на карточке планшета появится кнопка «Управление»: обновить страницу, очистить кэш, перезапустить приложение, перезагрузить планшет, включить или выключить экран, яркость, звуковой сигнал, произнести текст, показать сообщение, снимок экрана. Сервер сам опрашивает планшеты каждые 5 минут и предупреждает о низком заряде и нехватке места, а при включённом автолечении поднимает зависший планшет: сначала перезапуском приложения, затем перезагрузкой. Если планшет не вернулся и после этого, автолечение останавливается и оператор получает уведомление, что планшет требует осмотра."));
-    intro.appendChild(el("p", "api-desc", "Перезагрузка планшета и надёжное выключение экрана работают, когда FreeKiosk назначен владельцем устройства (Device Owner). Это делается один раз при настройке планшета: на чистом устройстве, без добавленных аккаунтов Google, командой adb shell dpm set-device-owner com.freekiosk/.DeviceAdminReceiver. В том же режиме FreeKiosk блокирует кнопки «Домой» и «Недавние» и шторку уведомлений, поэтому клиент не может выйти из киоска."));
-    wrap.appendChild(intro);
+    var пункты = API_РАЗДЕЛЫ.map(function (р) { return { id: р.id, заголовок: р.заголовок, вид: "guide" }; })
+      .concat(API_ГРУППЫ.map(function (г) { return { id: г.id, заголовок: г.заголовок, вид: "ref" }; }));
+    wrap.appendChild(апиОглавление(пункты));
 
-    API_ENDPOINTS.forEach(function (ep) {
-      var card = el("div", "api-ep");
-      var head = el("div", "api-ep-head");
-      var m = ep.method.toLowerCase();
-      head.appendChild(el("span", "api-method api-" + m, ep.method));
-      head.appendChild(el("span", "api-path", ep.path));
-      var copy = iconBtn("copy", "Копировать", "btn-ghost btn-sm api-copy");
-      var sample = ep.sample.replace(/\{BASE\}/g, base);
-      copy.addEventListener("click", function () { copyText(sample); });
-      head.appendChild(copy);
-      card.appendChild(head);
-      card.appendChild(el("p", "api-desc", ep.desc));
-      card.appendChild(el("pre", "api-code", sample));
-      wrap.appendChild(card);
+    API_РАЗДЕЛЫ.forEach(function (р) { wrap.appendChild(апиРаздел(р)); });
+
+    API_ГРУППЫ.forEach(function (г) {
+      var раздел = el("section", "api-group");
+      раздел.id = г.id;
+      раздел.appendChild(el("h3", "api-group-head", г.заголовок));
+      if (г.note) раздел.appendChild(апиФраза(г.note, "p", "api-desc api-group-note"));
+      var общие = г.общие === "ext" ? API_ОТКАЗЫ_EXT
+        : г.общие === "admin" ? API_ОТКАЗЫ_ADMIN
+          : г.общие === "планшет" ? API_ОТКАЗЫ_ПЛАНШЕТ : [];
+      var своих = 0;
+      API_ПУТИ.forEach(function (ep) {
+        if (ep.g !== г.id) return;
+        раздел.appendChild(апиСтатья(ep, общие));
+        своих++;
+      });
+      раздел.дано = своих;
+      wrap.appendChild(раздел);
+    });
+
+    апиПрименитьПоиск();
+  }
+
+  /// Отбор по строке поиска. Раскрывать найденное обязательно: иначе поиск оставлял бы на экране
+  /// свёрнутые шапки, и найденное слово нигде не было бы видно.
+  function апиПрименитьПоиск() {
+    var поле = $("apiSearch");
+    var q = ((поле && поле.value) || "").trim().toLowerCase();
+    var слова = q ? q.split(/\s+/) : [];
+    var видно = 0, всего = 0;
+    апиКарточки.forEach(function (к) {
+      var подходит = слова.every(function (с) { return к.поиск.indexOf(с) >= 0; });
+      к.classList.toggle("hidden", !подходит);
+      if (к.вид === "путь") { всего++; if (подходит) видно++; }
+      if (слова.length) к.раскрыть(подходит);
+      else к.раскрыть(к.вид === "раздел");
+    });
+    // Группа без единой подходящей статьи только мешает: заголовок без содержимого читается как
+    // «здесь ничего нет», хотя это просто отбор.
+    Array.prototype.forEach.call(document.querySelectorAll("#apiDocsList .api-group"), function (г) {
+      var есть = г.querySelector(".api-ep:not(.hidden)");
+      г.classList.toggle("hidden", !есть);
+    });
+    var счёт = $("apiFound");
+    if (счёт) счёт.textContent = слова.length
+      ? ("Найдено путей: " + видно + " из " + всего)
+      : ("Путей описано: " + всего);
+  }
+
+  function апиРаскрытьВсе(да) {
+    апиКарточки.forEach(function (к) { if (!к.classList.contains("hidden")) к.раскрыть(да); });
+  }
+
+  (function () {
+    var поле = $("apiSearch");
+    if (поле) поле.addEventListener("input", апиПрименитьПоиск);
+    var р = $("apiExpandAll"); if (р) р.addEventListener("click", function () { апиРаскрытьВсе(true); });
+    var с = $("apiCollapseAll"); if (с) с.addEventListener("click", function () { апиРаскрытьВсе(false); });
+  })();
+
+  // ==================================================================
+  // «Отправить запрос»: выполнить пример прямо со вкладки
+  // ==================================================================
+  // Отправка настоящая: тот же адрес, то же тело, тот же разбор на сервере. Смысл именно в этом,
+  // иначе пример проверялся бы на словах. Поэтому цель подставляется от этой установки, а перед
+  // отправкой на планшет, где идёт подписание, задаётся вопрос: оборвать живого клиента посреди
+  // документа хуже, чем спросить один раз.
+  //
+  // От имени вошедшего администратора: он проходит по /api/ext/* и без ключа. Поле для ключа
+  // всё равно есть, чтобы можно было проверить именно тот ключ, который отдали интегратору.
+
+  // Планшеты и документы этой установки, снятые прямо перед открытием окна. Из того, что помнит
+  // вкладка, брать нельзя: вкладку могли открыть час назад, а планшет завести минуту назад, и
+  // тогда пример уходил бы с образцовым WS-204 и получал «workstation not found».
+  var апиСтенд = { devices: null, docs: null };
+  function апиПланшеты() {
+    return (апиСтенд.devices || state.devices || []).filter(function (d) { return d && d.status !== "revoked"; });
+  }
+
+  /// Подставить в тело примера планшет и документ этой установки. Образцы в тексте остаются
+  /// общими (WS-204, DEVICE_ID): их читают и на другом сервере.
+  function апиПодставитьЦель(тело, заметки) {
+    if (!тело || typeof тело !== "object") return тело;
+    var копия = JSON.parse(JSON.stringify(тело));
+    var сказать = function (т) { if (заметки) заметки.push(т); };
+    var живые = апиПланшеты();
+    var сМестом = живые.filter(function (d) { return d.workstation && d.workstation.externalId; })[0];
+    var любой = живые[0];
+    if (копия.workstationExternalId === "WS-204") {
+      if (сМестом) {
+        копия.workstationExternalId = сМестом.workstation.externalId;
+        сказать("код места WS-204 из примера заменён на «" + сМестом.workstation.externalId + "»");
+      } else if (любой) {
+        delete копия.workstationExternalId;
+        копия.deviceId = любой.id;
+        сказать("рабочих мест с кодом здесь нет, поэтому адресуемся прямо планшетом «" + любой.name + "»");
+      }
+    }
+    if (копия.deviceId === "DEVICE_ID" && любой) {
+      копия.deviceId = любой.id;
+      сказать("DEVICE_ID из примера заменён на планшет «" + любой.name + "»");
+    }
+    if (копия.target === "device:DEVICE_ID" && любой) {
+      копия.target = "device:" + любой.id;
+      сказать("адресат заменён на планшет «" + любой.name + "»");
+    }
+    var библиотека = апиСтенд.docs || (typeof docList !== "undefined" && docList ? docList : []);
+    if (копия.documentCode && !библиотека.some(function (d) { return d.code === копия.documentCode; })) {
+      var поумолч = библиотека.filter(function (d) { return d.isDefault; })[0] || библиотека[0];
+      if (поумолч) {
+        копия.documentCode = поумолч.code;
+        сказать("кода документа «" + тело.documentCode + "» здесь нет, взят «" + поумолч.code + "»");
+      } else {
+        delete копия.documentCode;
+        сказать("кода документа «" + тело.documentCode + "» здесь нет, запрос уйдёт без кода");
+      }
+    }
+    return копия;
+  }
+
+  /// Планшеты, которых коснётся это тело. Правило то же, что на сервере: отозванные не в счёт.
+  function апиКогоЗатронет(тело) {
+    if (!тело || typeof тело !== "object") return [];
+    var поПланшету = String(тело.deviceId || String(тело.target || "").replace(/^device:/, "")).trim().toLowerCase();
+    var поМесту = String(тело.workstationExternalId || "").trim().toLowerCase();
+    var живые = апиПланшеты();
+    if (поПланшету) return живые.filter(function (d) { return String(d.id || "").toLowerCase() === поПланшету; });
+    if (поМесту) return живые.filter(function (d) {
+      return d.workstation && String(d.workstation.externalId || "").toLowerCase() === поМесту;
+    });
+    return [];
+  }
+
+  function openApiSend(опции) {
+    // Список планшетов и библиотека перечитываются перед каждым открытием. Отказ чтения не
+    // повод не открывать окно: подстановка это удобство, а не условие отправки.
+    Promise.all([
+      apiJson("/devices").catch(function () { return null; }),
+      apiJson("/documents").catch(function () { return null; })
+    ]).then(function (пара) {
+      if (пара[0]) апиСтенд.devices = пара[0];
+      if (пара[1]) апиСтенд.docs = пара[1];
+      апиОкноОтправки(опции);
+    });
+  }
+
+  function апиОкноОтправки(опции) {
+    var c = el("div", "apitest");
+    c.appendChild(el("h3", null, "Отправить запрос: " + (опции.заголовок || опции.путь)));
+    c.appendChild(апиФраза("Запрос уйдёт на этот сервер так же, как его прислала бы внешняя система. Это настоящая отправка, а не показ: то, что она изменит, изменится.", "p", "sig-meta"));
+
+    // Адрес и метод: адрес правится руками, потому что в нём может стоять {id}, а номер знает
+    // только тот, кто смотрит на список.
+    var ряд = el("div", "filter-bar");
+    ряд.appendChild(el("span", "api-method api-" + опции.метод.toLowerCase(), опции.метод));
+    var адрес = el("input", "filter-search");
+    адрес.type = "text";
+    адрес.value = опции.путь;
+    ряд.appendChild(адрес);
+    c.appendChild(ряд);
+
+    var заметки = [];
+    var тело0 = апиПодставитьЦель(опции.тело, заметки);
+    if (заметки.length) c.appendChild(апиФраза("Пример подогнан под эту установку: " + заметки.join("; ") + ".", "div", "api-target"));
+    var поле = null;
+    if (тело0 !== null && тело0 !== undefined) {
+      поле = el("textarea", "api-input");
+      поле.rows = 12;
+      поле.spellcheck = false;
+      поле.value = JSON.stringify(тело0, null, 2);
+      c.appendChild(поле);
+    }
+
+    var ключЛабел = el("label", "field", "Ключ API (необязательно: вошедший администратор проходит и без него)");
+    var ключ = el("input"); ключ.type = "text"; ключ.placeholder = "sk_...";
+    ключЛабел.appendChild(ключ); c.appendChild(ключЛабел);
+
+    var цельНадпись = el("div", "api-target");
+    c.appendChild(цельНадпись);
+    function обновитьЦель() {
+      var т = null;
+      if (поле) { try { т = JSON.parse(поле.value); } catch (e) { т = null; } }
+      if (поле && т === null) { цельНадпись.className = "api-target warn"; цельНадпись.textContent = "Тело запроса пока не разобрано как JSON."; return; }
+      if (!поле) {
+        цельНадпись.className = "api-target";
+        цельНадпись.textContent = "Запрос без тела: уйдёт по адресу выше как есть. Ни один планшет он не затронет.";
+        return;
+      }
+      var кого = апиКогоЗатронет(т);
+      if (!кого.length) {
+        цельНадпись.className = "api-target";
+        цельНадпись.textContent = "Планшету этот запрос не адресуется, либо планшет по нему не найден: тогда сервер ответит отказом, как ответил бы внешней системе.";
+        return;
+      }
+      var занят = кого.filter(function (d) { return d.screen === "document"; })[0];
+      цельНадпись.className = "api-target " + (занят ? "busy" : "ok");
+      цельНадпись.textContent = занят
+        ? "На планшете «" + занят.name + "» сейчас идёт подписание. Отправка прервёт его."
+        : "Затронет: " + кого.map(function (d) { return d.name + (d.online ? "" : " (не на связи)"); }).join(", ") + ".";
+    }
+    if (поле) поле.addEventListener("input", обновитьЦель);
+    обновитьЦель();
+
+    var ответ = el("pre", "api-code"); ответ.style.display = "none";
+    c.appendChild(ответ);
+
+    var actions = el("div", "modal-actions");
+    var close = el("button", "btn btn-ghost", "Закрыть");
+    close.addEventListener("click", closeModal);
+    actions.appendChild(close);
+    var go = iconBtn("send", "Отправить запрос", "btn-primary");
+    actions.appendChild(go);
+    c.appendChild(actions);
+    openModal(c, true);
+
+    go.addEventListener("click", function () {
+      var т;
+      if (поле) {
+        try { т = JSON.parse(поле.value); }
+        catch (e) {
+          ответ.style.display = "";
+          ответ.textContent = "Это не JSON: " + (e && e.message ? e.message : e);
+          return;
+        }
+      }
+      var занят = апиКогоЗатронет(т).filter(function (d) { return d.screen === "document"; })[0];
+      if (занят && !confirm("На планшете «" + занят.name + "» сейчас идёт подписание.\n\nОтправка прервёт его. Продолжить?")) return;
+      go.classList.add("btn-wait");
+      var headers = {};
+      if (поле) headers["Content-Type"] = "application/json";
+      if ((ключ.value || "").trim()) headers["X-Api-Key"] = ключ.value.trim();
+      fetch(адрес.value, {
+        method: опции.метод === "WS" ? "GET" : опции.метод,
+        credentials: "same-origin", headers: headers,
+        body: поле ? JSON.stringify(т) : undefined
+      }).then(function (r) {
+        return r.text().then(function (t) {
+          var красиво = t;
+          try { красиво = JSON.stringify(JSON.parse(t), null, 2); } catch (e) { /* не JSON */ }
+          ответ.style.display = "";
+          ответ.textContent = "HTTP " + r.status + "\n" + (красиво || "(пустое тело ответа)");
+          toast(r.ok ? "Запрос выполнен: HTTP " + r.status : "Сервер отказал: HTTP " + r.status, !r.ok);
+        });
+      }).catch(function (e) {
+        ответ.style.display = "";
+        ответ.textContent = "Запрос не ушёл: " + (e && e.message ? e.message : e);
+      }).then(function () { go.classList.remove("btn-wait"); });
     });
   }
 
@@ -7482,8 +9671,12 @@
       последнийПланшет = String(тело1.workstationExternalId || тело1.deviceId || "");
       // На планшете идёт подписание: спрашиваем ещё раз. Оборвать живого клиента посреди
       // документа хуже, чем задать один вопрос.
-      var d = найтиПланшет(тело1);
-      if (d && d.screen === "document" &&
+      // Ищем адресата тем же способом, что и надпись про цель под полем запроса. Раньше здесь
+      // звалась функция с другим именем, которой в файле нет вовсе: кнопка падала на этой строке
+      // и молча не делала ничего. По запросу может подойти и несколько планшетов, поэтому
+      // спрашиваем, если подписание идёт хотя бы на одном.
+      var d = найтиПланшеты(тело1).filter(function (x) { return x.screen === "document"; })[0];
+      if (d &&
           !confirm("На планшете «" + d.name + "» сейчас идёт подписание.\n\nОтправка прервёт его и заменит документ. Продолжить?")) return;
       go.classList.add("btn-wait");
       var headers = { "Content-Type": "application/json" };
@@ -7827,30 +10020,145 @@
 
     var body = el("div", "watch-body pv-body");
     var type = (st && st.type) || "page";
+    // Условия показа считаются по тому, что планшет рассказал о себе: отметки, выбор,
+    // вписанное, подписи и коды. Без этого оператор видел блок, пункт или поле, которых у
+    // клиента на экране нет.
+    var держит = наблюдениеУсловия(doc, st);
     if (type === "thankyou") {
       var th = el("h2", "pv-heading");
       var ta = (doc.thankYouAlign || "").toLowerCase();
       if (ta === "center" || ta === "right" || ta === "justify") th.style.textAlign = ta;
       previewRuns(th, labelRuns(doc.thankYouRuns, doc.thankYouText || "Спасибо!"));
       body.appendChild(th);
+      // Блоки благодарности показываются все, и это не забытый отбор. К этому времени планшет
+      // уже стёр ответы клиента (kiosk.js, renderThankYou: doc.checks обнуляется, а config
+      // остаётся без страниц), поэтому и сам он рисует их без разбора условий. Отбор здесь
+      // показал бы оператору меньше, чем видит клиент. Условия по тегам решены сервером, и
+      // такие блоки сюда не доехали вовсе.
       (doc.thankYouBlocks || []).forEach(function (b) { previewBlock(body, b); });
     } else if (type === "signature") {
       body.appendChild(el("h2", "pv-heading", doc.signPrompt || "Распишитесь"));
-      (doc.signBlocks || []).forEach(function (b) { previewBlock(body, b); });
+      // По центру, как на планшете: там эти блоки лежат в .sign-custom.
+      var свСверху = el("div", "pv-sign-custom"); body.appendChild(свСверху);
+      видимыеБлоки(doc.signBlocks, держит).forEach(function (b) { previewBlock(свСверху, b); });
       body.appendChild(watchInk(st && st.finalInk, "Клиент ещё не расписался"));
-      (doc.signBlocksBelow || []).forEach(function (b) { previewBlock(body, b); });
+      var свСнизу = el("div", "pv-sign-custom"); body.appendChild(свСнизу);
+      видимыеБлоки(doc.signBlocksBelow, держит).forEach(function (b) { previewBlock(свСнизу, b); });
     } else {
       var pi = st && st.pageIndex != null ? st.pageIndex : 0;
       var page = pages[pi];
       if (!page) { watchSay("Страница не найдена."); return; }
-      watchPage(body, page, pi, st);
+      watchPage(body, page, pi, st, держит);
     }
     watch.node.appendChild(body);
   }
 
+  /// Блоки, которые клиент действительно видит: тот же отбор, что делает планшет (kiosk.js,
+  /// visible()). Блок без условия проходит всегда.
+  function видимыеБлоки(список, держит) {
+    return (список || []).filter(function (b) { return b && держит(b.visibleWhen); });
+  }
+
+  // Условия, которые считает планшет, наблюдение обязано считать так же. Планшет присылает всё
+  // нужное: отметки, выбор, вписанное, подписи и коды. Раньше эти условия здесь не считались
+  // вовсе, и оператор видел блок, пункт или поле, которых у клиента на экране нет, а после
+  // нового показа наблюдение продолжало показывать блок, открытый отметкой прошлого клиента.
+  function наблюдениеУсловия(doc, st) {
+    var checks = (st && st.checks) || {};
+    var picks = (st && st.picks) || {};
+    var inputs = (st && st.inputs) || {};
+    var signs = (st && st.signs) || {};
+    var codes = (st && st.codes) || {};
+    var pages = (doc && doc.pages) || [];
+    function значение(key) {
+      var found = "", нашли = false;
+      // Порядок тот же, что на планшете и на сервере: отметки, выбор, вписанное, подписи, коды.
+      // Последнее и побеждает, если одно имя досталось двум элементам.
+      pages.forEach(function (p, i) {
+        (p.checkboxes || []).forEach(function (cb, ci) {
+          if (!cb || cb.key !== key) return;
+          нашли = true; found = checks["p" + i + "_c" + ci] ? "true" : "false";
+        });
+        (p.groups || []).forEach(function (g) {
+          if (!g || g.key !== key) return;
+          нашли = true; found = picks[key] || "";
+        });
+        (p.inputs || []).forEach(function (inp) {
+          if (!inp || inp.key !== key) return;
+          нашли = true;
+          found = String(inputs[key] != null ? inputs[key] : (inp.value || ""));
+        });
+        (p.signatures || []).forEach(function (sg) {
+          if (!sg || sg.key !== key) return;
+          нашли = true; found = signs[key] ? "подписано" : "";
+        });
+        (p.scans || []).forEach(function (sc) {
+          if (!sc || sc.key !== key) return;
+          нашли = true; found = (codes[key] && codes[key].code) || "";
+        });
+      });
+      if (!нашли) {
+        if (Object.prototype.hasOwnProperty.call(picks, key)) return picks[key] || "";
+        if (Object.prototype.hasOwnProperty.call(inputs, key)) return inputs[key] || "";
+      }
+      return found;
+    }
+    function частьДержит(c) {
+      var ok = часть(c);
+      return c.not ? !ok : ok;
+    }
+    function часть(c) {
+      // Условия по часам сервера и счёт отметок наблюдение не пересчитывает: часов службы у него
+      // нет, а перечень имён у счёта отметок разбирается отдельно. Считаем их выполненными, как
+      // это делает прожектор в редакторе.
+      if (c.op === "dow" || c.op === "daterange" || c.op === "timerange" || c.op === "annivwithin") return true;
+      if (c.op === "minchecked") {
+        var надо = parseInt(c.value, 10);
+        if (!(надо >= 1)) return false;
+        var есть = String(c.field || "").split(",").map(function (x) { return x.trim(); })
+          .filter(function (x) { return x.length; })
+          .filter(function (k) { return String(значение(k) || "").trim().toLowerCase() === "true"; }).length;
+        return есть >= надо;
+      }
+      var val = String(значение(c.field) || "").trim().toLowerCase();
+      var target = String(c.value || "").trim().toLowerCase();
+      if (c.op === "numlt" || c.op === "numge" || c.op === "numin") {
+        var n = parseFloat(val.replace(",", "."));
+        if (!isFinite(n)) return false;
+        if (c.op === "numin") {
+          var гр = target.split("..");
+          var a = parseFloat(String(гр[0]).replace(",", ".")), b = parseFloat(String(гр[1] || "").replace(",", "."));
+          return isFinite(a) && isFinite(b) && n >= a && n <= b;
+        }
+        var lim = parseFloat(target.replace(",", "."));
+        if (!isFinite(lim)) return false;
+        return c.op === "numlt" ? n < lim : n >= lim;
+      }
+      switch (c.op) {
+        // Как на планшете: «не равно» не выполняется, когда значения нет вовсе.
+        case "ne": return val.length > 0 && val !== target;
+        case "empty": return val.length === 0;
+        case "notempty": return val.length > 0;
+        case "in": return target.split(",").map(function (x) { return x.trim(); })
+          .filter(function (x) { return x.length; }).indexOf(val) >= 0;
+        default: return val === target;
+      }
+    }
+    return function (cond) {
+      if (!cond) return true;
+      var наборы = condGroups(cond);
+      for (var i = 0; i < наборы.length; i++) {
+        var части = condParts(наборы[i]), ok = true;
+        for (var j = 0; j < части.length; j++) if (!частьДержит(части[j])) { ok = false; break; }
+        if (ok) return true;
+      }
+      return false;
+    };
+  }
+
   // Страница рисуется теми же кирпичиками, что и предпросмотр, но без единого обработчика:
   // отметки здесь только показываются, нажать на них нельзя.
-  function watchPage(body, page, pi, st) {
+  function watchPage(body, page, pi, st, держит) {
     var checks = (st && st.checks) || {};
     var picks = (st && st.picks) || {};
     var codes = (st && st.codes) || {};
@@ -7871,6 +10179,9 @@
     var blocks = (page.blocks && page.blocks.length) ? page.blocks
       : (page.body ? [{ runs: [{ text: page.body }] }] : []);
     pageOrder(page, blocks).forEach(function (it) {
+      // Ровно как на планшете (kiosk.js, pageItems): элемент, чьё условие не выполнено, клиент
+      // не видит, и в наблюдении его быть не должно.
+      if (!держит(it.item.visibleWhen)) return;
       if (it.kind === 0) { previewBlock(body, it.item); return; }
       if (it.kind === 1) {
         var key = "p" + pi + "_c" + it.index;
@@ -7917,8 +10228,13 @@
       var sc = it.item;
       var cw = el("div", "pv-inline-scan");
       cw.appendChild(el("div", "pv-inline-title", (sc.label || "Сканирование кода") + (sc.required ? " *" : "")));
-      cw.appendChild(el("div", codes[sc.key] ? "watch-code" : "sig-meta",
-        codes[sc.key] ? codes[sc.key] : "Код ещё не считан"));
+      // Планшет присылает про каждый код целые сведения: { code, format, label } (kiosk.js,
+      // doc.codes). Раньше сюда уходил весь этот объект, и оператор вместо считанного кода
+      // читал «[object Object]». Строку тоже принимаем: её шлёт планшет, который не успел
+      // перечитать страницу после обновления службы.
+      var код = codes[sc.key];
+      var текстКода = !код ? "" : (typeof код === "string" ? код : (код.code || ""));
+      cw.appendChild(el("div", текстКода ? "watch-code" : "sig-meta", текстКода || "Код ещё не считан"));
       body.appendChild(cw);
     });
   }

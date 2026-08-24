@@ -211,7 +211,13 @@ public class ScheduleRunner : BackgroundService
             ? (action.Key == "brightness" ? new { brightness = rule.Value, value = rule.Value } : new { volume = rule.Value, value = rule.Value })
             : action.NeedsText ? new { text = rule.Text, message = rule.Text, locale = "ru-RU" }
             : null;
-        var method = body is null ? HttpMethod.Get : HttpMethod.Post;
+        // Тот же способ, что и у кнопки в карточке планшета: POST независимо от того, есть тело
+        // или нет. Раньше действие без тела уходило методом GET, и одна и та же команда
+        // («выключить экран», «разбудить», «обновить страницу», «перезагрузить») шла на планшет
+        // двумя разными способами: из карточки одним, по расписанию другим. Какой из них ждёт
+        // FreeKiosk, в этом хозяйстве не записано, поэтому берётся тот, которым пользуются
+        // каждый день и который на живых планшетах работает.
+        var method = HttpMethod.Post;
 
         var ok = 0;
         var failed = new List<string>();

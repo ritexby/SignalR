@@ -77,6 +77,17 @@ else
     echo "    /etc/signaturekiosk.env already exists - leaving it untouched."
 fi
 
+# Адрес обратного прокси. Без него X-Forwarded-For не принимается, и вместо адреса планшета
+# в журнале и в ограничении частоты запросов стоит адрес самого прокси: все планшеты и все
+# внешние системы считаются одним источником.
+if ! grep -q '^KnownProxies=' /etc/signaturekiosk.env 2>/dev/null; then
+    echo "    ВНИМАНИЕ: в /etc/signaturekiosk.env не задан KnownProxies."
+    echo "    Пропишите адрес Nginx Proxy Manager, иначе в журнале будет его адрес, а не адрес планшета,"
+    echo "    и ограничение частоты запросов посчитает все планшеты за один источник:"
+    echo "      KnownProxies=<адрес прокси>"
+    echo "    После правки: sudo systemctl restart $SVC"
+fi
+
 echo "==> [5/5] Installing systemd service"
 cp "$SCRIPT_DIR/$SVC.service" "/etc/systemd/system/$SVC.service"
 systemctl daemon-reload

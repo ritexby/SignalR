@@ -274,18 +274,26 @@ html, body {
 h2 { clear: both; }
 
 /* Горизонтальная черта между частями документа. */
-.doc-divider { border-top: 1px solid #cbd5e1; margin: 14px 0; }
+/* Черта одного цвета везде: на планшете, в наблюдении и на бумаге. Раньше было три разных
+   серых, и одна и та же черта выглядела по-разному в трёх местах. */
+.doc-divider { border-top: 1px solid #808080; margin: 14px 0; }
 
 /* Списки: отступ слева под маркер, пункты не слипаются. */
 .doc-list { margin: 8px 0 8px 22px; padding: 0; }
-.doc-list li { margin: 4px 0; line-height: 1.45; }
+/* Пункт списка это тот же текст документа: и кегль, и межстрочный берутся общие. Раньше здесь
+   стоял свой межстрочный, и он перебивал заданный оператором у блока: список расходился в
+   наблюдении и оставался тесным на планшете. Кегль тоже не был задан и наследовался от body,
+   поэтому список выглядел мельче соседнего абзаца, а на бумаге они одного размера. */
+.doc-list li { margin: 4px 0; font-size: var(--doc-text); }
 
 /* Таблица. Ширина не выходит за экран, а длинная таблица прокручивается сама, не растягивая
    страницу вбок: горизонтальная прокрутка всей страницы на планшете мешает листать документ. */
 .doc-table-wrap { overflow-x: auto; margin: 10px 0; }
 .doc-table { border-collapse: collapse; width: 100%; }
-.doc-table th, .doc-table td { border: 1px solid #97a2b2; padding: 8px 10px; text-align: left; vertical-align: top; }
-.doc-table th { background: #e6ebf2; font-weight: 700; }
+/* Ячейка тоже текст документа: без своего кегля она наследовала от body и была мельче абзаца,
+   хотя на бумаге они одного размера. Плашка шапки того же цвета, что в PDF. */
+.doc-table th, .doc-table td { border: 1px solid #97a2b2; padding: 8px 10px; text-align: left; vertical-align: top; font-size: var(--doc-text); }
+.doc-table th { background: #f1f5f9; font-weight: 700; }
 
 /* Поле ввода на странице. */
 .page-input { margin: 12px 0; }

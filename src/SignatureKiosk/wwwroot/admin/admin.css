@@ -4,6 +4,12 @@
      страница и выглядела так, будто всё съезжает. */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 22px; --s6: 30px;
   --r1: 8px; --r2: 11px; --r3: 16px;
+  /* Рост управляющего элемента. Один на всю админку: поле ввода, список и кнопка в одном ряду
+     обязаны быть одного роста, иначе ряд читается как случайная россыпь. Прежде в строке
+     элемента страницы стояли рядом поле в 35, поле в 36, список в 20 и кнопка в 38 точек.
+     --h-ctl-sm для плотных рядов: пометки в шапке страницы, дни недели, панель оформления. */
+  --h-ctl: 36px;
+  --h-ctl-sm: 30px;
   /* Разделители не обязаны спорить с текстом, но их должно быть видно: прежние #dde3ec и
      #e5e7eb давали к белому 1.2, то есть край панели угадывался, а не читался. */
   --line: #c3ccda;
@@ -48,6 +54,20 @@ code { background: #e3e8f0; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .btn-danger { background: #fff; color: var(--danger); border-color: #c07b7b; box-shadow: var(--sh1); }
 .btn-danger:hover { background: #fef2f2; border-color: #a85f5f; }
 .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(22,163,74,.30); }
+/* Ряд, где рядом стоят поле и кнопка, выравнивается по одному росту. Мелкая кнопка рядом с
+   полем читается как провал в строке: в строке группы поле было 33 точки, а «Переименовать» и
+   «Удалить» по 30; в окне управления планшетом поле адреса 40, а «Сохранить адрес» 30; в
+   правиле расписания заметка 36, а «Запустить» и «Удалить» 30. Правило написано на ряд, а не
+   на каждую кнопку: список рядов, где поле и кнопка стоят вместе, а не заплатка на случай. */
+.simple-row > .btn, .simple-row input:not([type=checkbox]),
+.sch-rule > .btn,
+.ctl-addr > .btn, .ctl-addr .field input,
+.ctl-say > .btn, .ctl-say .field input,
+.pv-setup-send > .btn, .pv-setup-send .sch-target,
+.filter-bar > .btn, .filter-bar > input, .filter-bar > select,
+.kc-grid .field input:not([type=checkbox]) {
+  height: var(--h-ctl); box-sizing: border-box;
+}
 
 /* Login */
 .login { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg); }
@@ -102,7 +122,11 @@ code { background: #e3e8f0; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 0 0 18px; }
 /* Action buttons stay together as one group and wrap as a unit, so the primary
    action is never orphaned onto its own line. Pinned right on wide screens. */
-.toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-left: auto; }
+/* Ряд действий делит вторую строку с кнопкой сохранения и прижимается к правому краю. Без
+   flex: 1 1 auto он занимал строку целиком и уезжал на третью, а шапка и так висит на экране
+   всегда: каждая лишняя строка в ней это строка, отнятая у документа. */
+.toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+  flex: 1 1 auto; justify-content: flex-end; margin-left: auto; }
 .tb-sep { width: 1px; align-self: stretch; margin: 2px var(--s1); background: var(--line); }
 .toolbar .btn { white-space: nowrap; }
 .toolbar .grow { flex: 1 1 220px; min-width: 180px; }
@@ -115,9 +139,17 @@ code { background: #e3e8f0; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* Image grid */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+/* Надпись в сетке карточек занимает всю ширину, а не одну ячейку в 150 точек: «Пока нет
+   картинок. Нажмите Загрузить картинки» иначе рассыпается по одному слову в строку. */
+.grid > .empty-note { grid-column: 1 / -1; }
 .card { position: relative; border: 2px solid var(--border); border-radius: 12px; overflow: hidden; background: #fafafa; cursor: pointer; }
 .card.selected { border-color: var(--accent); }
-.card img { width: 100%; height: 120px; object-fit: cover; display: block; }
+/* Картинка видна целиком, а не обрезанной по краям: оператор выбирает по тому, что на ней
+   нарисовано, и обрезанный посередине макет узнать нельзя. Поле под ней постоянной высоты,
+   чтобы карточки в сетке стояли ровно, а свободное место рядом с узкой картинкой закрашено
+   спокойным фоном. */
+.card img { width: 100%; height: 140px; object-fit: contain; display: block; background: #f1f4f8;
+  border-bottom: 1px solid var(--line); }
 .card .order { position: absolute; top: 6px; left: 6px; background: var(--accent); color: #fff; width: 26px; height: 26px; border-radius: 50%; display: none; align-items: center; justify-content: center; font-size: .82rem; font-weight: 700; }
 .card.selected .order { display: flex; }
 .card .del { position: absolute; top: 6px; right: 6px; background: rgba(255,255,255,.9); border: 1px solid var(--border); border-radius: 7px; width: 26px; height: 26px; cursor: pointer; color: var(--danger); font-size: 1rem; line-height: 1; }
@@ -156,12 +188,41 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .cb-row input[type=text] { flex: 1 1 220px; min-width: 160px; padding: 9px 10px; border: 1.5px solid var(--field-line); border-radius: 8px; background: #fff; }
 .cb-row input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .cb-row label { display: flex; align-items: center; gap: 5px; font-size: .85rem; color: var(--muted); }
+/* Один рост на всю строку элемента. Правило на ряд, а не на каждый элемент по отдельности:
+   в строке поля ввода стояли рядом надпись в 35 точек, имя для API в 36, список вида значения
+   в 20 (браузерная высота: своего оформления у него не было) и кнопка удаления в 38. Ряд
+   выглядел прыгающим, и глазу не за что было зацепиться. Отметки («обязательный», «отмечен»)
+   это не поля, а галочки с подписью, и своего роста им задавать нечего. */
+.cb-row > input:not([type=checkbox]), .cb-row > select, .cb-row > button,
+.cb-row > .field-sm input, .cb-row > .field-sm select,
+.cb-row > .cond-inline .cond-badge {
+  height: var(--h-ctl); box-sizing: border-box;
+}
+/* Знак «?» это пометка, а не действие: он нарочно мельче и в общий рост не входит. */
+.cb-row > .help-dot { height: 18px; }
+/* Оформленная надпись растёт вместе с текстом, поэтому ей задан не рост, а нижняя граница. */
+.cb-row > .rt-editor { min-height: var(--h-ctl); }
+/* Список вида значения ростом остальных, а не браузерным: без своего оформления он был вдвое
+   ниже соседних полей. */
+.cb-row > select { padding: 0 26px 0 9px; border: 1.5px solid var(--field-line); border-radius: 8px;
+  background: #fff; color: var(--text); }
+.cb-row > select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 
 /* ---------- Rich-text editor (document) ---------- */
-.field-sm { font-size: .82rem; color: var(--muted); font-weight: 600; }
+/* Мелкое поле с подписью. Раньше это была просто надпись без раскладки: браузер выкладывал
+   подпись и поле строкой, а когда подпись оказывалась длинной, поле переносилось под неё. В
+   одной панели половина подписей стояла слева, половина сверху. Теперь раскладка задана: в
+   плотном ряду подпись слева, а там, где полей много (панель проверки условий), сверху. */
+.field-sm { display: inline-flex; align-items: center; gap: 6px;
+  font-size: .82rem; color: var(--muted); font-weight: 600; }
 .rt-field { display: flex; flex-direction: column; gap: 6px; }
 .rt-label { font-size: .9rem; color: var(--muted); font-weight: 600; }
 .rt-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: #f4f6fa; }
+/* Разделитель между наборами кнопок панели. Своего вида у него не было вовсе: пустая полоска
+   нулевой ширины просто добавляла лишний зазор, и в ровном ряду из четырёхточечных промежутков
+   в одном месте зияла дыра в восемь, непонятно откуда взявшаяся. Теперь это видимая черта, как
+   в шапке документа, и она объясняет разрыв. */
+.rt-toolbar .rt-sep { width: 1px; align-self: stretch; margin: 2px var(--s1); background: var(--line); flex: 0 0 auto; }
 /* Панель одна на всю страницу и всплывает над редактируемым полем. Пятнадцать одинаковых
    панелей делали карточку блока вдвое выше, а страницу вдвое длиннее. */
 /* Условие прямо в строке пункта. Пока условия нет, это один значок, и пункт занимает ровно
@@ -192,7 +253,10 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .doc-head-sticky { position: sticky; top: var(--topbar-h, 64px); z-index: 18;
   background: var(--panel); padding-bottom: 8px; margin-bottom: 4px;
   box-shadow: 0 6px 10px -8px rgba(16,24,40,.35); }
-.doc-head-row { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+/* Значок «?» стоит вплотную к заголовку. На строке лежит ещё класс panel-head с раздвижкой по
+   краям, и от неё значок улетал в правый угол панели, где висел один в пустоте и читался как
+   что-то постороннее. */
+.doc-head-row { display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin: 0 0 8px; }
 .doc-head-row h2 { margin: 0; }
 .rt-bar-host { position: sticky; top: calc(var(--topbar-h, 64px) + var(--doc-head-h, 0px)); z-index: 15; padding: 6px 0 10px; background: var(--panel); }
 .rt-float { box-shadow: var(--sh2); border-color: var(--line); background: #fff; }
@@ -200,11 +264,19 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
    что оформлять пока нечего. */
 .rt-idle { opacity: .6; }
 .rt-hint { font-size: .82rem; color: var(--muted); margin-left: auto; padding-right: 4px; white-space: nowrap; }
-.rt-btn { min-width: 30px; height: 28px; padding: 0 8px; border: 1px solid var(--field-line); border-radius: 6px; background: #fff; color: var(--text); font-weight: 700; cursor: pointer; font-size: .85rem; }
+.rt-btn { min-width: 30px; height: var(--h-ctl-sm); padding: 0 8px; border: 1px solid var(--field-line); border-radius: 6px; background: #fff; color: var(--text); font-weight: 700; cursor: pointer; font-size: .85rem; }
 .rt-btn:hover { border-color: var(--accent); }
-.rt-swatch { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(0,0,0,.45); border-radius: 4px; cursor: pointer; }
+/* Образец цвета это такая же кнопка ряда, как «Ж» или «К», и рост у неё тот же. Прежде она была
+   20 точек против 30 у соседей: ряд из двадцати шести кнопок шёл ступеньками, и в него было
+   не прицелиться. Ширина осталась меньше кнопочной: это цвет, а не надпись. */
+.rt-swatch { width: 24px; height: var(--h-ctl-sm); padding: 0; border: 1px solid rgba(0,0,0,.45);
+  border-radius: 5px; cursor: pointer; }
 .rt-swatch:hover { transform: scale(1.12); }
-.rt-tag { height: 28px; border: 1px solid var(--field-line); border-radius: 6px; background: #fff; color: var(--text); font-size: .82rem; margin-left: auto; }
+/* Выбор тега стоит в общем ряду, а не прижат к правому краю. От margin-left: auto он при
+   переносе уходил в правый угол второй строки и висел там один, оторванный от всего.
+   Ширина ограничена: закрытый список всегда показывает «+ тег», и растягиваться до длины самого
+   длинного тега ему незачем, а от лишних сорока точек он как раз и не помещался в строку. */
+.rt-tag { height: var(--h-ctl-sm); max-width: 108px; border: 1px solid var(--field-line); border-radius: 6px; background: #fff; color: var(--text); font-size: .82rem; }
 .rt-editor { min-height: 64px; padding: 10px 12px; border: 1px solid var(--field-line); border-radius: 8px; background: #fff; color: var(--text); line-height: 1.55; outline: none; }
 .rt-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(22,163,74,.12); }
 /* Absolute, not relative: a size span can end up inside another one while editing, and with em
@@ -271,18 +343,52 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .block-image .field-sm { display: flex; align-items: center; gap: 8px; flex-direction: row; }
 .img-wval { font-size: .82rem; color: var(--muted); }
 .img-picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin: 10px 0; max-height: 320px; overflow-y: auto; }
+/* Всё, что не картинка, занимает сетку во всю ширину. Пояснение «подходящих картинок нет»
+   попадало в ячейку в 96 точек и рассыпалось по одному слову в строку посреди окна шириной в
+   632. Правило общее: любая надпись в этой сетке ведёт себя так же, а не только эта. */
+.img-picker-grid > :not(.img-picker-cell) { grid-column: 1 / -1; }
 .img-picker-cell { padding: 0; border: 1px solid var(--border); border-radius: 8px; background: #fff; cursor: pointer; overflow: hidden; height: 80px; }
 .img-picker-cell:hover { border-color: var(--accent); }
 .img-picker-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 /* ---------- Document preview (as the tablet renders it) ---------- */
+/* Окно, где спрашивают значения тегов. Полутора десяткам полей нужна не одна колонка на всю
+   ширину окна, а сетка: в одну колонку такое окно вырастало на полторы высоты экрана, и до
+   кнопки внизу приходилось прокручивать мимо всех полей. Правило написано на признак «в теле
+   окна три поля подряд и больше», поэтому так же ведёт себя и окно «Данные для документа», и
+   любое другое окно с длинным списком полей, а окно с двумя полями остаётся как было. */
 .preview-setup { text-align: left; }
+.preview-setup,
+#modalContent > div:not([class]):has(> .field + .field + .field) {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0 var(--s3); align-content: start;
+}
+/* В ячейку встаёт только поле. Заголовок, пояснение, ряд действий и длинный текст идут во всю
+   ширину: разрезать их по колонкам нечем и незачем. */
+.preview-setup > :not(.field),
+#modalContent > div:not([class]):has(> .field + .field + .field) > :not(.field) { grid-column: 1 / -1; }
+.preview-setup > .field:has(textarea),
+#modalContent > div:not([class]):has(> .field + .field + .field) > .field:has(textarea) { grid-column: 1 / -1; }
+/* Кнопка в сетке растянулась бы во всю строку. Так должно вести себя только главное действие
+   окна, у него на это своё правило; запасное остаётся по размеру надписи. */
+.preview-setup > .btn:not(.btn-primary),
+#modalContent > div:not([class]):has(> .field + .field + .field) > .btn:not(.btn-primary) {
+  justify-self: start; margin-top: var(--s2);
+}
 .preview-wrap { text-align: left; display: flex; flex-direction: column; gap: 12px; }
 .pv-head h3 { margin: 0 0 4px; }
 .pv-frame { border: 1px solid var(--border); border-radius: 14px; background: #f5f6f8; color: #1a1c22; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
 .pv-title { font-size: 1.35rem; font-weight: 700; border-bottom: 2px solid #e5e7eb; padding-bottom: 10px; }
 .pv-progress { color: var(--muted); font-size: .85rem; }
-.pv-body { display: flex; flex-direction: column; gap: 12px; }
+/* Обычный поток, а не колонка: в колонке плавающая картинка на соседей не действует, и
+   обтекание текстом, которое работает на планшете и печатается в PDF, в предпросмотре и в
+   наблюдении не показывалось вовсе. Отступ между блоками задан снизу у самих блоков. */
+.pv-body { display: block; }
+/* Блоки экрана подписи по центру, как на планшете (.sign-custom). */
+.pv-sign-custom { text-align: center; }
+.pv-sign-custom:empty { display: none; }
+.pv-body > * { margin-bottom: 12px; }
+.pv-body > *:last-child { margin-bottom: 0; }
 .pv-heading { margin: 0; font-size: 1.15rem; }
 .pv-text { white-space: pre-wrap; font-size: 1.02rem; line-height: 1.45; }
 .pv-text .rt-l { font-size: 1.3em; }
@@ -321,11 +427,13 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 /* Список, таблица, черта и вписанное клиентом: то же, что рисует планшет. */
 .pv-list { margin: 8px 0; padding-left: 26px; }
 .pv-list li { margin: 2px 0; }
-.pv-divider { border-top: 1px solid var(--field-line); margin: 12px 0; }
+/* Тот же серый, что на планшете и в PDF: три разных серых давали три разных черты. */
+.pv-divider { border-top: 1px solid #808080; margin: 12px 0; }
 .pv-table-wrap { overflow-x: auto; margin: 8px 0; }
 .pv-table { border-collapse: collapse; width: 100%; }
 .pv-table th, .pv-table td { border: 1px solid #97a2b2; padding: 5px 8px; text-align: left; vertical-align: top; }
-.pv-table th { background: #e6ebf2; font-weight: 700; }
+/* Плашка шапки того же цвета, что на планшете и в PDF. */
+.pv-table th { background: #f1f5f9; font-weight: 700; }
 .pv-inline-input { margin: 8px 0; }
 /* Поле ввода в предпросмотре настоящее: в него печатают, и от набранного пересчитываются
    условия. Вид тот же, что у остальных полей админки. */
@@ -341,7 +449,9 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .pv-scan-btn { align-self: flex-start; background: var(--accent); color: #fff; border-radius: 8px;
   padding: 8px 14px; font-weight: 600; font-size: .92rem; }
 .pv-hint { margin-top: 4px; font-size: .85rem; color: var(--accent); font-weight: 600; }
-.pv-footer .btn, .modal .pv-footer .btn { width: auto; margin-top: 0; }
+/* Своя навигация предпросмотра компактна: растягивать её нечему, ширину главной кнопке теперь
+   задаёт только правило для одиночного действия окна. */
+.pv-footer .btn { margin-top: 0; }
 
 /* ---------- Operator alerts ---------- */
 .tab-alerts { display: inline-flex; align-items: center; gap: 6px; }
@@ -489,29 +599,106 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .enroll-code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 2.4rem; font-weight: 800; letter-spacing: .1em; text-align: center; background: #e7f7ee; color: var(--accent); border-radius: 12px; padding: 18px; margin: 6px 0; }
 .enroll-result { text-align: center; }
 .modal .field { text-align: left; margin-bottom: 12px; }
-.modal .btn-primary { width: 100%; margin-top: 8px; }
+/* Во всю ширину растягивается только главная кнопка, стоящая прямо в теле окна, то есть
+   единственное действие этого окна. Прежде правило было «.modal .btn-primary», то есть любая
+   главная кнопка где угодно внутри окна, и она распирала собой ряд: в окне замечаний
+   «Всё равно продолжить» занимала всю строку, а «Вернуться и исправить» повисала над ней
+   отдельной строкой. Чинить это приходилось заплатками width:auto в каждом ряду, и каждый
+   новый ряд начинал с той же беды. Здесь ряд не задет по построению. */
+#modalContent > * > .btn-primary { width: 100%; margin-top: var(--s2); }
 
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111827; color: #fff; padding: 12px 20px; border-radius: 10px; font-size: .95rem; z-index: 100; box-shadow: 0 6px 20px rgba(0,0,0,.2); transition: opacity .2s; opacity: 0; max-width: min(720px, 92vw); text-align: center; line-height: 1.4; }
 /* Отказ должен читаться как отказ, а не как «сохранено». */
 .toast.toast-bad { background: #7f1d1d; box-shadow: 0 6px 20px rgba(127,29,29,.45); font-weight: 600; }
 
-/* ---- API docs ---- */
-.api-docs { display: flex; flex-direction: column; gap: 14px; }
-.api-intro { border: 1px solid #86d9a2; border-radius: 12px; padding: 14px 16px 16px; background: #f0fdf4; }
-.api-intro h3 { margin: 12px 0 4px; font-size: .95rem; color: #14532d; }
-.api-intro h3:first-child { margin-top: 0; }
-.api-intro .api-desc { margin-top: 2px; }
-.api-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.api-ep { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; background: #fff; }
-.api-ep-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* ---- API docs ----
+   Вкладка длинная по существу: на ней описан каждый путь сервера. Поэтому она сложена из
+   свёрток одного вида, а не из разных карточек: шапка со ссылкой на смысл, тело по нажатию.
+   Разделы руководства раскрыты, статьи справочника свёрнуты. Ничего своего по росту и отступам
+   здесь не изобретается: шкала --s*, рост управляющих --h-ctl и ряд .filter-bar уже есть. */
+.api-docs { display: flex; flex-direction: column; gap: var(--s3); }
+
+/* Оглавление. Ссылки, а не кнопки: решётка в адресе переключает вкладки админки. */
+.api-nav { display: flex; flex-wrap: wrap; gap: var(--s2); border: 1px solid var(--line-soft);
+  border-radius: var(--r2); padding: var(--s3) var(--s4); background: #f8fafc; }
+.api-nav-link { font-size: .86rem; font-weight: 600; color: #33415a; text-decoration: none;
+  border: 1px solid var(--line-soft); border-radius: 999px; padding: 5px 12px; background: #fff; }
+.api-nav-link:hover { border-color: var(--accent); color: var(--accent-dark); }
+.api-nav-link.api-nav-ref { color: var(--muted); font-weight: 500; }
+
+/* Свёртка: одна форма на раздел руководства и на статью справочника. */
+.api-sec, .api-ep { border: 1px solid var(--border); border-radius: var(--r2); background: #fff; }
+.api-sec { border-color: #86d9a2; background: #f6fdf8; }
+.api-sec-head, .api-ep-head {
+  display: flex; align-items: center; gap: var(--s2) var(--s3); flex-wrap: wrap;
+  width: 100%; margin: 0; padding: var(--s3) var(--s4); border: 0; background: transparent;
+  text-align: left; font: inherit; color: inherit; cursor: pointer; border-radius: var(--r2);
+}
+.api-sec-head:hover, .api-ep-head:hover { background: rgba(21,128,61,.06); }
+.api-sec-head:focus-visible, .api-ep-head:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(22,163,74,.30); }
+.api-sec-title { font-size: 1rem; font-weight: 700; color: #14532d; }
+.api-sec-body, .api-ep-body { padding: 0 var(--s4) var(--s4); }
+/* Шеврон уезжает вправо и поворачивается: раскрыто это видно, а не угадывается. */
+.api-chev { margin-left: auto; display: inline-flex; color: var(--muted); transition: transform .15s; }
+.api-sec.open > .api-sec-head .api-chev, .api-ep.open > .api-ep-head .api-chev { transform: rotate(180deg); }
+
+/* Заголовок группы справочника. */
+.api-group { display: flex; flex-direction: column; gap: var(--s2); }
+.api-group-head { margin: var(--s3) 0 0; font-size: 1.02rem; color: var(--accent-dark); }
+.api-group-note { margin-top: 0; }
+
 .api-method { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 700; font-size: .78rem; padding: 3px 9px; border-radius: 6px; letter-spacing: .04em; }
 .api-get { background: #d3f0e0; color: var(--accent-dark); }
 .api-post { background: #dde4ff; color: #4338ca; }
 .api-put { background: #ffe9d1; color: #9a3412; }
+.api-delete { background: #fde2e2; color: #b91c1c; }
+.api-ws { background: #ede9fe; color: #6d28d9; }
 .api-path { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .95rem; color: var(--text); word-break: break-all; }
+/* Кто может звать. Это первое, что спрашивают у чужого пути, поэтому стоит в шапке. */
+.api-who { font-size: .78rem; color: var(--muted); border: 1px solid var(--line-soft);
+  border-radius: 999px; padding: 2px 10px; background: #f8fafc; white-space: nowrap; }
 .api-desc { color: var(--muted); font-size: .9rem; margin: 8px 0 0; }
+.api-h4 { margin: var(--s4) 0 var(--s1); font-size: .84rem; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em; }
+.api-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .api-code { margin: 10px 0 0; background: #0f172a; color: #e2e8f0; border-radius: 9px; padding: 12px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .82rem; line-height: 1.5; white-space: pre; overflow-x: auto; }
-.api-copy { margin-left: auto; }
+.api-ep-actions { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+
+/* Таблицы. Ширина колонок задана: с автоматической раскладкой длинный текст отказа распирал бы
+   таблицу шире вкладки, и страница ехала бы вбок. Длинное слово переносится внутри ячейки. */
+.api-tbl { width: 100%; table-layout: fixed; border-collapse: collapse; margin-top: var(--s2);
+  font-size: .88rem; }
+.api-tbl th, .api-tbl td { border: 1px solid var(--line-soft); padding: 7px 10px;
+  text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.api-tbl th { background: #f1f5f9; color: var(--muted); font-size: .8rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .03em; }
+.api-tbl td { color: var(--text); }
+.api-tbl code { overflow-wrap: anywhere; }
+/* Ширины по назначению колонки, а не по числу колонок: «Код» это три знака, а «Что придёт»
+   целый абзац, и одинаковая доля им обоим одинаково плоха. */
+.api-tbl-2 th:first-child { width: 30%; }
+.api-tbl-3 th:first-child { width: 24%; }
+.api-tbl-3 th:nth-child(2) { width: 38%; }
+.api-tbl-req th:first-child { width: 24%; }
+.api-tbl-req th:nth-child(2) { width: 15%; }
+.api-tbl-res th:first-child { width: 28%; }
+.api-tbl-fail th:first-child { width: 9%; }
+.api-tbl-case th:first-child { width: 32%; }
+.api-tbl-case th:nth-child(2) { width: 12%; }
+.api-tbl-mistakes th:first-child { width: 28%; }
+.api-tbl-mistakes th:nth-child(2) { width: 36%; }
+
+/* Врезка: то, на чём чужие системы спотыкаются чаще всего. */
+.api-note { margin: var(--s3) 0 0; padding: 10px 14px; border-left: 3px solid var(--accent);
+  border-radius: 0 var(--r1) var(--r1) 0; background: rgba(21,128,61,.07); color: var(--text);
+  font-size: .89rem; line-height: 1.5; }
+.api-note-warn { border-left-color: #c2410c; background: rgba(234,88,12,.09); }
+
+/* Полный пример: заголовок, пояснение, тело запроса и действия под ним. */
+.api-sample { border: 1px solid var(--line-soft); border-radius: var(--r1);
+  padding: var(--s3) var(--s4) var(--s4); background: #fff; margin-top: var(--s3); }
+.api-sample .api-h4 { margin-top: 0; font-size: .95rem; text-transform: none; letter-spacing: 0;
+  color: var(--text); }
 
 /* ---- Tablet control (FreeKiosk API) ---- */
 .dev-health { color: var(--muted); }
@@ -536,7 +723,10 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 /* Ширины хватает и на 24-часовой вид, и на 12-часовой с AM/PM: браузер показывает время по
    своим настройкам, а в узком поле «21:00» превращалось в «09:00» и читалось как утро. */
 .sch-rule input[type=time] { width: 148px; font-variant-numeric: tabular-nums; }
-.sch-rule input, .sch-rule select { padding: 8px 9px; border: 1.5px solid var(--field-line); border-radius: 8px;
+/* Один рост на всё правило: время было 40 точек, а списки «что сделать» и «кому» 37, и строка
+   выглядела сбитой. Галочки правила это не поля, их рост задаёт сама галочка. */
+.sch-rule input:not([type=checkbox]), .sch-rule select { padding: 0 9px; height: var(--h-ctl);
+  box-sizing: border-box; border: 1.5px solid var(--field-line); border-radius: 8px;
   background: #fff; color: var(--text); font-size: .95rem; }
 .sch-rule input:focus, .sch-rule select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .sch-action { min-width: 210px; }
@@ -545,7 +735,7 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .sch-value { width: 92px; }
 .sch-days { display: flex; gap: 3px; }
 /* День недели переключается нажатием: семь галочек с подписями заняли бы всю строку. */
-.sch-day { width: 32px; height: 32px; border: 1.5px solid var(--field-line); border-radius: 8px; background: #fff;
+.sch-day { width: 34px; height: var(--h-ctl); border: 1.5px solid var(--field-line); border-radius: 8px; background: #fff;
   color: var(--muted); font-size: .8rem; font-weight: 700; cursor: pointer; padding: 0; }
 .sch-day.on { background: #eef2ff; border-color: #6366f1; color: #4338ca; }
 .sch-flags { display: flex; align-items: center; gap: 6px; font-size: .86rem; color: var(--muted); font-weight: 600; }
@@ -566,7 +756,6 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .pv-setup-send { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px;
   padding-top: 12px; border-top: 1px solid var(--line); }
 .pv-setup-send .sch-target { min-width: 180px; padding: 8px 9px; border: 1.5px solid var(--field-line); border-radius: 8px; background: #fff; }
-.modal .pv-setup-send .btn { width: auto; margin-top: 0; }
 .sch-dev-all { border-style: dashed; font-weight: 600; color: var(--muted); }
 .sch-dev-all:hover { border-color: var(--accent); color: var(--accent); }
 
@@ -590,9 +779,6 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 /* A tablet screenshot is portrait and tall; bounded so it does not push the whole modal into
    a long scroll. */
 .ctl-shot-img { max-width: 100%; max-height: 45vh; object-fit: contain; border: 1px solid var(--border); border-radius: 10px; background: #0f172a; }
-/* The modal makes primary buttons full width for its form dialogs; here the button sits in a row
-   of compact controls, so it keeps its own size. */
-.ctl-shot-btn.btn { width: auto; margin-top: 0; }
 
 /* Signature page editor: the signature field itself is not editable, so it is drawn as a marker
    between the two block lists. Without it the operator cannot tell which list is which. */
@@ -698,6 +884,14 @@ body.dragging-now .topbar { pointer-events: none; }
    сохраняет свой цвет рамки, поэтому в общем списке видно, что есть что. */
 .item-list { display: flex; flex-direction: column; gap: 0; }
 .item-list > .page-item { margin: 0; }
+/* Под шапкой документа и панелью оформления закреплено около двухсот точек. Когда браузер сам
+   подводит элемент к верху окна (переход по оглавлению, табуляция в поле, возврат к полю после
+   перерисовки), верх элемента оказывается под этими полосами, и первая строка карточки просто
+   не видна: у блока таблицы так пропадали отметка про заголовки и весь ряд ширин. Запас снизу
+   от закреплённых полос задан здесь, чтобы это не приходилось помнить каждому месту отдельно. */
+#pagesEditor .page-item, #pagesEditor [data-role="pagecard"], #pagesEditor .block-card {
+  scroll-margin-top: calc(var(--topbar-h, 64px) + var(--doc-head-h, 96px) + 110px);
+}
 
 /* Полоса вставки. Видна всегда, а не только при наведении: иначе о ней не догадаться.
    В спокойном виде это тонкая линия с подписью, по нажатию раскрывается в три кнопки. */
@@ -773,8 +967,21 @@ body.dragging-now .topbar { pointer-events: none; }
 .pdfl-field .btn { padding: 3px 9px; font-size: 12px; }
 @media (max-width: 860px) { .pdfl-body { grid-template-columns: 1fr; } .pdfl-side { max-height: 190px; } }
 .modal-box.wide { width: min(1400px, 98vw); max-height: 96vh; padding: 20px; }
-.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
-.modal-actions .btn, .modal .modal-actions .btn-primary { width: auto; margin-top: 0; }
+.modal-actions { display: flex; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+/* Ряд запасных действий под главной кнопкой: слева, чтобы глаз шёл сверху вниз и налево, а не
+   прыгал к правому краю. */
+.modal-actions-left { justify-content: flex-start; margin-top: 8px; }
+/* Один зазор во всех рядах действий любого окна, как бы ряд ни был назван в разметке. Прежде
+   .modal-actions давал 8, .toolbar-actions 10, .pv-setup-send 8, а сверху на всё это ложился
+   margin-left: 8px, и между двумя обычными кнопками получалось 16, а между главной и обычной 8:
+   в одном ряду два разных зазора. */
+#modalContent .modal-actions, #modalContent .toolbar-actions,
+#modalContent .pv-setup-send, #modalContent .pv-footer, #modalContent .pdfl-head { gap: var(--s3); }
+/* Последняя защита от слипания: две кнопки подряд прямо в теле окна, без ряда, всё равно
+   разойдутся. Только прямо в теле: внутри ряда зазор задаёт сам ряд, а лишний margin в сетке
+   кнопок (окно управления планшетом) распирал её на 8 точек шире окна, и окно ехало вбок. */
+#modalContent > * > .btn + .btn { margin-left: var(--s2); }
+#modalContent > * > .btn-primary + .btn { margin-left: 0; }
 
 /* Незаполненное условие видно сразу: без тега оно не сохранится, и молчать об этом нельзя. */
 .cond-row.cond-bad { outline: 2px solid var(--danger, #dc2626); outline-offset: 2px; border-radius: 8px; }
@@ -823,8 +1030,15 @@ body.dragging-now .topbar { pointer-events: none; }
 /* Размер текста внутри копии приходит числом от ширины планшета: доли ширины окна тут
    считались бы от окна оператора и давали чужие переносы. */
 .watch-screen { --pv-doc-text: 1.05rem; }
+/* Всё, что на планшете набрано кеглем текста документа, в наблюдении получает тот же кегль,
+   пересчитанный от настоящей ширины планшета. Списки, ячейки таблиц и заголовки страниц тут
+   раньше забыли, и в окне наблюдения строки ломались не там, где у клиента. */
 .watch-screen .pv-text, .watch-screen .watch-label, .watch-screen .pv-group-title,
-.watch-screen .pv-inline-title { font-size: var(--pv-doc-text); }
+.watch-screen .pv-inline-title,
+.watch-screen .pv-list li, .watch-screen .pv-table th, .watch-screen .pv-table td { font-size: var(--pv-doc-text); }
+/* Заголовок страницы на планшете задан долей ширины окна: 2.6vw с потолком. Пересчитываем
+   так же, от ширины планшета, а не от ширины окна оператора. */
+.watch-screen .pv-heading { font-size: calc(var(--pv-doc-text) * 1.28); }
 .watch-screen { background: #fff; border-radius: 12px; padding: 18px 20px; min-height: 260px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, .08); }
 .watch-note { color: var(--muted); text-align: center; padding: 40px 0; }
@@ -914,17 +1128,36 @@ body.dragging-now .topbar { pointer-events: none; }
 .img-where-cap { color: var(--muted); margin-right: 4px; }
 .img-where-val { font-weight: 600; }
 .img-where-warn { margin-top: 4px; font-size: .72rem; color: #b91c1c; font-weight: 600; line-height: 1.3; }
-.groups-pop { position: fixed; z-index: 80; width: 300px; max-height: 70vh; overflow: auto; background: #fff;
+.groups-pop { position: fixed; z-index: 80; width: 380px; max-width: calc(100vw - 24px);
+  max-height: 78vh; display: flex; flex-direction: column; background: #fff;
   border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 32px rgba(15,23,42,.18); padding: 12px 14px; cursor: default; }
-.groups-pop-title { font-weight: 700; font-size: .95rem; margin-bottom: 4px; }
-.groups-pop-hint { font-size: .78rem; color: var(--muted); line-height: 1.4; margin-bottom: 10px; }
+.groups-pop-head { margin-bottom: 8px; }
+.groups-pop-title { font-weight: 700; font-size: .95rem; }
+.groups-pop-sum { font-size: .8rem; color: var(--accent-dark); font-weight: 600; margin-top: 2px; }
+.groups-pop-hint { font-size: .78rem; color: var(--muted); line-height: 1.4; margin: 8px 0; }
 .groups-pop-empty { font-size: .82rem; color: var(--muted); line-height: 1.4; padding: 6px 0 10px; }
-.groups-pop-sec { margin-bottom: 10px; }
-.groups-pop-sub { font-size: .78rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 5px; }
-.groups-pop-row { display: flex; align-items: center; gap: 7px; padding: 3px 0; font-size: .88rem; cursor: pointer; }
-.groups-pop-row input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
-.groups-pop-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); margin-top: 4px; }
-.groups-pop-foot .btn { padding: 7px 14px; font-size: .85rem; }
+.groups-pop-search { width: 100%; padding: 7px 10px; border: 1px solid var(--field-line);
+  border-radius: 8px; font-size: .88rem; }
+/* Список сам прокручивается: групп бывает шестьдесят, и панель во весь экран не годится. */
+.groups-pop-list { max-height: 44vh; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
+.groups-pop-row { display: flex; align-items: center; gap: 10px; padding: 5px 6px; border-radius: 8px;
+  font-size: .88rem; }
+.groups-pop-row + .groups-pop-row { border-top: 1px solid #f0f3f7; }
+.groups-pop-row.chosen { background: #f2f9f5; }
+.groups-pop-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Три состояния одной строки: не участвует, показывать, кроме. Один переключатель вместо двух
+   списков: противоречие тогда невозможно по построению. */
+.groups-pop-switch { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--line);
+  border-radius: 999px; overflow: hidden; background: #fff; }
+.groups-pop-opt { padding: 3px 9px; font-size: .76rem; font-weight: 600; color: var(--muted);
+  background: transparent; border: 0; border-left: 1px solid var(--line); cursor: pointer; white-space: nowrap; }
+.groups-pop-opt:first-child { border-left: 0; }
+.groups-pop-opt:hover { background: #f4f7fb; color: var(--text); }
+.groups-pop-opt.on { background: var(--accent); color: #fff; }
+.groups-pop-opt[data-val="out"].on { background: #b91c1c; }
+.groups-pop-foot { display: flex; align-items: center; gap: 8px; padding-top: 8px;
+  border-top: 1px solid var(--line); margin-top: 8px; }
+.groups-pop-spacer { flex: 1 1 auto; }
 /* Обтекание картинки текстом в предпросмотре и в окне наблюдения. */
 .pv-image-wrap img { width: 100%; }
 .pv-check, .pv-group, .pv-inline-sign, .pv-inline-scan, .pv-heading, .watch-check { clear: both; }
@@ -958,13 +1191,22 @@ body.watch-solo .content { padding-top: 12px; }
    что относится к блоку, в шапке блока. Прежде они лежали под содержимым, и на длинной странице
    до них надо было доскроливать, чтобы узнать, попадёт ли она в PDF. Подписи короткие, полное
    объяснение осталось в подсказке при наведении. */
-.head-flag { flex: 0 0 auto; gap: 5px; font-size: .84rem; font-weight: 600; color: #4b5563;
-  white-space: nowrap; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px;
-  background: #fff; cursor: pointer; }
+/* Пометки в шапке страницы и кнопка удаления рядом с ними. Высота у всех одна и задана явно:
+   иначе значок «?» внутри пометки распирал её сильнее соседней, кнопка была своего роста, и ряд
+   выглядел прыгающим. Выравнивание по средней линии само по себе ровного ряда не даёт, когда
+   высоты разные. */
+.head-flag { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 6px;
+  height: 30px; padding: 0 10px; box-sizing: border-box;
+  font-size: .84rem; font-weight: 600; color: #4b5563; white-space: nowrap;
+  border: 1px solid var(--line); border-radius: 999px; background: #fff; cursor: pointer; }
 .head-flag:hover { border-color: var(--field-line); }
-.head-flag input { margin: 0; }
-.page-flags { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+.head-flag input { margin: 0; width: 15px; height: 15px; flex: 0 0 auto; }
+/* Значок помощи внутри пометки меньше обычного и не тянет её вверх. */
+.head-flag .help-dot { width: 16px; height: 16px; margin-left: 2px; font-size: 11px; }
+.page-flags { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
   flex: 0 0 auto; margin-left: auto; }
+/* Кнопка в этом же ряду того же роста, что пометки. */
+.page-flags .btn { height: 30px; padding: 0 12px; box-sizing: border-box; }
 .page-title .page-summary { flex: 1 1 auto; }
 /* Снятый флаг «в PDF» это предупреждение, а не мелочь: блока не будет в бумаге. */
 .head-flag.pdf-flag:has(input:not(:checked)) { border-color: #c08a2e; background: #fffaf0; color: #92400e; }
@@ -1011,10 +1253,32 @@ body.watch-solo .content { padding-top: 12px; }
 
 /* Редактор таблицы: ячейки сеткой, ширины столбцов сверху. */
 .block-table { margin: 8px 0; }
+/* Отметка про строку заголовков и знак «?» рядом с ней. Отдельной строкой с отступом сверху:
+   вплотную к переключателю вида блока она читалась как его продолжение. */
+.table-head-row { display: flex; align-items: center; gap: 6px; margin: var(--s2) 0 var(--s1); }
 .table-grid { display: grid; gap: 4px; align-items: center; margin: 8px 0; overflow-x: auto; }
-.table-cell, .table-width { padding: 6px 8px; border: 1px solid var(--field-line); border-radius: 6px; min-width: 80px; }
+.table-cell { padding: 6px 8px; border: 1px solid var(--field-line); border-radius: 6px; min-width: 80px;
+  height: var(--h-ctl); box-sizing: border-box; background: #fff; color: var(--text); }
 .table-cell-head { background: #f1f5f9; font-weight: 700; }
-.table-width { background: #fbfdff; color: #64748b; }
+/* Кнопка удаления строки того же роста, что ячейки её строки. */
+.table-grid > .btn { height: var(--h-ctl); box-sizing: border-box; }
+/* Подпись над рядом ширин, во всю ширину сетки. Без неё ряд полей читался как первая строка
+   таблицы, в которой почему-то стоят проценты. */
+.table-width-cap { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 4px 8px; margin-top: var(--s1); }
+.table-width-cap-name { font-size: .76rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .04em; color: #5a6473; }
+.table-width-hint { font-size: .78rem; font-weight: 400; color: var(--muted); }
+/* Поле ширины не похоже на ячейку: оно ниже, уже, по центру, на голубой плашке и в пунктирной
+   рамке. Прежде это был точно такой же прямоугольник того же размера, что и ячейка данных, и
+   отличить ряд ширин от строки таблицы было нечем. */
+.table-width { height: 26px; box-sizing: border-box; padding: 0 6px; min-width: 0;
+  width: min(100%, 96px); justify-self: center;
+  border: 1px dashed #9fb0c9; border-radius: 6px; background: #eef4fb; color: #46566e;
+  font-size: .8rem; text-align: center; }
+.table-width::placeholder { color: #7d8ca3; font-size: .75rem; }
+.table-width:focus { outline: none; border-style: solid; border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(21,128,61,.14); }
 .table-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* Правила отметок у страницы. */
@@ -1040,8 +1304,10 @@ body.watch-solo .content { padding-top: 12px; }
   background: #1a1c22; color: #fff; font-size: .85rem; font-weight: 400; line-height: 1.45;
   padding: 10px 12px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.28);
   white-space: normal; text-transform: none; letter-spacing: normal; }
+/* Облачко пояснения ставится внутрь родителя значка «?», поэтому родитель обязан быть точкой
+   отсчёта. Строка отметки про заголовки таблицы это такой же родитель, как остальные. */
 .cond-adds, .section-label, .field, .field-sm, .head-flag, .spotlight-head, .rules-head,
-.block-style-head { position: relative; }
+.block-style-head, .table-head-row { position: relative; }
 
 .rules-help { margin: 0 12px 8px; }
 /* Подсказки «как это работает». Пояснение должно стоять там, где человек в него упирается, а
@@ -1060,8 +1326,10 @@ body.watch-solo .content { padding-top: 12px; }
 
 /* Маркер в панели оформления текста: кружок с обводкой, чтобы светлый цвет был виден на белом. */
 .rt-swatch-mark { border: 1px solid var(--field-line); border-radius: 4px; }
-/* Свой размер шрифта в точках. */
-.rt-pt input { width: 52px; padding: 3px 5px; border: 1px solid var(--field-line); border-radius: 6px; }
+/* Свой размер шрифта в точках. Рост тот же, что у кнопок ряда: поле в 24 точки посреди кнопок
+   в 30 читалось как провал в ряду. */
+.rt-pt input { width: 52px; height: var(--h-ctl-sm); box-sizing: border-box; padding: 0 6px;
+  border: 1px solid var(--field-line); border-radius: 6px; }
 /* Пометка «по часам сервера» вместо списка тегов у условий по моменту показа. */
 .cond-clock-note { color: #6366f1; font-weight: 600; }
 /* Настройки колонтитула в окне раскладки PDF. */
@@ -1075,8 +1343,16 @@ body.watch-solo .content { padding-top: 12px; }
 .spotlight { padding: 0; margin-bottom: 6px; }
 .spotlight.spot-active { border: 1px dashed #6366f1; border-radius: 8px; padding: 10px; margin-bottom: 10px; background: #fbfbff; }
 .spotlight-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.spotlight-fields { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
-.spotlight-fields .field-sm input, .spotlight-fields .field-sm select { min-width: 130px; }
+/* Полтора десятка полей: их выкладывает сетка одинаковых колонок, а не поток. В потоке ширина
+   каждого поля бралась из длины имени тега, поля стояли лесенкой, а у длинных имён поле
+   переносилось под подпись. Ширина поля здесь не значит ничего: значение тега это строка любой
+   длины, поэтому все колонки одинаковы, и глаз читает список сверху вниз, а не по зигзагу. */
+.spotlight-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: var(--s2) var(--s3); margin-top: 8px; }
+.spotlight-fields .field-sm { display: flex; flex-direction: column; align-items: stretch;
+  gap: var(--s1); min-width: 0; }
+.spotlight-fields .field-sm input, .spotlight-fields .field-sm select {
+  width: 100%; min-width: 0; height: var(--h-ctl); box-sizing: border-box; }
 .spotlight-note { margin-top: 6px; }
 
 /* Погашенное: клиент этого при заданных значениях не увидит. Не скрывается совсем, иначе
@@ -1160,9 +1436,18 @@ body.watch-solo .content { padding-top: 12px; }
 /* Кнопки панели документа собраны в группы разной природы. Зазор между группами больше, чем
    внутри: глаз сам читает их как три набора, а не как ряд из семи. */
 .tb-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-.toolbar-actions { gap: 16px; }
+/* Зазор между группами действий поменьше: на обычном экране весь ряд встаёт рядом с кнопкой
+   сохранения, а не уезжает на третью строку. Шапка висит на экране всегда, и каждая её строка
+   отнята у документа. */
+.toolbar-actions { gap: 10px; }
+/* Разрешаем ряду сжиматься: без этого он не влезал по ширине и переносился целиком. */
+.doc-head-sticky .toolbar-actions { min-width: 0; }
 /* Сохранение единственное здесь меняет документ на сервере, поэтому обведено. */
-.tb-group-save { padding: 2px; border: 1px dashed var(--line, #e5e7eb); border-radius: 10px; }
+/* Кнопка сохранения и пометка о несохранённом стоят вместе, одной группой. Рамки вокруг нет:
+   главная кнопка сама себя выделяет цветом, а пунктир рядом с ней читался как «недоделано». */
+.tb-group-save { display: inline-flex; align-items: center; gap: 10px; }
+/* Явный перенос строки внутри ряда кнопок. */
+.tb-break { flex-basis: 100%; height: 0; margin: 0; }
 
 /* Завершающие экраны в оглавлении: это не страницы, и выглядеть как страницы они не должны. */
 .toc-fixed-list { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line, #e5e7eb); }

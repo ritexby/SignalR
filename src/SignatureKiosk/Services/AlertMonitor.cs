@@ -215,7 +215,12 @@ public class AlertMonitor : BackgroundService
         // After a restart no tablet has reconnected yet, so every one of them looks stuck. Reviving
         // them here would mean a fleet-wide reboot after ordinary maintenance. Read their health,
         // but leave them alone until they have had time to come back.
-        var healingAllowed = settings.AutoHeal && DateTime.UtcNow - _startedUtc >= StartupGrace;
+        // Выдержка после запуска и настройка автолечения это разные вещи, и путать их нельзя.
+        // Пока идёт выдержка, ни лечить, ни объявлять планшет зависшим нельзя: после перезапуска
+        // службы ни один ещё не успел вернуться, и зависшим выглядит весь парк. А выключенное
+        // автолечение молчания не оправдывает: сам факт зависания оператору сообщить надо.
+        var вВыдержке = DateTime.UtcNow - _startedUtc < StartupGrace;
+        var healingAllowed = settings.AutoHeal && !вВыдержке;
 
         foreach (var (d, health) in readings)
         {
@@ -231,7 +236,7 @@ public class AlertMonitor : BackgroundService
             {
                 _healthCache.ClearHealAttempts(d.Id);
             }
-            else if (IsAwayLongEnough(d, settings))
+            else if (!вВыдержке && IsAwayLongEnough(d, settings))
             {
                 // Сам факт зависания сообщается независимо от автолечения. Раньше тревога жила
                 // только внутри ветки лечения: оператор выключал автолечение, чтобы прекратить

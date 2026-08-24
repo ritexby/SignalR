@@ -118,6 +118,12 @@ public class ApiKey
     public string KeyHash { get; set; } = "";                 // SHA-256 hex of the key
     public string Label { get; set; } = "";
     public DateTime CreatedUtc { get; set; }
+    /// <summary>
+    /// Ключ выключен: он есть в списке, но доступа не даёт. Нужен, потому что «убрать доступ»
+    /// и «забыть, что такой доступ был» это разные действия: интеграцию останавливают на время
+    /// разбирательства, а удаление ключа необратимо и требует заново настраивать чужую систему.
+    /// </summary>
+    public bool Disabled { get; set; }
 }
 
 // ---------- Images ----------
@@ -173,6 +179,14 @@ public class DocCheckbox
     public string? LabelAppend { get; set; }
     public bool Required { get; set; } = true;
     public bool Checked { get; set; } = false; // initial state (used by API-supplied checkboxes)
+    /// <summary>
+    /// Какую отметку просил заказ. Пусто, если заказ про этот пункт ничего не говорил. Хранится
+    /// отдельно от Checked, потому что Checked к моменту записи это уже ответ клиента, а вопрос
+    /// «кто поставил галочку» и вопрос «с чем клиент ушёл» это разные вопросы. Заранее
+    /// проставленная отметка сама по себе согласием не считается: согласие это действие
+    /// человека, поэтому в архиве обязано быть видно, что пункт пришёл уже отмеченным.
+    /// </summary>
+    public bool? CheckedFromApi { get; set; }
     // Shown only while its condition holds. A condition on another checkbox is evaluated on the
     // tablet as the signer ticks; a condition on a tag is evaluated on the server, as before.
     public VisibleWhen? VisibleWhen { get; set; }
@@ -181,6 +195,24 @@ public class DocCheckbox
     // сохранённые до появления свободного порядка, и им номера проставляются при сохранении.
     public int Ord { get; set; } = -1;
 
+    /// <summary>
+    /// Пришло из заказа, а в шаблоне документа этого не было. Ставится только там, где внешняя
+    /// система добавляет в документ то, чего оператор не ставил. Пункт, чьё имя совпало с
+    /// шаблонным, так не помечается: это элемент документа, заказ лишь задал ему состояние.
+    /// </summary>
+    public bool Api { get; set; }
+    /// <summary>
+    /// Элемент шаблонный, а надпись на нём пришла из заказа: label заменил её целиком или
+    /// labelAppend дописал к ней. Это другой факт, чем Api, и в разбирательстве через год
+    /// вопросы к ним разные: кто добавил пункт и кто написал его текст.
+    /// </summary>
+    public bool ApiText { get; set; }
+    /// <summary>
+    /// Что стояло в документе до того, как заказ переписал надпись. Пусто, когда ApiText не
+    /// стоит. Хранится потому, что сама пометка через год ничего не объясняет: видно должно
+    /// быть и то, что написал оператор, и то, что увидел клиент.
+    /// </summary>
+    public string? LabelBefore { get; set; }
 }
 
 /// <summary>
@@ -237,6 +269,24 @@ public class DocGroupOption
     public List<TextRun> LabelRuns { get; set; } = new();
     /// <summary>Что дописать к тексту варианта. Только для запроса по API, см. DocCheckbox.LabelAppend.</summary>
     public string? LabelAppend { get; set; }
+    /// <summary>
+    /// Пришло из заказа, а в шаблоне документа этого не было. Ставится только там, где внешняя
+    /// система добавляет в документ то, чего оператор не ставил. Пункт, чьё имя совпало с
+    /// шаблонным, так не помечается: это элемент документа, заказ лишь задал ему состояние.
+    /// </summary>
+    public bool Api { get; set; }
+    /// <summary>
+    /// Элемент шаблонный, а надпись на нём пришла из заказа: label заменил её целиком или
+    /// labelAppend дописал к ней. Это другой факт, чем Api, и в разбирательстве через год
+    /// вопросы к ним разные: кто добавил пункт и кто написал его текст.
+    /// </summary>
+    public bool ApiText { get; set; }
+    /// <summary>
+    /// Что стояло в документе до того, как заказ переписал надпись. Пусто, когда ApiText не
+    /// стоит. Хранится потому, что сама пометка через год ничего не объясняет: видно должно
+    /// быть и то, что написал оператор, и то, что увидел клиент.
+    /// </summary>
+    public string? LabelBefore { get; set; }
 }
 
 /// <summary>
@@ -258,6 +308,10 @@ public class DocGroup
     // поэтому номер сквозной для всех трёх видов. -1 означает "не задан": так выглядят документы,
     // сохранённые до появления свободного порядка, и им номера проставляются при сохранении.
     public int Ord { get; set; } = -1;
+    /// <summary>Заголовок выбора пришёл из заказа, см. DocCheckbox.ApiText.</summary>
+    public bool ApiText { get; set; }
+    /// <summary>Что стояло заголовком выбора до заказа, см. DocCheckbox.LabelBefore.</summary>
+    public string? TitleBefore { get; set; }
 }
 
 /// <summary>A styled piece of text. Formatting is a curated set so it renders identically on the
@@ -640,7 +694,35 @@ public class SubmittedItem
 {
     public string Key { get; set; } = "";     // empty for a checkbox the operator did not name
     public string Label { get; set; } = "";
+    /// <summary>С чем клиент ушёл. Это и есть его ответ.</summary>
     public bool Checked { get; set; }
+    /// <summary>Какую отметку просил заказ, см. DocCheckbox.CheckedFromApi.</summary>
+    public bool? CheckedFromApi { get; set; }
+    /// <summary>
+    /// Клиент сам изменил то состояние, в котором пункт был ему показан. Считается сравнением
+    /// показанного с итогом, но пишется явно: тот, кто через год откроет архив, не должен
+    /// считать это в уме. Снятая клиентом отметка это самое сильное доказательство из
+    /// возможных: человек совершил действие, значит видел пункт и решил про него.
+    /// </summary>
+    public bool ChangedBySigner { get; set; }
+    /// <summary>
+    /// Пришло из заказа, а в шаблоне документа этого не было. Ставится только там, где внешняя
+    /// система добавляет в документ то, чего оператор не ставил. Пункт, чьё имя совпало с
+    /// шаблонным, так не помечается: это элемент документа, заказ лишь задал ему состояние.
+    /// </summary>
+    public bool Api { get; set; }
+    /// <summary>
+    /// Элемент шаблонный, а надпись на нём пришла из заказа: label заменил её целиком или
+    /// labelAppend дописал к ней. Это другой факт, чем Api, и в разбирательстве через год
+    /// вопросы к ним разные: кто добавил пункт и кто написал его текст.
+    /// </summary>
+    public bool ApiText { get; set; }
+    /// <summary>
+    /// Что стояло в документе до того, как заказ переписал надпись. Пусто, когда ApiText не
+    /// стоит. Хранится потому, что сама пометка через год ничего не объясняет: видно должно
+    /// быть и то, что написал оператор, и то, что увидел клиент.
+    /// </summary>
+    public string? LabelBefore { get; set; }
 }
 
 /// <summary>What the signer chose in a group: the option key, or empty for nothing chosen.</summary>
@@ -911,7 +993,7 @@ public record LoginDto(string? Password);
 /// <summary>DeviceIds задаёт произвольный набор планшетов, когда Target = devices.</summary>
 public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec, List<string>? DeviceIds = null);
 public record TargetDto(string? Target);
-public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups,
+public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<ApiCheckboxDto>? Checkboxes, List<GroupSelectionDto>? Groups,
     Dictionary<string, string>? Images = null, string? DocumentCode = null);
 
 public record EnrollRequest(string? Code);
@@ -976,5 +1058,5 @@ public record TextDto(string? Text);
 /// <summary>Создание и переименование документа в библиотеке.</summary>
 public record DocumentMetaDto(string? Code, string? Name, string? CopyOfId);
 
-public record PreviewDto(DocumentConfig? Document, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups,
+public record PreviewDto(DocumentConfig? Document, Dictionary<string, string>? Fields, List<ApiCheckboxDto>? Checkboxes, List<GroupSelectionDto>? Groups,
     Dictionary<string, string>? Images = null, string? DocumentId = null);

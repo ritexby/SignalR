@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v7.3</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v7.4</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -92,11 +92,16 @@
           <button id="exportDoc" class="btn btn-ghost" data-icon="download" title="Сохранить весь документ в файл, вместе с картинками и настройками PDF">Экспорт</button>
           <button id="importDoc" class="btn btn-ghost" data-icon="upload" title="Восстановить документ из ранее сохранённого файла">Импорт</button>
           <input id="importDocFile" type="file" accept="application/json,.json" hidden />
-          <!-- Пометка стоит слева, где есть свободное место: внутри ряда кнопок она раздвигала
-               его и «Отправить на планшет» уезжала на вторую строку. -->
-          <span id="docDirty" class="dirty-mark hidden">есть несохранённые изменения</span>
+          <!-- Перенос строки задан явно, а не отдан на волю переносу по ширине: иначе при одной
+               ширине окна «Сохранить» оказывалось в конце первой строки, при другой в начале
+               второй, и ряд кнопок каждый раз выглядел по-новому. Первая строка про планшет и
+               файлы, вторая про сам документ. -->
+          <span class="tb-break" aria-hidden="true"></span>
           <div class="tb-group tb-group-save" role="group" aria-label="Сохранение">
-            <button id="saveDocument" class="btn btn-ghost" data-icon="save" title="Записать документ на сервер">Сохранить</button>
+            <button id="saveDocument" class="btn btn-primary" data-icon="save" title="Записать документ на сервер">Сохранить</button>
+            <!-- Пометка стоит вплотную к кнопке: это одно дело, и разносить их по разным углам
+                 значит заставлять глаз прыгать. -->
+            <span id="docDirty" class="dirty-mark hidden" title="Документ правили и не сохранили. Правки лежат в черновике этого браузера и вернутся, когда вы снова его откроете.">не сохранено</span>
           </div>
           <!-- Сохранение ушло наверх, к пометке о несохранённом: это одно дело, и держать их в
                разных рядах значило заставлять глаз прыгать. Внизу осталось две группы разной
@@ -314,9 +319,16 @@
       <!-- API docs -->
       <section class="panel hidden" data-panel="apidocs">
         <div class="panel-head">
-          <h2>Методы API для внешних систем</h2>
+          <h2>API: как работать с системой из чужой программы</h2>
         </div>
-        <p class="hint">Все запросы к <code>/api/ext/*</code> требуют заголовок <code>X-Api-Key</code> с ключом из вкладки «API-ключи». Базовый адрес: <code id="apiBaseUrl"></code>.</p>
+        <p class="hint">Базовый адрес: <code id="apiBaseUrl"></code>. Запросы к <code>/api/ext/*</code> идут по ключу из вкладки «API-ключи», заголовок <code>X-Api-Key</code>;
+          запросы к <code>/api/admin/*</code> по куке входа в админку. Сверху руководство по шагам, ниже справочник: каждый путь с полями, кодами и текстами отказов.</p>
+        <div class="filter-bar">
+          <input id="apiSearch" class="filter-search" type="search" placeholder="Поиск по вкладке: метод, адрес, поле, слово из описания" />
+          <button id="apiExpandAll" class="btn btn-ghost" data-icon="down">Развернуть всё</button>
+          <button id="apiCollapseAll" class="btn btn-ghost" data-icon="list">Свернуть всё</button>
+          <span id="apiFound" class="filter-count"></span>
+        </div>
         <div id="apiDocsList" class="api-docs"></div>
       </section>
 

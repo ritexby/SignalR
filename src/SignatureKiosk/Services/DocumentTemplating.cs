@@ -236,7 +236,13 @@ public static partial class DocumentTemplating
     {
         var key = (c.Key ?? "").Trim();
         var isChecked = c.Checked;
-        if (key.Length > 0 && states is not null && states.TryGetValue(key, out var fromApi)) isChecked = fromApi;
+        // Что просил заказ, помнится отдельно: к моменту записи Checked это уже ответ клиента.
+        bool? просилЗаказ = c.CheckedFromApi;
+        if (key.Length > 0 && states is not null && states.TryGetValue(key, out var fromApi))
+        {
+            isChecked = fromApi;
+            просилЗаказ = fromApi;
+        }
         // Текст мог прийти по API: место в документе одно и то же, а формулировка зависит от
         // заказа. Пустую строку не берём, иначе пункт остался бы без подписи.
         var label = c.Label;
@@ -248,6 +254,9 @@ public static partial class DocumentTemplating
         var runs = texts is not null && key.Length > 0 && texts.ContainsKey(key)
             ? new List<TextRun> { new() { Text = label ?? "" } }
             : LabelRuns(c.LabelRuns, label);
+        // Надпись пришла из заказа, если для этого имени в заказе был текст. Само наличие
+        // записи в texts и есть этот факт: она заводится только из label и labelAppend.
+        var изЗаказа = key.Length > 0 && texts is not null && texts.ContainsKey(key);
         return new DocCheckbox
         {
             Key = key,
@@ -256,7 +265,14 @@ public static partial class DocumentTemplating
             Required = c.Required,
             Checked = isChecked,
             VisibleWhen = live is null ? null : LiveCondition(c.VisibleWhen, map, live),
-            Ord = c.Ord
+            Ord = c.Ord,
+            // Пункта не было в шаблоне: признак ставит тот, кто его добавил, здесь он только едет
+            // дальше. Надпись из заказа это отдельный факт, и хранится то, что было до неё:
+            // одна пометка через год не объясняет, что именно изменилось.
+            Api = c.Api,
+            CheckedFromApi = просилЗаказ,
+            ApiText = изЗаказа,
+            LabelBefore = изЗаказа ? Apply(c.Label, map) : null
         };
     }
 
@@ -279,9 +295,15 @@ public static partial class DocumentTemplating
         // складывается с ним: иначе на экране оказались бы и свои варианты, и чужие сразу.
         // Текст варианта, который есть и там и там, всё равно можно дописать через labelAppend.
         var source = g.Options ?? new List<DocGroupOption>();
+        // Список вариантов пришёл из заказа целиком: значит и каждый вариант в нём из заказа,
+        // а не из шаблона, и помечается соответственно.
+        var вариантыИзЗаказа = false;
         if (key.Length > 0 && apiOptions is not null
             && apiOptions.TryGetValue(key, out var sent) && sent is { Count: > 0 })
+        {
             source = sent;
+            вариантыИзЗаказа = true;
+        }
 
         var options = source
             .Where(o => o is not null)
@@ -296,7 +318,10 @@ public static partial class DocumentTemplating
                 {
                     Key = ok,
                     Label = Apply(sentLabel ?? o.Label, map),
-                    LabelRuns = oruns.Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList()
+                    LabelRuns = oruns.Where(r => r is not null).Select(r => ApplyRun(r, map)).ToList(),
+                    Api = вариантыИзЗаказа,
+                    ApiText = sentLabel is not null,
+                    LabelBefore = sentLabel is not null && !вариантыИзЗаказа ? Apply(o.Label, map) : null
                 };
             })
             .Where(o => o.Key.Length > 0)
@@ -321,11 +346,22 @@ public static partial class DocumentTemplating
             Required = g.Required,
             Selected = selected.Length == 0 ? null : selected,
             VisibleWhen = LiveCondition(g.VisibleWhen, map, live),
-            Ord = g.Ord
+            Ord = g.Ord,
+            ApiText = Text(key) is not null,
+            TitleBefore = Text(key) is not null ? Apply(g.Title, map) : null
         };
     }
 
     // ---------- Conditions ----------
+
+    /// <summary>
+    /// Страница, на которую встанут пункты, присланные заказом, или null, если оператор такой не
+    /// назначил. Только обычная страница: на экран подписи или сканирования чужое согласие
+    /// ставить нельзя, там клиент занят одним делом.
+    /// </summary>
+    public static DocPage? СтраницаДляПрисланных(DocumentConfig? doc) =>
+        (doc?.Pages ?? new List<DocPage>()).FirstOrDefault(p => p is not null && p.IncludeDynamic
+            && string.IsNullOrEmpty((p.Kind ?? "").Trim()));
 
     /// <summary>Evaluate a block/page condition against the signer fields. A null condition is always true.</summary>
     /// <summary>
@@ -459,7 +495,11 @@ public static partial class DocumentTemplating
 
         return cond.Op switch
         {
-            "ne" => !Eq(val, target),
+            // «Не равно» не выполняется, когда значения нет вовсе. Иначе условие «система
+            // кодирования не равна AIDS» срабатывало у всех, кому эту систему не присылали, и
+            // блок про неё видел каждый. Пустое это «не знаем», а не «другое»; чтобы поймать
+            // именно отсутствие, есть отдельное действие «пусто».
+            "ne" => val.Length > 0 && !Eq(val, target),
             "empty" => val.Length == 0,
             "notempty" => val.Length > 0,
             "in" => target.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).Any(s => Eq(val, s)),
@@ -508,6 +548,14 @@ public static partial class DocumentTemplating
         // settled here: it depends on what the signer does next, so the block travels to the
         // tablet with its condition intact and is evaluated there as they tick.
         var live = LiveKeys(doc);
+        // Пункт из заказа встаёт на страницу наравне со своими, и планшет считает его отметку
+        // так же. Значит его имя тоже живое: условие на это имя обязано уехать на планшет, а не
+        // решаться здесь по тегам, где такого тега нет и условие не выполнилось бы никогда.
+        foreach (var c in dynamicCheckboxes ?? new List<DocCheckbox>())
+        {
+            var имя = (c?.Key ?? "").Trim();
+            if (имя.Length > 0) live.Add(имя);
+        }
 
         var pages = new List<DocPage>();
         foreach (var p in doc.Pages ?? new List<DocPage>())
@@ -576,8 +624,21 @@ public static partial class DocumentTemplating
 
         if (hasDynamic)
         {
-            var injected = dynamicCheckboxes!.Where(c => c is not null).Select(c => Cb(c, map, live, checkboxStates, texts)).ToList();
-            var anchor = pages.FirstOrDefault(p => p.IncludeDynamic) ?? pages.LastOrDefault();
+            // Условие показа у присланного пункта считается ровно так же, как у пункта из
+            // шаблона: части про теги решаются здесь, части про отметки уезжают на планшет.
+            // Без Keep пункт, присланный с условием «только женщинам», видел каждый: условие
+            // молча пропадало, и человек отмечал согласие, которого его не должны были просить.
+            var injected = dynamicCheckboxes!
+                .Where(c => c is not null && Keep(c.VisibleWhen, map, live))
+                .Select(c => Cb(c, map, live, checkboxStates, texts)).ToList();
+            // Только страница, которую оператор для этого назначил, и только обычная. Раньше при
+            // отсутствии назначенной пункты вставали в конец последней страницы, а последней
+            // бывает экран подписи: чужое согласие приезжало прямо туда. Подсказка в редакторе
+            // при этом обещала, что без отметки присланные пункты не покажутся, и это оказывалось
+            // неправдой. Теперь правда: не назначено, значит не показываем, а отказ называется
+            // вслух тем, кто прислал.
+            var anchor = pages.FirstOrDefault(p => p.IncludeDynamic
+                && string.IsNullOrEmpty((p.Kind ?? "").Trim()));
             if (anchor != null)
             {
                 // Место присланного по API чекбокса в шаблоне не задано, поэтому он встаёт в конец
@@ -592,8 +653,11 @@ public static partial class DocumentTemplating
                 // под которым человек расписался.
                 if (injected.Count > 0) anchor.InPdf = true;
             }
-            else
+            else if (injected.Count > 0)
             {
+                // Своих страниц нет вовсе: присланные пункты становятся единственной. Пустую
+                // страницу так не заводим: все присланные пункты могли уйти по условию, и
+                // клиент упёрся бы в экран без единой строки.
                 for (var i = 0; i < injected.Count; i++) injected[i].Ord = i;
                 pages.Add(new DocPage { Checkboxes = injected });
             }
@@ -1010,7 +1074,7 @@ public static partial class DocumentTemplating
 
             NormalizeOrder(p);
         }
-        if (doc.Pages.Count > MaxPages) doc.Pages = doc.Pages.Take(MaxPages).ToList();
+        doc.Pages = Обрезать(doc.Pages, MaxPages, "страниц в документе");
     }
 
     /// <summary>
@@ -1244,7 +1308,6 @@ public static partial class DocumentTemplating
     {
         // Вид документа: всё, кроме известного, это обычный подписной.
         doc.Kind = IsInfo(doc) ? "info" : null;
-        СказатьПроСовпавшиеИмена(doc);
         // Anything may arrive here from an imported file or an API client, including nulls inside
         // lists. Strip them: a single null element used to be stored happily and then throw on
         // every later render, breaking signing for the whole fleet until someone edited the file.
@@ -1286,9 +1349,7 @@ public static partial class DocumentTemplating
                 // Оформленный текст чистится теми же правилами, что абзац, а простой держится с
                 // ним в согласии: по простому пункт узнают в записи подписи, в API и в списке
                 // недостающего, и расходиться им нельзя.
-                c.LabelRuns = CleanRuns(c.LabelRuns);
-                if (c.LabelRuns.Count > 0) c.Label = Clamp(PlainOf(c.LabelRuns, c.Label));
-                else c.Label = Clamp(c.Label);
+                (c.LabelRuns, c.Label) = ТекстИКуски(c.LabelRuns, c.Label);
                 c.Key = CleanKey(c.Key);
                 c.VisibleWhen = Normalized(c.VisibleWhen);
             }
@@ -1296,27 +1357,34 @@ public static partial class DocumentTemplating
             foreach (var g in p.Groups)
             {
                 g.Key = CleanKey(g.Key);
-                g.TitleRuns = CleanRuns(g.TitleRuns);
-                g.Title = g.TitleRuns.Count > 0 ? Clamp(PlainOf(g.TitleRuns, g.Title)) : Clamp(g.Title);
+                (g.TitleRuns, g.Title) = ТекстИКуски(g.TitleRuns, g.Title);
                 g.VisibleWhen = Normalized(g.VisibleWhen);
                 g.Options = Compact(g.Options);
                 foreach (var o in g.Options)
                 {
                     o.Key = CleanKey(o.Key);
-                    o.LabelRuns = CleanRuns(o.LabelRuns);
-                    o.Label = o.LabelRuns.Count > 0 ? Clamp(PlainOf(o.LabelRuns, o.Label)) : Clamp(o.Label);
+                    (o.LabelRuns, o.Label) = ТекстИКуски(o.LabelRuns, o.Label);
                 }
                 // An option nobody can name is unusable from the API and indistinguishable from
                 // its neighbours in a stored record, so it is dropped rather than kept half-broken.
                 g.Options = g.Options.Where(o => o.Key.Length > 0).ToList();
-                if (g.Options.Count > MaxGroupOptions) g.Options = g.Options.Take(MaxGroupOptions).ToList();
+                if (g.Options.Count > MaxGroupOptions)
+                {
+                    Срезано("у выбора «" + Имя(PlainOf(g.TitleRuns, g.Title), g.Key) + "» вариантов больше "
+                            + MaxGroupOptions + ": лишние убраны");
+                    g.Options = g.Options.Take(MaxGroupOptions).ToList();
+                }
                 var sel = (g.Selected ?? "").Trim();
                 g.Selected = g.Options.Any(o => string.Equals(o.Key, sel, StringComparison.OrdinalIgnoreCase)) ? sel : null;
             }
             // Группа без имени неадресуема по API, а с одним вариантом не даёт выбора: хранить
-            // такую нечего. Оператору о ней сообщает проверка документа в редакторе.
+            // такую нечего. Молчать об этом нельзя: с документа пропадает целый вопрос, который
+            // оператор задал, а ответ на сохранение был обычным «ок».
+            foreach (var g in p.Groups.Where(g => g.Key.Length == 0 || g.Options.Count < 2))
+                Срезано("выбор «" + Имя(PlainOf(g.TitleRuns, g.Title), g.Key) + "» убран: "
+                        + (g.Key.Length == 0 ? "у него нет имени для API" : "у него меньше двух вариантов"));
             p.Groups = p.Groups.Where(g => g.Key.Length > 0 && g.Options.Count >= 2).ToList();
-            if (p.Groups.Count > MaxGroups) p.Groups = p.Groups.Take(MaxGroups).ToList();
+            p.Groups = Обрезать(p.Groups, MaxGroups, "выборов на странице");
 
             // Подписи и сканирования внутри страницы. Имя нужно, чтобы отличить их друг от друга
             // в записи подписи и в PDF; если оператор его не задал, оно подставляется по номеру.
@@ -1339,7 +1407,7 @@ public static partial class DocumentTemplating
                 sig.Align = CleanAlign(sig.Align);
                 sig.VisibleWhen = Normalized(sig.VisibleWhen);
             }
-            if (p.Signatures.Count > MaxPerKind) p.Signatures = p.Signatures.Take(MaxPerKind).ToList();
+            p.Signatures = Обрезать(p.Signatures, MaxPerKind, "полей подписи на странице");
 
             p.Scans = Compact(p.Scans);
             for (var i = 0; i < p.Scans.Count; i++)
@@ -1351,7 +1419,7 @@ public static partial class DocumentTemplating
                 sc.Label = Clamp(sc.Label);
                 sc.VisibleWhen = Normalized(sc.VisibleWhen);
             }
-            if (p.Scans.Count > MaxPerKind) p.Scans = p.Scans.Take(MaxPerKind).ToList();
+            p.Scans = Обрезать(p.Scans, MaxPerKind, "полей сканирования на странице");
 
             // Поля ввода: имя обязательно по той же причине, что у подписей. Вид значения только
             // из известного списка, всё прочее это текст.
@@ -1372,7 +1440,7 @@ public static partial class DocumentTemplating
                 inp.Type = t is "number" or "date" or "phone" ? t : "text";
                 inp.VisibleWhen = Normalized(inp.VisibleWhen);
             }
-            if (p.Inputs.Count > MaxPerKind) p.Inputs = p.Inputs.Take(MaxPerKind).ToList();
+            p.Inputs = Обрезать(p.Inputs, MaxPerKind, "полей ввода на странице");
 
             // Правила отметок: только известные виды, только существующие на этой странице имена
             // и хотя бы два имени, иначе правилу не над чем работать.
@@ -1404,6 +1472,13 @@ public static partial class DocumentTemplating
         }
 
         NormalizeScreens(doc);
+        // Про совпавшие имена говорится здесь, а не в начале разбора: имя приводится к простому
+        // виду (CleanKey) уже после, и до этого места оно ещё не то, под которым будет храниться.
+        // Из-за прежнего порядка сообщение и врало, и молчало: «Адрес регистрации» превращается
+        // в «Адресрегистрации» и тег больше не заслоняет, а про него предупреждали; «text 1»
+        // превращается в «text1» и тег заслоняет по-настоящему, а про него молчали. Заодно
+        // отсеиваются элементы, снятые приведением экранов: их в документе уже нет.
+        СказатьПроСовпавшиеИмена(doc);
 
         // Раскладка подписей: координаты в долях листа, поэтому держим их в границах, а ссылки
         // на несуществующие поля выбрасываем, иначе подпись «повиснет» на пустом месте.
@@ -1455,8 +1530,7 @@ public static partial class DocumentTemplating
         // Экран благодарности: меньше двух секунд человек не успевает прочитать, больше минуты
         // планшет впустую занят и следующий клиент ждёт у выключенного на вид экрана.
         doc.ThankYouSec = Math.Clamp(doc.ThankYouSec <= 0 ? 6 : doc.ThankYouSec, 2, 60);
-        doc.ThankYouRuns = CleanRuns(doc.ThankYouRuns);
-        if (doc.ThankYouRuns.Count > 0) doc.ThankYouText = Clamp(PlainOf(doc.ThankYouRuns, doc.ThankYouText));
+        (doc.ThankYouRuns, doc.ThankYouText) = ТекстИКуски(doc.ThankYouRuns, doc.ThankYouText);
         doc.ThankYouAlign = CleanAlign(doc.ThankYouAlign);
         doc.ThankYouBlocks = Compact(doc.ThankYouBlocks);
         foreach (var b in doc.ThankYouBlocks) { CleanBlock(b); b.Align = CleanAlign(b.Align); }
@@ -1576,6 +1650,23 @@ public static partial class DocumentTemplating
         p.Inputs = p.Inputs.OrderBy(x => x.Ord).ToList();
     }
 
+    /// <summary>Имя элемента для сообщения оператору: понятный текст, а если его нет, то имя для API.</summary>
+    private static string Имя(string? текст, string? ключ) =>
+        !string.IsNullOrWhiteSpace(текст) ? текст!.Trim()
+        : (!string.IsNullOrWhiteSpace(ключ) ? ключ!.Trim() : "без имени");
+
+    /// <summary>
+    /// Обрезать список до предела и сказать об этом. Пределы стоят намеренно, но молчаливая
+    /// обрезка это потеря работы оператора без спроса: элементы просто исчезают, а ответ на
+    /// сохранение обычный «ок».
+    /// </summary>
+    private static List<T> Обрезать<T>(List<T> list, int предел, string что)
+    {
+        if (list.Count <= предел) return list;
+        Срезано(что + " больше " + предел + ": лишние убраны (" + list.Count + " превращено в " + предел + ")");
+        return list.Take(предел).ToList();
+    }
+
     /// <summary>A non-null list without null elements.</summary>
     private static List<T> Compact<T>(List<T>? list) where T : class =>
         list is null ? new List<T>() : list.Where(x => x is not null).ToList();
@@ -1652,25 +1743,41 @@ public static partial class DocumentTemplating
         if (b.Table is not null) { b.Runs = new List<TextRun>(); b.ImageUrl = null; b.ImageTag = null; b.List = null; }
     }
 
-    /// <summary>
-    /// Оформленный текст подписи: пустые куски выбрасываются, остальные чистятся. Текст без
-    /// всякого оформления не хранится кусками вовсе: он и так лежит рядом простой строкой, а
-    /// два вида хранения для одного и того же означали бы, что документ, пришедший по API, и
-    /// тот же документ, сохранённый из редактора, перестают совпадать.
-    /// </summary>
-    private static List<TextRun> CleanRuns(List<TextRun>? runs)
+    /// <summary>Куски после чистки, ещё до решения, хранить их или нет: пустые выброшены,
+    /// остальные приведены в порядок.</summary>
+    private static List<TextRun> ЧистыеКуски(List<TextRun>? runs)
     {
         var list = Compact(runs);
         foreach (var r in list) CleanRun(r);
-        list = list.Where(r => !string.IsNullOrEmpty(r.Text)).Take(MaxRunsPerLabel).ToList();
-        // Куски без оформления не хранятся: обычный текст подписи и так лежит в Label, а лишний
-        // список только раздувал бы файл. Оформлением считается всё, что видно глазом, включая
-        // выделение маркером и свой размер в точках: раньше их тут не было, и подпись, где
-        // задано только выделение или только размер, теряла его при каждом сохранении.
-        var оформлено = list.Any(r => r.Bold || r.Italic
-            || !string.IsNullOrEmpty(r.Color) || !string.IsNullOrEmpty(r.Size)
-            || !string.IsNullOrEmpty(r.Mark) || r.SizePt > 0);
-        return оформлено ? list : new List<TextRun>();
+        return list.Where(r => !string.IsNullOrEmpty(r.Text)).Take(MaxRunsPerLabel).ToList();
+    }
+
+    /// <summary>
+    /// Есть ли в кусках хоть что-нибудь, что видно глазом. Выделение маркером и свой размер в
+    /// точках считаются наравне с остальным: раньше их тут не было, и подпись, где задано только
+    /// выделение или только размер, теряла его при каждом сохранении.
+    /// </summary>
+    private static bool Оформлено(List<TextRun> list) => list.Any(r => r.Bold || r.Italic
+        || !string.IsNullOrEmpty(r.Color) || !string.IsNullOrEmpty(r.Size)
+        || !string.IsNullOrEmpty(r.Mark) || r.SizePt > 0);
+
+    /// <summary>
+    /// Куски и простой текст, приведённые в согласие друг с другом.
+    ///
+    /// Текст без всякого оформления кусками не хранится: он и так лежит рядом простой строкой, а
+    /// два вида хранения для одного и того же означали бы, что документ, пришедший по API, и тот
+    /// же документ, сохранённый из редактора, перестают совпадать. Но ТЕКСТ таких кусков обязан
+    /// остаться: подпись, пришедшая по API или из импорта одними кусками, без простой строки
+    /// рядом, пропадала целиком, и на планшете, в бумаге и в записи оставалось пустое место.
+    ///
+    /// Оформленные куски задают простой текст, как и раньше: расходиться им нельзя, по простому
+    /// пункт узнают в записи подписи, в API и в списке недостающего.
+    /// </summary>
+    private static (List<TextRun> Куски, string Текст) ТекстИКуски(List<TextRun>? runs, string? plain)
+    {
+        var чистые = ЧистыеКуски(runs);
+        var текст = чистые.Count > 0 ? PlainOf(чистые, plain) : (plain ?? "");
+        return (Оформлено(чистые) ? чистые : new List<TextRun>(), Clamp(текст));
     }
 
     /// <summary>Сколько кусков оформления может быть в одной подписи. Больше это не документ, а
@@ -1949,22 +2056,24 @@ public static partial class DocumentTemplating
                 if (key.Length > 0 && known.Add(key)) seen.Add(key);
             }
         }
+        // Блок целиком: и текст, и ячейки таблицы. Ячейки тоже подставляются, значит и теги в
+        // них надо видеть. Без этого тег из таблицы не попадал ни в предупреждение «не прислали
+        // значение», ни в список использованных полей: в документе он подставлен, а в разделе
+        // «Данные подписанта» его нет.
+        void ScanBlock(DocBlock? b)
+        {
+            if (b is null) return;
+            foreach (var r in b.Runs ?? new List<TextRun>()) { if (r is not null) Scan(r.Text); }
+            foreach (var row in b.Table?.Rows ?? new List<List<string>>())
+                foreach (var cell in row ?? new List<string>()) Scan(cell);
+        }
+
         Scan(doc.Title); Scan(doc.SignPrompt); Scan(doc.ThankYouText);
         foreach (var p in doc.Pages ?? new List<DocPage>())
         {
             if (p is null) continue;
             foreach (var r in HeadingRuns(p)) { if (r is not null) Scan(r.Text); }
-            foreach (var b in Blocks(p))
-            {
-                if (b is null) continue;
-                foreach (var r in b.Runs ?? new List<TextRun>()) { if (r is not null) Scan(r.Text); }
-                // Ячейки таблицы тоже подставляются, значит и теги в них надо видеть. Без этого
-                // тег из таблицы не попадал ни в предупреждение «не прислали значение», ни в
-                // список использованных полей: в документе он подставлен, а в разделе «Данные
-                // подписанта» его нет.
-                foreach (var row in b.Table?.Rows ?? new List<List<string>>())
-                    foreach (var cell in row ?? new List<string>()) Scan(cell);
-            }
+            foreach (var b in Blocks(p)) ScanBlock(b);
             foreach (var c in p.Checkboxes ?? new List<DocCheckbox>()) { if (c is not null) Scan(c.Label); }
             foreach (var g in p.Groups ?? new List<DocGroup>())
             {
@@ -1976,11 +2085,13 @@ public static partial class DocumentTemplating
             foreach (var x in p.Scans ?? new List<DocScan>()) { if (x is not null) Scan(x.Label); }
             foreach (var x in p.Inputs ?? new List<DocInput>()) { if (x is not null) Scan(x.Label); }
         }
-        foreach (var b in (doc.SignBlocks ?? new List<DocBlock>()).Concat(doc.SignBlocksBelow ?? new List<DocBlock>()))
-        {
-            if (b is null) continue;
-            foreach (var r in b.Runs ?? new List<TextRun>()) { if (r is not null) Scan(r.Text); }
-        }
+        // Экран прощания тоже собирается с подстановкой тегов, и его блоки раньше не смотрели
+        // вовсе: тег, использованный только там, не попадал ни в «не прислали значение», ни в
+        // поля записи, а клиент видел на экране голое {{ФИО}}, и сказать об этом было некому.
+        foreach (var b in (doc.SignBlocks ?? new List<DocBlock>())
+                     .Concat(doc.SignBlocksBelow ?? new List<DocBlock>())
+                     .Concat(doc.ThankYouBlocks ?? new List<DocBlock>()))
+            ScanBlock(b);
         return seen;
     }
 
@@ -2015,6 +2126,7 @@ public static partial class DocumentTemplating
         }
         foreach (var b in doc.SignBlocks ?? new List<DocBlock>()) Add(b?.VisibleWhen);
         foreach (var b in doc.SignBlocksBelow ?? new List<DocBlock>()) Add(b?.VisibleWhen);
+        foreach (var b in doc.ThankYouBlocks ?? new List<DocBlock>()) Add(b?.VisibleWhen);
         return used;
     }
 
@@ -2027,6 +2139,11 @@ public static partial class DocumentTemplating
     {
         if (fields is null || fields.Count == 0) return null;
         var map = BuildMap(fields);
+        // Имя элемента документа сильнее одноимённого тега: такое условие считает планшет по
+        // тому, что вписал клиент, и присланное значение к нему отношения не имеет. Иначе
+        // документ с полем ввода «ДР» отказывались показывать из-за негодной даты в теге «ДР»,
+        // которую этот документ и не читает.
+        var свои = LiveKeys(doc);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var cond in AllConditions(doc))
             foreach (var part in Groups(cond).SelectMany(Parts))
@@ -2035,6 +2152,7 @@ public static partial class DocumentTemplating
                 var поСроку = IsDaysOp(part.Op);
                 if (!поВозрасту && !поСроку) continue;
                 var field = part.Field.Trim();
+                if (свои.Contains(field)) continue;
                 if (!seen.Add(field)) continue;
                 if (map is null || !map.TryGetValue(field, out var raw) || string.IsNullOrWhiteSpace(raw)) continue;
                 if (поВозрасту && AgeYears(raw) is null)
@@ -2067,6 +2185,9 @@ public static partial class DocumentTemplating
         }
         foreach (var b in doc.SignBlocks ?? new List<DocBlock>()) yield return b?.VisibleWhen;
         foreach (var b in doc.SignBlocksBelow ?? new List<DocBlock>()) yield return b?.VisibleWhen;
+        // Условия блоков прощания тут забыли по той же причине, по какой их забыли в разборе
+        // тегов: экран прощания собирают отдельно от страниц.
+        foreach (var b in doc.ThankYouBlocks ?? new List<DocBlock>()) yield return b?.VisibleWhen;
     }
 
     public static List<string> Missing(DocumentConfig doc, IReadOnlyDictionary<string, string>? fields)
@@ -2075,5 +2196,24 @@ public static partial class DocumentTemplating
             ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             : new HashSet<string>(fields.Keys, StringComparer.OrdinalIgnoreCase);
         return Placeholders(doc).Where(k => !provided.Contains(k)).ToList();
+    }
+
+    /// <summary>
+    /// Теги документа, которые прислали, но с пустым значением. Отдельно от Missing нарочно:
+    /// «ключа не было» и «ключ был, а значения нет» это разные случаи, и смысл Missing менять
+    /// нельзя, на него смотрят уже работающие внешние системы.
+    ///
+    /// Зачем нужен: на месте такого тега в документе остаётся дыра («Я, , согласен»), а условие
+    /// на него гаснет, и внешняя система об этом не узнавала вовсе, потому что ключ формально
+    /// был прислан. Пустое значение может быть прислано и умышленно, поэтому это сведение, а не
+    /// отказ: документ показывается как обычно.
+    /// </summary>
+    public static List<string> Empty(DocumentConfig doc, IReadOnlyDictionary<string, string>? fields)
+    {
+        if (fields is null || fields.Count == 0) return new List<string>();
+        var map = BuildMap(fields);
+        return Placeholders(doc)
+            .Where(k => map is not null && map.TryGetValue(k, out var v) && string.IsNullOrWhiteSpace(v))
+            .ToList();
     }
 }

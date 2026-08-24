@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.FileProviders;
 using SignatureKiosk.Auth;
 using SignatureKiosk.Hubs;
@@ -11,8 +12,12 @@ using SignatureKiosk.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Учёт живых соединений хаба. Нужен, чтобы соединение отозванного планшета можно было не только
+// перестать обслуживать, но и оборвать: SignalR сам такой возможности снаружи не даёт.
+builder.Services.AddSingleton<KioskConnections>();
 builder.Services.AddSignalR(o =>
 {
+    o.AddFilter<KioskConnections>();
     // По умолчанию сообщение больше 32 КБ обрывает соединение целиком. Планшет шлёт наблюдателю
     // только уменьшенные копии подписи, но полагаться на одну лишь бережность клиента нельзя:
     // разрыв связи посреди подписания возвращает клиента на первую страницу и заставляет
@@ -376,6 +381,14 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         // документ пересчитывается здесь заново по тому, что он в итоге отметил. Так в записи и в
         // PDF оказывается ровно то, что человек видел перед собой, и планшету не нужно ничего
         // дополнительно присылать: достаточно самих отметок.
+        // Ключ для сверки пункта: имя, а у безымянного его надпись. Один и тот же способ и при
+        // снятии показанного, и при сборке записи, иначе сверка развалится на безымянных.
+        static string ПометкаПункта(string? key, string? label)
+        {
+            var k = DocumentTemplating.CleanKey(key);
+            return k.Length > 0 ? "k:" + k.ToLowerInvariant() : "l:" + (label ?? "");
+        }
+        var показано = new Dictionary<string, bool>(StringComparer.Ordinal);
         var finalStates = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         foreach (var it in sub.Items ?? new List<SubmittedItem>())
         {
@@ -413,6 +426,12 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         if (session is not null && session.SessionId == state.SessionId)
         {
             resolvedDoc = session.Document;
+            // С чем пункты были показаны клиенту, снимается до того, как в снимок лягут его
+            // ответы: дальше ApplyMarks перепишет Checked, и «что человек изменил» будет уже
+            // не из чего посчитать.
+            foreach (var стр in resolvedDoc.Pages ?? new List<DocPage>())
+                foreach (var c in (стр?.Checkboxes ?? new List<DocCheckbox>()).Where(x => x is not null))
+                    показано[ПометкаПункта(c.Key, c.Label)] = c.Checked;
             DocumentTemplating.ApplyMarks(resolvedDoc, finalStates, finalGroups);
             recordFields = session.RecordFields;
             кодДокумента = session.DocumentCode;
@@ -452,6 +471,34 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         }
         DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups, finalInputs, подписаны, коды);
         if (recordFields is { Count: 0 }) recordFields = null;
+
+        // Откуда взялся каждый пункт, знает снимок сессии, а не планшет: планшет присылает только
+        // имя, надпись и отметку, и верить ему в таком вопросе нельзя. Через год по записи должно
+        // быть видно, что оператор этот пункт не писал: его прислали вместе с заказом.
+        {
+            var изДокумента = new List<DocCheckbox>();
+            foreach (var стр in resolvedDoc.Pages ?? new List<DocPage>())
+                изДокумента.AddRange((стр?.Checkboxes ?? new List<DocCheckbox>()).Where(c => c is not null));
+            foreach (var it in sub.Items ?? new List<SubmittedItem>())
+            {
+                if (it is null) continue;
+                var k = DocumentTemplating.CleanKey(it.Key);
+                var свой = k.Length > 0
+                    ? изДокумента.FirstOrDefault(c => string.Equals(DocumentTemplating.CleanKey(c.Key), k, StringComparison.OrdinalIgnoreCase))
+                    : изДокумента.FirstOrDefault(c => string.Equals(c.Label ?? "", it.Label ?? "", StringComparison.Ordinal));
+                if (свой is null) continue;
+                it.Api = свой.Api;
+                it.ApiText = свой.ApiText;
+                it.LabelBefore = свой.LabelBefore;
+                it.CheckedFromApi = свой.CheckedFromApi;
+                // Клиент сам изменил то, что ему показали. Заранее отмеченный заказом пункт,
+                // с которого человек снял отметку, это самое сильное доказательство: он видел
+                // пункт и решил про него. Обратное тоже важно: пункт, пришедший отмеченным и
+                // так и оставшийся, согласием по сути не является, и это обязано быть видно.
+                it.ChangedBySigner = показано.TryGetValue(ПометкаПункта(it.Key, свой.Label), out var было)
+                    && было != it.Checked;
+            }
+        }
 
         // Информационный документ не подписывают: на планшете экрана подписи нет вовсе, и запрос
         // сюда означает либо сломанную страницу, либо чужой запрос. Записи о согласии из него
@@ -674,6 +721,12 @@ admin.MapPost("/devices/{id}/unrevoke", async (string id, KioskCoordinator coord
 
 admin.MapDelete("/devices/{id}", async (string id, KioskCoordinator coord) =>
 {
+    if (storage.GetDevice(id) is null) return Results.NotFound();
+    // Удаление это тот же отзыв, только без записи в списке: экран надо очистить и связь
+    // разорвать ДО удаления, пока планшет ещё числится в системе. Раньше запись просто исчезала,
+    // а на планшете оставался висеть документ с данными клиента: погасить его было нечем, потому
+    // что все команды отбирают адресата по списку планшетов, а в нём этого планшета уже нет.
+    await coord.RevokeDeviceAsync(id);
     if (!storage.DeleteDevice(id)) return Results.NotFound();
     await coord.NotifyAdminsDevicesAsync();
     return Results.Ok(new { ok = true });
@@ -681,6 +734,15 @@ admin.MapDelete("/devices/{id}", async (string id, KioskCoordinator coord) =>
 
 admin.MapPost("/devices/{id}/identify", async (string id, KioskCoordinator coord) =>
 {
+    // Отозванный планшет не мигает номером: он выведен из системы, и найти его в зале по нашей
+    // команде уже нельзя. Молчаливое «ок» тут выглядело бы как «планшет жив и слушается».
+    var карточка = storage.GetDevice(id);
+    if (карточка is null) return Results.NotFound();
+    if (карточка.Status == "revoked")
+        return Results.Json(new
+        {
+            error = "Планшет «" + карточка.Name + "» отозван: он больше не подчиняется серверу и номер на нём не появится."
+        }, statusCode: StatusCodes.Status409Conflict);
     // Same as scanning: the number is drawn by the tablet itself, so an offline tablet shows
     // nothing and the operator would be left staring at a screen that never changes.
     if (!tracker.IsOnline(id))
@@ -721,12 +783,19 @@ admin.MapDelete("/workstations/{id}", (string id) =>
 
 // ---- API keys (external integration) ----
 admin.MapGet("/apikeys", () =>
-    Results.Ok(storage.GetApiKeys().Select(k => new { k.Id, k.Label, k.CreatedUtc })));
+    Results.Ok(storage.GetApiKeys().Select(k => new { k.Id, k.Label, k.CreatedUtc, k.Disabled })));
 admin.MapPost("/apikeys", (ApiKeyDto dto) =>
 {
     var (key, plaintext) = storage.CreateApiKey(dto?.Label);
     return Results.Ok(new { key.Id, key.Label, key = plaintext }); // plaintext returned once
 });
+// Выключить ключ, не удаляя. Удаление необратимо: чтобы перекрыть доступ интеграции на время
+// разбирательства, ключ приходилось стирать, а потом заново настраивать чужую систему, из-за
+// чего доступ чаще оставляли включённым. Выключенный ключ лежит в списке и доступа не даёт.
+admin.MapPost("/apikeys/{id}/disable", (string id) =>
+    storage.SetApiKeyDisabled(id, true) ? Results.Ok(new { ok = true, disabled = true }) : Results.NotFound());
+admin.MapPost("/apikeys/{id}/enable", (string id) =>
+    storage.SetApiKeyDisabled(id, false) ? Results.Ok(new { ok = true, disabled = false }) : Results.NotFound());
 admin.MapDelete("/apikeys/{id}", (string id) =>
     storage.DeleteApiKey(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
 
@@ -1000,7 +1069,10 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
     var live = DocumentTemplating.LiveKeys(doc);
     var extra = new List<DocCheckbox>();
     var states = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-    foreach (var cb in (dto?.Checkboxes ?? new List<DocCheckbox>()).Where(x => x is not null))
+    // Присланный пункт переводится так же, как на пути показа: обязательность только та, о
+    // которой сказали явно. Иначе предпросмотр показывал бы звёздочку там, где на планшете её
+    // не будет, и обещал бы не тот экран.
+    foreach (var cb in (dto?.Checkboxes ?? new List<ApiCheckboxDto>()).Where(x => x is not null).Select(x => x.ВПункт()))
     {
         var key = DocumentTemplating.CleanKey(cb.Key);
         if (key.Length > 0 && live.Contains(key)) { states[key] = cb.Checked; continue; }
@@ -1021,6 +1093,7 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
         document = resolved,
         placeholders = DocumentTemplating.Placeholders(doc),
         missingPlaceholders = DocumentTemplating.Missing(doc, dto?.Fields),
+        emptyPlaceholders = DocumentTemplating.Empty(doc, dto?.Fields),
         pagesTotal = (doc.Pages ?? new List<DocPage>()).Count,
         pagesShown = resolved.Pages.Count
     });
@@ -1056,8 +1129,9 @@ admin.MapPost("/document/pdf-layout", (PreviewDto? dto, PdfService pdf) =>
 
     // Макет считается по документу с подставленными значениями: длина текста зависит от них,
     // а значит и от них зависит, на какой странице окажется подпись.
-    var resolved = DocumentTemplating.Resolve(doc, dto?.Fields, dto?.Checkboxes);
-    var layout = pdf.Layout(resolved);
+    var resolved = DocumentTemplating.Resolve(doc, dto?.Fields,
+        (dto?.Checkboxes ?? new List<ApiCheckboxDto>()).Where(x => x is not null).Select(x => x.ВПункт()).ToList());
+    var layout = pdf.Layout(resolved, null, doc, dto?.Fields);
     return Results.Ok(new
     {
         pageWidth = layout.PageWidth,
@@ -1097,6 +1171,10 @@ admin.MapGet("/kiosk-control/settings", () => Results.Ok(KioskControlView(storag
 admin.MapPut("/kiosk-control/settings", (KioskControlSettingsDto? dto, KioskHealthCache healthCache) =>
 {
     if (dto is null) return Results.BadRequest(new { error = "settings required" });
+    // Ключ, который нельзя передать по HTTP, отвергается здесь, а не превращается потом в
+    // «планшет не отвечает по сети» на каждой команде: оператор искал бы неисправность в Wi-Fi.
+    var плохойКлюч = StorageService.ПочемуКлючУправленияНеГодится(dto.ClearApiKey ? "" : dto.ApiKey);
+    if (плохойКлюч is not null) return Results.BadRequest(new { error = плохойКлюч });
     var current = storage.GetKioskControlSettings();
     var settings = new KioskControlSettings
     {
@@ -1361,6 +1439,11 @@ admin.MapPost("/document/import", (DocumentBackup? backup, string? code, string?
     // Версия 1 это файл без картинок, версия 2 с картинками. Обе читаются.
     if (backup.Version is < 1 or > 2)
         return Results.BadRequest(new { error = "Версия файла шаблона не поддерживается." });
+    // Условие, которое при разборе изменилось бы само, это отказ и здесь: принять чужой файл и
+    // молча сохранить его с другим смыслом хуже, чем отказать и назвать причину. Правило то же,
+    // что при сохранении из редактора.
+    var опасное = DocumentTemplating.WhyNotSavable(doc);
+    if (опасное is not null) return Results.BadRequest(new { error = опасное });
     // Validate AFTER sanitising: a file whose pages are all unusable would otherwise pass the check
     // and then replace the working template with an empty one.
     DocumentTemplating.Sanitize(doc);
@@ -1433,16 +1516,44 @@ admin.MapPost("/show-document", async (ShowDocumentDto dto, KioskCoordinator coo
         return Results.BadRequest(new { error = "В документе «" + док.Name + "» нет ни одной страницы: показывать нечего. Добавьте страницу на вкладке «Документ»." });
     var badImage = KioskCoordinator.ParseApiImages(dto?.Images, out var картинки);
     if (badImage is not null) return Results.BadRequest(new { error = badImage });
-    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups, картинки, док);
+    // Присланные пункты переводятся так же, как на внешнем пути: обязательность только та, о
+    // которой сказали явно. Помощник в админке отправляет ровно то же тело, что внешняя система.
+    var пунктыИзЗапроса = (dto?.Checkboxes ?? new List<ApiCheckboxDto>())
+        .Where(x => x is not null).Select(x => x.ВПункт()).ToList();
+    // Что из запроса не доехало до клиента, говорится и здесь: помощник в админке отправляет то
+    // же тело, что внешняя система, и молчать о потерянном пункте перед оператором так же плохо.
+    var отброшено = new List<string>();
+    var размещено = new List<string>();
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, пунктыИзЗапроса, dto?.Groups, картинки, док, отброшено, размещено);
+    if (размещено.Count > 0)
+        eventLog.Add("info", "api", "Заказ добавил в документ «" + док.Code + "» пунктов: "
+            + размещено.Count + ". " + string.Join("; ", размещено));
     var missing = DocumentTemplating.Missing(шаблон, dto?.Fields);
-    return Results.Ok(new { ok = true, document = док.Code, missingPlaceholders = missing });
+    // Ключ прислали, а значения в нём нет: на месте тега останется дыра, а условие на него
+    // погаснет. Отдельно от missingPlaceholders: там смысл «ключа не было», и менять его нельзя,
+    // на него смотрят уже работающие внешние системы.
+    var пустые = DocumentTemplating.Empty(шаблон, dto?.Fields);
+    return Results.Ok(new { ok = true, document = док.Code, missingPlaceholders = missing,
+        emptyPlaceholders = пустые, dropped = отброшено, placed = размещено });
 });
 
 admin.MapPost("/show-slides", async (TargetDto dto, KioskCoordinator coord) =>
 {
     var deviceId = DeviceFromTarget(dto?.Target);
     if (deviceId is null)
-        return Results.BadRequest(new { error = "Возврат к рекламе выполняется для одного планшета." });
+    {
+        // Каждой причине свой текст. «Возврат к рекламе выполняется для одного планшета» в ответ
+        // на выбранный планшет читается как поломка формы, а оператор в этот момент пытается
+        // убрать с экрана документ с данными клиента и должен понимать, что происходит.
+        var сырой = (dto?.Target ?? "").StartsWith("device:", StringComparison.Ordinal)
+            ? dto!.Target!["device:".Length..] : (dto?.Target ?? "");
+        var планшет = сырой.Length > 0 ? storage.GetDevice(сырой) : null;
+        if (планшет is { Status: "revoked" })
+            return Results.BadRequest(new { error = "Планшет «" + планшет.Name + "» отозван: его экран уже очищен, возвращать к рекламе нечего." });
+        if (сырой.Length > 0 && планшет is null)
+            return Results.BadRequest(new { error = "Планшета «" + сырой + "» в системе нет: он удалён, а его экран очищен при удалении." });
+        return Results.BadRequest(new { error = "Возврат к рекламе выполняется для одного планшета. Выберите планшет." });
+    }
     await coord.ReturnToSlidesAsync(deviceId);
     return Results.Ok(new { ok = true });
 });
@@ -1513,7 +1624,53 @@ var ext = app.MapGroup("/api/ext").RequireRateLimiting("ext").AddEndpointFilter(
     if (!админ && !storage.ValidateApiKey(key))
         return Results.Json(new { error = "invalid api key" }, statusCode: StatusCodes.Status401Unauthorized);
     return await next(ctx);
+})
+// Отказ без единого слова. Запрос с пустым телом платформа отвергала голым кодом 400 с пустым
+// телом ответа: в журнале интегратора это выглядит как «киоск ответил пустотой», и показать
+// оператору нечего. Здесь два прохода: пустое тело называется своим именем сразу, а всё
+// остальное, что платформа отвергла молча, получает объяснение после её работы.
+.AddEndpointFilter(async (ctx, next) =>
+{
+    var req = ctx.HttpContext.Request;
+    var ждётТело = HttpMethods.IsPost(req.Method) || HttpMethods.IsPut(req.Method) || HttpMethods.IsPatch(req.Method);
+    // Пустым считается только то, что пусто наверняка: нулевая длина, либо неизвестная длина без
+    // объявленного вида содержимого. Тело, присланное кусками (chunked), под это не подпадает.
+    var пусто = req.ContentLength == 0 || (req.ContentLength is null && string.IsNullOrEmpty(req.ContentType));
+    if (ждётТело && пусто)
+        return Results.Json(new
+        {
+            error = "Тело запроса пустое, а этот запрос ждёт JSON. Пришлите заголовок " +
+                    "Content-Type: application/json и тело запроса, например {\"deviceId\":\"...\"}."
+        }, statusCode: StatusCodes.Status400BadRequest);
+
+    // Само тело здесь читать нельзя: к моменту работы фильтра его уже прочитал разбор
+    // параметров, и вторая попытка увидит пустой поток. Проверено прогоном: с такой проверкой
+    // каждый нормальный запрос с телом получал «тело это не JSON». Поэтому битый JSON и
+    // неверный Content-Type остаются за платформой, см. запись ниже.
+    var результат = await next(ctx);
+
+    // Разбор мог не удаться и на том, что до тела не относится: буквы вместо числа в строке
+    // запроса, слишком длинное тело, ещё что-то, о чём платформа отвечает голым кодом. Свои
+    // отказы сюда не попадают: их код появляется позже, когда результат уже отдан наружу, а
+    // здесь он ещё 200. Пустой отказ это единственный ответ во всём API без объяснения, и в
+    // журнале интегратора он выглядит как «киоск промолчал».
+    var ответ = ctx.HttpContext.Response;
+    if (!ответ.HasStarted && ответ.StatusCode >= 400 && (ответ.ContentLength is null or 0))
+        return Results.Json(new { error = ПочемуЗапросНеРазобран(ответ.StatusCode) }, statusCode: ответ.StatusCode);
+    return результат;
 });
+
+// Отчего платформа отказала до обработчика. Текст один на весь внешний API: разбирать причину
+// точнее нам нечем, но сказать, куда смотреть, можно и нужно.
+static string ПочемуЗапросНеРазобран(int код) => код switch
+{
+    StatusCodes.Status400BadRequest =>
+        "Запрос не разобран. Проверьте, что тело это правильный JSON, а значения в строке запроса " +
+        "нужного вида (например limit это число).",
+    StatusCodes.Status415UnsupportedMediaType =>
+        "Не задан или не подходит Content-Type. Тело запроса присылайте как application/json.",
+    _ => "Запрос отклонён до обработки, код " + код + ". Проверьте адрес, заголовки и тело запроса."
+};
 
 ext.MapGet("/devices", () =>
 {
@@ -1560,8 +1717,7 @@ ext.MapPost("/workstations", (WorkstationDto dto) =>
     var код = (dto?.ExternalId ?? "").Trim();
     if (код.Length > 0)
     {
-        var было = storage.GetWorkstations()
-            .FirstOrDefault(w => string.Equals(w.ExternalId, код, StringComparison.OrdinalIgnoreCase));
+        var было = storage.GetWorkstations().FirstOrDefault(w => ЭтоМесто(w, код));
         if (было is not null) return Results.Ok(было);
     }
     return Results.Ok(storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location));
@@ -1572,18 +1728,59 @@ ext.MapPost("/enrollments", (ExtEnrollmentDto dto) =>
     string? wsId = null;
     if (!string.IsNullOrWhiteSpace(dto?.WorkstationExternalId))
     {
-        var ws = storage.GetWorkstations().FirstOrDefault(w => w.ExternalId == dto!.WorkstationExternalId);
-        if (ws is null) return Results.Json(new { error = "unknown workstationExternalId" }, statusCode: StatusCodes.Status404NotFound);
+        // Код места ищется так же, как везде: без учёта регистра и окружающих пробелов.
+        var ws = storage.GetWorkstations().FirstOrDefault(w => ЭтоМесто(w, dto!.WorkstationExternalId));
+        if (ws is null) return Results.Json(new
+        {
+            error = "Рабочего места с кодом «" + dto!.WorkstationExternalId!.Trim() + "» нет " +
+                    "(workstationExternalId). Заведите его запросом POST /api/ext/workstations."
+        }, statusCode: StatusCodes.Status404NotFound);
         wsId = ws.Id;
     }
     var e = storage.CreateEnrollment(dto?.Name, wsId, null, 60);
     return Results.Ok(new { code = e.Code, expiresUtc = e.ExpiresUtc });
 });
 
+// Привязать планшет к рабочему месту по коду места. Пустой код здесь не принимается: раньше
+// такой запрос молча отвязывал планшет от места и отвечал «ок», а внешняя система, забывшая
+// подставить код в шаблон запроса, узнавала об этом только тогда, когда документ переставал
+// находить планшет в кабинете. Отвязка это отдельное, названное вслух действие: DELETE.
 ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto) =>
-    storage.AssignWorkstationByExternalId(id, dto?.ExternalId)
-        ? Results.Ok(new { ok = true })
-        : Results.Json(new { error = "device or workstation not found" }, statusCode: StatusCodes.Status404NotFound));
+{
+    var код = (dto?.ExternalId ?? "").Trim();
+    if (код.Length == 0)
+        return Results.BadRequest(new
+        {
+            error = "Не задан externalId рабочего места. Чтобы отвязать планшет от места, вызовите " +
+                    "DELETE /api/ext/devices/" + id + "/workstation."
+        });
+    return ПривязкаОтвет(storage.AssignWorkstationByExternalId(id, код), id, код);
+});
+
+// Отвязать планшет от рабочего места. Отдельный вызов, а не пустое поле в запросе выше.
+ext.MapDelete("/devices/{id}/workstation", (string id) =>
+    ПривязкаОтвет(storage.AssignWorkstationByExternalId(id, null), id, null));
+
+// Ответ на привязку и отвязку: у каждой причины отказа свой текст, чтобы интегратору было что
+// чинить. Раньше на оба случая шло одно «device or workstation not found».
+IResult ПривязкаОтвет(StorageService.РезультатПривязки итог, string id, string? код) => итог switch
+{
+    StorageService.РезультатПривязки.Готово => Results.Ok(new { ok = true, deviceId = id, workstationExternalId = код }),
+    StorageService.РезультатПривязки.НетПланшета =>
+        Results.Json(new { error = "Планшета «" + id + "» в системе нет (deviceId)." }, statusCode: StatusCodes.Status404NotFound),
+    _ => Results.Json(new
+    {
+        error = "Рабочего места с кодом «" + код + "» нет (workstationExternalId). " +
+                "Заведите его запросом POST /api/ext/workstations."
+    }, statusCode: StatusCodes.Status404NotFound)
+};
+
+// Это ли рабочее место с таким кодом. Сравнение одно на всё внешнее API: без учёта регистра и
+// окружающих пробелов. Раньше один и тот же код сравнивался то так, то с учётом регистра, и
+// «ROOM-12» заводил место, но не находил его: планшет числился в кабинете, а заказ на этот
+// кабинет отвечал «нет такого места».
+bool ЭтоМесто(Workstation w, string? код) =>
+    string.Equals((w.ExternalId ?? "").Trim(), (код ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
 
 // Resolve a device by its id, or by the external id of the workstation it is assigned to.
 // A document carries the signer's personal data, so this must resolve to exactly ONE device:
@@ -1615,8 +1812,7 @@ ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto)
         // уезжал в чужой кабинет, а в ответе стояло «ок».
         if (!string.IsNullOrWhiteSpace(workstationExternalId))
         {
-            var место = storage.GetWorkstations()
-                .FirstOrDefault(w => string.Equals(w.ExternalId, workstationExternalId!.Trim(), StringComparison.OrdinalIgnoreCase));
+            var место = storage.GetWorkstations().FirstOrDefault(w => ЭтоМесто(w, workstationExternalId));
             if (место is null)
                 return (null, StatusCodes.Status404NotFound, "workstation not found: " + workstationExternalId);
             if (!string.Equals(прямо.WorkstationId, место.Id, StringComparison.Ordinal))
@@ -1628,8 +1824,9 @@ ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto)
     }
     if (!string.IsNullOrWhiteSpace(workstationExternalId))
     {
-        var ws = storage.GetWorkstations().FirstOrDefault(w => w.ExternalId == workstationExternalId);
-        if (ws is null) return (null, StatusCodes.Status404NotFound, "workstation not found");
+        var ws = storage.GetWorkstations().FirstOrDefault(w => ЭтоМесто(w, workstationExternalId));
+        if (ws is null) return (null, StatusCodes.Status404NotFound,
+            "workstation not found: " + workstationExternalId.Trim());
         var наМесте = storage.GetDevices().Where(d => d.WorkstationId == ws.Id).ToList();
         // Отозванный планшет это списанный планшет: он лежит в списке ради истории, показать на
         // нём ничего нельзя. Раньше он считался наравне с живым, и рабочее место с одним рабочим
@@ -1713,15 +1910,27 @@ ext.MapPost("/show-document", async (ExtShowDocumentDto dto, KioskCoordinator co
     // согласие, которого никто не показывал.
     var наСвязи = tracker.IsOnline(deviceId);
     var отброшено = new List<string>();
+    var размещено = new List<string>();
     // Присланные пункты переводятся в пункты документа здесь: обязательность у них только та,
     // о которой сказали явно, а не «включена по умолчанию», как у пункта, поставленного оператором.
     var присланныеПункты = (dto?.Checkboxes ?? new List<ApiCheckboxDto>())
         .Where(x => x is not null).Select(x => x.ВПункт()).ToList();
-    await coord.ShowDocumentAsync(deviceId, dto?.Fields, присланныеПункты, dto?.Groups, картинки, док, отброшено);
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, присланныеПункты, dto?.Groups, картинки, док, отброшено, размещено);
+    // След остаётся, даже если клиент уйдёт не подписав: записи тогда не будет вовсе, а заказ
+    // добавил в документ пункты, которых оператор не писал.
+    if (размещено.Count > 0)
+        eventLog.Add("info", "api", "Заказ добавил в документ «" + док.Code + "» пунктов: "
+            + размещено.Count + ". " + string.Join("; ", размещено));
     var missing = DocumentTemplating.Missing(шаблон, dto?.Fields);
     return Results.Ok(new
     {
         ok = true, deviceId, document = док.Code, missingPlaceholders = missing,
+        // Куда встал каждый присланный пункт. Раньше ответ перечислял только потери, и внешняя
+        // система не знала, на какой странице человек увидит то, что она дописала.
+        placed = размещено,
+        // Теги, которые прислали пустыми. Показ не отменяется: пустое может быть прислано
+        // умышленно, но знать об этом внешняя система обязана.
+        emptyPlaceholders = DocumentTemplating.Empty(шаблон, dto?.Fields),
         // shown: документ действительно на экране. false означает, что он сохранён и покажется,
         // когда планшет подключится, но не позже чем через два часа: потом он стирается сам.
         shown = наСвязи,

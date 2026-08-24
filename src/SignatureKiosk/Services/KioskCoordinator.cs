@@ -17,14 +17,16 @@ public class KioskCoordinator
     private readonly IHubContext<KioskHub> _hub;
     private readonly StorageService _storage;
     private readonly DeviceTracker _tracker;
+    private readonly KioskConnections _connections;
     private readonly ILogger<KioskCoordinator> _log;
 
     public KioskCoordinator(IHubContext<KioskHub> hub, StorageService storage, DeviceTracker tracker,
-        ILogger<KioskCoordinator> log)
+        KioskConnections connections, ILogger<KioskCoordinator> log)
     {
         _hub = hub;
         _storage = storage;
         _tracker = tracker;
+        _connections = connections;
         _log = log;
         _ = Task.Run(DevicesNotifyLoopAsync);
     }
@@ -49,15 +51,39 @@ public class KioskCoordinator
     /// for group membership), so targeting reflects the current device configuration without
     /// waiting for a reconnect. "All" resolves to the currently online devices.
     /// </summary>
-    private List<string> DeviceIds(Kind kind, string id, IReadOnlyList<string>? chosen = null) => kind switch
+    /// <remarks>
+    /// Отозванного планшета нет ни в одной рассылке, каким бы адресатом её ни задали. Отзыв
+    /// значит «этот экран больше ничего нашего не показывает», а общая рассылка рекламы уводила
+    /// такой экран с надписи «Планшет отвязан от системы» обратно на слайды: снаружи он снова
+    /// выглядел рабочим. Удалённого планшета в списке уже нет, поэтому он отсеивается тем же
+    /// отбором.
+    /// </remarks>
+    private List<string> DeviceIds(Kind kind, string id, IReadOnlyList<string>? chosen = null)
     {
-        Kind.All => _tracker.OnlineDeviceIds().ToList(),
-        Kind.Group => _storage.GetDevices().Where(d => d.GroupIds.Contains(id)).Select(d => d.Id).ToList(),
-        // Только те планшеты, которые действительно существуют: удалённый из набора просто
-        // выпадает, а остальные продолжают получать рекламу.
-        Kind.Devices => _storage.GetDevices().Where(d => (chosen ?? Array.Empty<string>()).Contains(d.Id)).Select(d => d.Id).ToList(),
-        _ => new List<string> { id }
-    };
+        // Список читается один раз на всю рассылку: при двухстах планшетах чтение на каждого
+        // означало бы двести разборов одного и того же файла подряд.
+        var вРаботе = _storage.GetDevices().Where(НеОтозван).Select(d => d.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        return kind switch
+        {
+            Kind.All => _tracker.OnlineDeviceIds().Where(вРаботе.Contains).ToList(),
+            Kind.Group => _storage.GetDevices().Where(d => НеОтозван(d) && d.GroupIds.Contains(id)).Select(d => d.Id).ToList(),
+            // Только те планшеты, которые действительно существуют: удалённый из набора просто
+            // выпадает, а остальные продолжают получать рекламу.
+            Kind.Devices => _storage.GetDevices().Where(d => НеОтозван(d) && (chosen ?? Array.Empty<string>()).Contains(d.Id)).Select(d => d.Id).ToList(),
+            _ => вРаботе.Contains(id) ? new List<string> { id } : new List<string>()
+        };
+    }
+
+    /// <summary>Планшет, которому ещё можно что-то показывать: он есть в списке и не отозван.</summary>
+    private static bool НеОтозван(Device d) => !string.Equals(d.Status, "revoked", StringComparison.Ordinal);
+
+    /// <summary>То же самое по номеру планшета: удалённого нет вовсе, значит и показывать некому.</summary>
+    private bool ВРаботе(string deviceId)
+    {
+        var dev = _storage.GetDevice(deviceId);
+        return dev is not null && НеОтозван(dev);
+    }
 
     // ---------- Build payloads ----------
 
@@ -101,6 +127,9 @@ public class KioskCoordinator
         var today = DateTime.Now.Date;
         foreach (var dev in _storage.GetDevices())
         {
+            // Отозванный планшет пропускается: он показывает «Планшет отвязан от системы», и
+            // рассылка рекламы увела бы его обратно на слайды.
+            if (!НеОтозван(dev)) continue;
             var state = states.Devices.TryGetValue(dev.Id, out var s) ? s : states.Default;
             if (state.Mode == "document") continue;
             await _hub.Clients.Group(DeviceGroup(dev.Id))
@@ -414,6 +443,45 @@ public class KioskCoordinator
         return null;
     }
 
+    /// <summary>Группы документа и их варианты, по именам. Пустой список вариантов бывает у
+    /// группы, которой варианты задаёт сам заказ.</summary>
+    private static Dictionary<string, HashSet<string>> ГруппыШаблона(DocumentConfig doc)
+    {
+        var найдено = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null) continue;
+            foreach (var g in p.Groups ?? new List<DocGroup>())
+            {
+                var key = (g?.Key ?? "").Trim();
+                if (key.Length == 0) continue;
+                var варианты = (g!.Options ?? new List<DocGroupOption>())
+                    .Where(o => o is not null && !string.IsNullOrWhiteSpace(o.Key))
+                    .Select(o => o.Key.Trim())
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                найдено[key] = варианты;
+            }
+        }
+        return найдено;
+    }
+
+    /// <summary>Имена тегов картинок, которые вообще есть в документе.</summary>
+    private static HashSet<string> ТегиКартинокШаблона(DocumentConfig doc)
+    {
+        var теги = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Собрать(IEnumerable<DocBlock>? blocks)
+        {
+            foreach (var b in blocks ?? Enumerable.Empty<DocBlock>())
+                if (b is not null && !string.IsNullOrWhiteSpace(b.ImageTag)) теги.Add(b.ImageTag!.Trim());
+        }
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+            if (p is not null) Собрать(DocumentTemplating.Blocks(p));
+        Собрать(doc.SignBlocks);
+        Собрать(doc.SignBlocksBelow);
+        Собрать(doc.ThankYouBlocks);
+        return теги;
+    }
+
     /// <param name="отброшено">
     /// Что не поместилось в пределы и до клиента не доехало. Внешней системе нельзя показать
     /// предупреждение, у неё есть только ответ: молчаливая обрезка означала бы «ок» на заказ, из
@@ -422,7 +490,7 @@ public class KioskCoordinator
     public async Task ShowDocumentAsync(string deviceId, IReadOnlyDictionary<string, string>? fields = null,
         IReadOnlyList<DocCheckbox>? checkboxes = null, IReadOnlyList<GroupSelectionDto>? groups = null,
         IReadOnlyDictionary<string, string>? images = null, DocumentInfo? документ = null,
-        List<string>? отброшено = null)
+        List<string>? отброшено = null, List<string>? размещено = null)
     {
         var fieldMap = new Dictionary<string, string>();
         if (fields is not null)
@@ -446,6 +514,10 @@ public class KioskCoordinator
         var known = DocumentTemplating.LiveKeys(template);
 
         var cbs = new List<DocCheckbox>();
+        // Страница, которую оператор назначил принимающей пункты из заказа. Нет такой, значит
+        // документ закрыт от дописок: присланный пункт не показывается, и об этом говорится
+        // вслух. Раньше он вставал в конец последней страницы, а последней бывает экран подписи.
+        var страницаПрисланных = DocumentTemplating.СтраницаДляПрисланных(template);
         var states = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         // Тексты для того, что уже стоит в документе: формулировка зависит от заказа, а место
         // в документе всегда одно и то же. Label заменяет текст целиком, LabelAppend дописывает
@@ -466,7 +538,13 @@ public class KioskCoordinator
                 text = (text.TrimEnd() + glue + tail).Trim();
             }
             if (!string.IsNullOrWhiteSpace(replace) || !string.IsNullOrWhiteSpace(append))
+            {
+                // Обрезка называется вслух: заказ принят целиком, а клиент увидел бы полфразы, и
+                // без этого никто бы об этом не узнал.
+                if (text.Length > MaxCheckboxLabelLength)
+                    отброшено?.Add("надпись «" + name + "» обрезана до " + MaxCheckboxLabelLength + " знаков");
                 texts[name] = Cut(text, MaxCheckboxLabelLength);
+            }
         }
         foreach (var c in (checkboxes ?? Array.Empty<DocCheckbox>()).Where(c => c is not null))
         {
@@ -477,11 +555,20 @@ public class KioskCoordinator
                 SetText(key, c.Label, c.LabelAppend);
                 continue;
             }
+            if (страницаПрисланных is null)
+            {
+                отброшено?.Add("пункт «" + (key.Length > 0 ? key : Cut(c.Label, 40))
+                    + "» не показан: ни одна страница документа не принимает пункты из API. "
+                    + "Отметьте нужную страницу в редакторе признаком «чекбоксы из API»");
+                continue;
+            }
             if (cbs.Count >= MaxDynamicCheckboxes)
             {
                 отброшено?.Add("пункт «" + key + "» не показан: пунктов сверх " + MaxDynamicCheckboxes + " не бывает");
                 continue;
             }
+            if ((c.Label?.Length ?? 0) > MaxCheckboxLabelLength)
+                отброшено?.Add("текст пункта «" + key + "» обрезан до " + MaxCheckboxLabelLength + " знаков");
             cbs.Add(new DocCheckbox
             {
                 Key = key,
@@ -491,9 +578,25 @@ public class KioskCoordinator
                 VisibleWhen = c.VisibleWhen,
                 Label = Cut(c.Label, MaxCheckboxLabelLength),
                 Required = c.Required,
-                Checked = c.Checked
+                Checked = c.Checked,
+                // Пункт весь из заказа, значит и отметку на нём просил заказ.
+                CheckedFromApi = c.Checked,
+                // Пункта не было в шаблоне: он весь пришёл из заказа. Дальше эта пометка едет
+                // с ним на планшет, в наблюдение и в запись подписи, чтобы через год было видно,
+                // что оператор его не писал.
+                Api = true
             });
+            размещено?.Add("пункт «" + (key.Length > 0 ? key : Cut(c.Label, 40)) + "» добавлен на страницу «"
+                + Cut(string.Concat(DocumentTemplating.HeadingRuns(страницаПрисланных)
+                    .Where(r => r is not null).Select(r => r.Text)), 40) + "»");
         }
+
+        // Группы и варианты, которые есть в самом документе. Нужны, чтобы сказать вызывающему,
+        // что его выбор никуда не встал: группа с чужим именем не появляется на странице, а
+        // выбор несуществующего варианта превращается в «ничего не выбрано». И то и другое
+        // раньше проходило с ответом «ок», а клиент подписывал документ без ответа на вопрос,
+        // который ему задали в заказе.
+        var группыДокумента = ГруппыШаблона(template);
 
         var selections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var options = new Dictionary<string, List<DocGroupOption>>(StringComparer.OrdinalIgnoreCase);
@@ -501,7 +604,8 @@ public class KioskCoordinator
         {
             var key = DocumentTemplating.CleanKey(g.Key);
             if (key.Length == 0) continue;
-            selections[key] = DocumentTemplating.CleanKey(g.Selected);
+            var выбор = DocumentTemplating.CleanKey(g.Selected);
+            selections[key] = выбор;
             SetText(key, g.Title, g.TitleAppend);
             // Варианты, присланные вместе с заказом. Если их прислали, они и есть список:
             // складывать их с теми, что в документе, значило бы показать клиенту два набора.
@@ -510,10 +614,41 @@ public class KioskCoordinator
             {
                 var ok = DocumentTemplating.CleanKey(o.Key);
                 if (ok.Length == 0) continue;
+                if ((o.Label?.Length ?? 0) > MaxCheckboxLabelLength)
+                    отброшено?.Add("текст варианта «" + key + "/" + ok + "» обрезан до " + MaxCheckboxLabelLength + " знаков");
                 SetText(key + "/" + ok, o.Label, o.LabelAppend);
                 sent.Add(new DocGroupOption { Key = ok, Label = Cut(o.Label, MaxCheckboxLabelLength) });
             }
             if (sent.Count > 0) options[key] = sent;
+
+            if (!группыДокумента.TryGetValue(key, out var свои))
+            {
+                отброшено?.Add("группы «" + key + "» в документе «" + документ.Code + "» нет: ни вопрос, ни выбор клиенту не показаны" +
+                               (группыДокумента.Count > 0 ? ". Есть: " + string.Join(", ", группыДокумента.Keys) : ""));
+                continue;
+            }
+            // Список вариантов, из которого клиент выбирает: присланный, если его прислали, иначе
+            // тот, что стоит в документе.
+            var доступные = sent.Count > 0
+                ? sent.Select(o => o.Key).ToHashSet(StringComparer.OrdinalIgnoreCase)
+                : свои;
+            if (выбор.Length > 0 && !доступные.Contains(выбор))
+                отброшено?.Add("варианта «" + выбор + "» в группе «" + key + "» нет: выбор не применён, клиент увидит вопрос без ответа" +
+                               (доступные.Count > 0 ? ". Есть: " + string.Join(", ", доступные) : ""));
+        }
+
+        // Картинка, для которой в документе нет такого тега, никуда не встаёт: в шаблоне просто
+        // нет места, куда её поставить. Заказ при этом принимался целиком.
+        if (images is { Count: > 0 })
+        {
+            var тегиДокумента = ТегиКартинокШаблона(template);
+            foreach (var tag in images.Keys)
+            {
+                var t = (tag ?? "").Trim();
+                if (t.Length > 0 && !тегиДокумента.Contains(t))
+                    отброшено?.Add("картинка «" + t + "» не показана: в документе «" + документ.Code + "» нет такого тега" +
+                                   (тегиДокумента.Count > 0 ? ". Есть: " + string.Join(", ", тегиДокумента) : ""));
+            }
         }
 
         var doc = DocumentTemplating.Resolve(template, fieldMap, cbs, selections, states, texts, options, images);
@@ -553,29 +688,50 @@ public class KioskCoordinator
     }
 
     /// <summary>
-    /// Планшет отозван. Отзыв должен значить «этот экран больше ничего нашего не показывает»,
-    /// поэтому здесь три действия сразу: стереть данные подписанта, сказать самому планшету, что
-    /// он отвязан, и разорвать его соединение. Одной пометки в списке планшетов не хватало:
-    /// личность в хабе проверяется один раз, на рукопожатии, и уже открытое соединение
-    /// продолжало получать документы следующих клиентов. Ровно от этого отзыв и нужен, когда
-    /// планшет украли или один код используется на двух экранах.
+    /// Планшет отозван или удалён. Это должно значить «этот экран больше ничего нашего не
+    /// показывает», поэтому здесь три действия сразу: стереть данные подписанта, сказать самому
+    /// планшету, что он отвязан, и разорвать его соединения.
+    ///
+    /// Одной пометки в списке планшетов не хватало: личность в хабе проверяется один раз, на
+    /// рукопожатии, и уже открытое соединение продолжало получать всё подряд, включая документ
+    /// следующего клиента. Ровно от этого отзыв и нужен, когда планшет украли или один код
+    /// используется на двух экранах.
     /// </summary>
     public async Task RevokeDeviceAsync(string deviceId)
     {
         ClearSignerSession(deviceId);
-        try { await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("Revoked"); }
-        catch { /* планшета может уже не быть на связи: разрыв ниже всё равно нужен */ }
-        foreach (var id in _tracker.ConnectionIds(deviceId))
+
+        // Порядок обязателен: сначала сообщение, потом разрыв. После разрыва сообщение уже никуда
+        // не уедет, и на экране остался бы документ предыдущего клиента до тех пор, пока кто-то
+        // руками не перезагрузит страницу киоска, висящего на стене.
+        var соединения = _tracker.ConnectionIds(deviceId);
+        foreach (var id in соединения)
         {
             // Каждое соединение отдельно: один и тот же код мог быть заведён на нескольких
             // экранах, и закрыть надо все, а не первое попавшееся.
             try { await _hub.Clients.Client(id).SendAsync("Revoked"); } catch { /* уже отвалилось */ }
         }
+
+        if (соединения.Count == 0) return;
+
+        // Сообщение отдано транспорту, но ещё не обязательно ушло в сеть: разрыв в ту же
+        // миллисекунду мог бы его обогнать. Четверти секунды хватает с запасом, а отзыв это
+        // редкое и намеренное действие оператора, для которого такая задержка незаметна.
+        await Task.Delay(ЗадержкаПередРазрывом);
+        foreach (var id in соединения)
+            if (_connections.Оборвать(id))
+                _log.LogInformation("Планшет {Device}: соединение {Connection} разорвано после отзыва", deviceId, id);
     }
+
+    /// <summary>Сколько ждать между «ты отвязан» и разрывом связи.</summary>
+    private static readonly TimeSpan ЗадержкаПередРазрывом = TimeSpan.FromMilliseconds(250);
 
     /// <summary>Return one tablet to advertising and clear its signer data, then push its slides.</summary>
     public async Task ReturnToSlidesAsync(string deviceId)
     {
+        // Отозванного и удалённого это не касается: на его экране нет ни документа, ни рекламы, а
+        // запись состояния для удалённого планшета завела бы данные о том, кого в системе нет.
+        if (!ВРаботе(deviceId)) return;
         ClearSignerSession(deviceId);
         var payload = BuildSlidesPayload(_storage.ResolveState(deviceId), deviceId);
         await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
@@ -631,11 +787,16 @@ public class KioskCoordinator
     /// and no scan session can outlive the tablet's session.
     /// </summary>
     public Task StartScanAsync(string deviceId) =>
-        _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("StartScan");
+        // Камера на отозванном планшете не открывается: он выведен из системы, и снимать ему
+        // нечего и не для кого.
+        ВРаботе(deviceId)
+            ? _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("StartScan")
+            : Task.CompletedTask;
 
     /// <summary>Cancel scanning on one tablet and return it to whatever it should be showing.</summary>
     public async Task StopScanAsync(string deviceId)
     {
+        if (!ВРаботе(deviceId)) return;
         await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("StopScan");
         var cmd = BuildCurrentCommand(deviceId);
         if (cmd.Mode == "document")
@@ -777,4 +938,47 @@ public class KioskCoordinator
             checkedCount = rec.Items.Count(i => i is { Checked: true }),
             totalCount = rec.Items.Count
         });
+}
+
+/// <summary>
+/// Живые соединения хаба, чтобы их можно было закрыть по требованию.
+///
+/// SignalR умеет послать сообщение по номеру соединения, но не умеет его оборвать: оборвать
+/// может только сам HubCallerContext, а он существует лишь внутри вызова хаба. Фильтр хаба
+/// видит каждое соединение в момент подключения и отключения, поэтому он их и хранит.
+///
+/// Зачем это нужно: личность в хабе проверяется один раз, на рукопожатии. Отозванный планшет с
+/// уже открытым соединением остаётся для сервера обычным планшетом и продолжает получать
+/// рассылки, в том числе документ следующего клиента. Заново открыть соединение он не сможет:
+/// токен отозванного планшета проверку не проходит.
+/// </summary>
+public sealed class KioskConnections : IHubFilter
+{
+    private readonly ConcurrentDictionary<string, HubCallerContext> _живые = new(StringComparer.Ordinal);
+
+    public Task OnConnectedAsync(HubLifetimeContext context, Func<HubLifetimeContext, Task> next)
+    {
+        _живые[context.Context.ConnectionId] = context.Context;
+        return next(context);
+    }
+
+    public Task OnDisconnectedAsync(HubLifetimeContext context, Exception? exception,
+        Func<HubLifetimeContext, Exception?, Task> next)
+    {
+        _живые.TryRemove(context.Context.ConnectionId, out _);
+        return next(context, exception);
+    }
+
+    /// <summary>Оборвать одно соединение. Возвращает true, если было что рвать.</summary>
+    public bool Оборвать(string connectionId)
+    {
+        if (!_живые.TryRemove(connectionId, out var соединение)) return false;
+        // Разрыв не должен зависеть от состояния соединения: оно могло отвалиться само мгновением
+        // раньше, и это не повод не оборвать остальные.
+        try { соединение.Abort(); } catch { /* уже закрыто */ }
+        return true;
+    }
+
+    /// <summary>Сколько соединений сейчас на учёте. Нужно только для проверок.</summary>
+    public int Count => _живые.Count;
 }
