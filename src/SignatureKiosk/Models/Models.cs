@@ -136,6 +136,18 @@ public class ImageInfo
     public string? ShowFrom { get; set; }
     /// <summary>По какой день показывать, включительно. Пусто означает «без конца».</summary>
     public string? ShowTo { get; set; }
+    /// <summary>
+    /// Группы планшетов, где эту картинку показывать. Пустой список означает «везде»: именно так
+    /// ведут себя все картинки, загруженные до появления этой настройки, поэтому старые наборы
+    /// продолжают работать как раньше.
+    /// </summary>
+    public List<string> GroupIds { get; set; } = new();
+    /// <summary>
+    /// Группы планшетов, где эту картинку не показывать. Запрет сильнее разрешения: планшет,
+    /// попавший и в «показывать», и в «кроме», картинку не увидит. Иначе одна и та же настройка
+    /// значила бы разное в зависимости от порядка чтения.
+    /// </summary>
+    public List<string> ExceptGroupIds { get; set; } = new();
 }
 
 // ---------- Signing document ----------
@@ -689,6 +701,13 @@ public class SignatureSubmission
     // Identifies one signing session. If the response is lost and the tablet retries, the server
     // returns the record it already stored instead of creating a second, data-less duplicate.
     public string? SubmissionId { get; set; }
+    /// <summary>
+    /// Имя показа, под которым планшет получил этот документ. Сервер сверяет его со своим: если
+    /// они разошлись, значит на планшет уже успели послать другой документ, и отметки этого
+    /// клиента легли бы в снимок следующего. Дешёвая страховка от самого дорогого исхода:
+    /// подписи одного человека под данными другого.
+    /// </summary>
+    public string? SessionId { get; set; }
 }
 
 public class SignatureRecord
@@ -901,6 +920,7 @@ public record DeviceUpdateDto(string? Name, List<string>? GroupIds, string? Work
 public record GroupDto(string? Name);
 /// <summary>Сроки показа картинки в рекламе. Пустая дата снимает ограничение с этой стороны.</summary>
 public record ImageDatesDto(string? ShowFrom, string? ShowTo);
+public record ImageGroupsDto(List<string>? GroupIds, List<string>? ExceptGroupIds);
 public record WorkstationDto(string? ExternalId, string? Name, string? Location);
 public record ApiKeyDto(string? Label);
 
@@ -910,8 +930,32 @@ public record ExtWorkstationAssignDto(string? ExternalId);
 /// Images: картинки, присылаемые вместе с заказом. Ключ это имя тега картинки в документе,
 /// значение это сама картинка строкой BASE64, с приставкой data:image/... или без неё.
 /// </summary>
-public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId, Dictionary<string, string>? Fields, List<DocCheckbox>? Checkboxes, List<GroupSelectionDto>? Groups,
+public record ExtShowDocumentDto(string? DeviceId, string? WorkstationExternalId, Dictionary<string, string>? Fields, List<ApiCheckboxDto>? Checkboxes, List<GroupSelectionDto>? Groups,
     Dictionary<string, string>? Images = null, string? DocumentCode = null);
+
+/// <summary>
+/// Пункт согласия, присланный внешней системой. Отдельный вид от DocCheckbox ровно из-за
+/// обязательности: у пункта в документе она включена по умолчанию, потому что оператор ставит
+/// пункт затем, чтобы клиент его отметил. У присланного по API наоборот: не сказали про
+/// обязательность, значит не обязателен. Иначе запрос без единого слова про required давал пункт
+/// со звёздочкой, который клиент не может пропустить, и интегратор об этом не знал.
+/// </summary>
+public class ApiCheckboxDto
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    public string? LabelAppend { get; set; }
+    public bool? Required { get; set; }
+    public bool Checked { get; set; }
+    public VisibleWhen? VisibleWhen { get; set; }
+
+    /// <summary>Пункт документа из присланного. Обязательность только та, о которой сказали явно.</summary>
+    public DocCheckbox ВПункт() => new()
+    {
+        Key = Key, Label = Label, LabelAppend = LabelAppend,
+        Required = Required ?? false, Checked = Checked, VisibleWhen = VisibleWhen
+    };
+}
 public record ExtScanRequestDto(string? DeviceId, string? WorkstationExternalId, int? TimeoutSec);
 public record AckDto(string? Id);
 /// <summary>Выбор варианта в группе, присланный внешней системой.</summary>

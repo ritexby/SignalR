@@ -59,6 +59,14 @@ public class EventLogService
 
     /// <summary>Newest first, optionally filtered by level and a free-text query.</summary>
     public List<LogEntry> List(string? level = null, string? query = null, int limit = 300)
+        => Filtered(level, query, limit, out _);
+
+    /// <summary>
+    /// То же самое, но заодно говорит, сколько записей подошло под отбор всего. Раньше рядом со
+    /// списком показывался размер всего кольца, и «Показано 12 из 1843» при выбранном уровне
+    /// «ошибки» читалось как «есть ещё 1831 ошибка, которую вам не показали».
+    /// </summary>
+    public List<LogEntry> Filtered(string? level, string? query, int limit, out int подошло)
     {
         IEnumerable<LogEntry> items = _entries.ToArray().Reverse();
         if (!string.IsNullOrWhiteSpace(level) && level != "all")
@@ -76,7 +84,9 @@ public class EventLogService
                 // идентификатору не находил ничего.
                 (e.DeviceId?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
         }
-        return items.Take(Math.Clamp(limit, 1, MaxEntries)).ToList();
+        var отобранные = items.ToList();
+        подошло = отобранные.Count;
+        return отобранные.Take(Math.Clamp(limit, 1, MaxEntries)).ToList();
     }
 
     public int Count => _entries.Count;
@@ -93,7 +103,19 @@ public class EventLogService
     public void Clear()
     {
         while (_entries.TryDequeue(out _)) { }
-        try { lock (_fileLock) if (File.Exists(_path)) File.Delete(_path); } catch { /* ignore */ }
+        // Вместе с текущим файлом уносится и повёрнутый: в нём до четырёх мегабайт прежних
+        // записей, включая подробности с планшетов. Оператор, нажавший «Очистить», считает, что
+        // записей больше нет, а половина оставалась лежать в соседнем файле.
+        try
+        {
+            lock (_fileLock)
+            {
+                if (File.Exists(_path)) File.Delete(_path);
+                var повёрнутый = _path + ".1";
+                if (File.Exists(повёрнутый)) File.Delete(повёрнутый);
+            }
+        }
+        catch { /* ignore */ }
     }
 
     private static string? Trim(string? s, int max) =>

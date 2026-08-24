@@ -39,7 +39,13 @@ public class StorageService
     {
         if (!IsSafeId(id)) return null;
         var path = Path.Combine(PdfDir, id + ".pdf");
-        return File.Exists(path) ? path : null;
+        if (File.Exists(path)) return path;
+        // Номер мог прийти прописными, прочитанный со штрихкода: Code 39 строчных букв не знает.
+        // На Linux это другое имя файла, и бумага не находила сама себя.
+        if (!Directory.Exists(PdfDir)) return null;
+        foreach (var f in Directory.EnumerateFiles(PdfDir, "*.pdf"))
+            if (string.Equals(Path.GetFileNameWithoutExtension(f), id, StringComparison.OrdinalIgnoreCase)) return f;
+        return null;
     }
     private string StatesPath => Path.Combine(_dataDir, "states.json");
     private string DevicesPath => Path.Combine(_dataDir, "devices.json");
@@ -151,6 +157,10 @@ public class StorageService
             Write(DevicesPath, list);
             var states = ReadOr(StatesPath, () => new StateStore());
             if (states.Devices.Remove(id)) Write(StatesPath, states);
+            // И снимок открытой сессии. Его убирает уборка, но она ходит по списку состояний, из
+            // которого запись уже вычеркнута строкой выше: файл с данными подписанта оставался
+            // лежать на диске навсегда и не читался больше никем.
+            DeleteDocSessionNoLock(id);
             return true;
         }
     }
@@ -223,6 +233,17 @@ public class StorageService
             bool changed = false;
             foreach (var d in devs) changed |= d.GroupIds.Remove(id);
             if (changed) Write(DevicesPath, devs);
+            // Картинки тоже ссылаются на группы. Оставить ссылку на удалённую группу значит
+            // молча выключить картинку везде: список «показывать в группах» не пуст, а совпасть
+            // с ним уже некому.
+            var imgs = ReadOr(ImagesIndexPath, () => new List<ImageInfo>());
+            bool картинкиИзменились = false;
+            foreach (var i in imgs)
+            {
+                картинкиИзменились |= i.GroupIds.Remove(id);
+                картинкиИзменились |= i.ExceptGroupIds.Remove(id);
+            }
+            if (картинкиИзменились) Write(ImagesIndexPath, imgs);
             return true;
         }
     }
@@ -483,6 +504,27 @@ public class StorageService
         }
     }
 
+    /// <summary>
+    /// Задать, где показывать картинку: в каких группах и в каких не показывать. Пустые списки
+    /// означают «везде»: так ведут себя все картинки, которым группы не задавали.
+    /// </summary>
+    public bool SetImageGroups(string id, IEnumerable<string>? groupIds, IEnumerable<string>? exceptGroupIds)
+    {
+        lock (_lock)
+        {
+            var list = ReadOr(ImagesIndexPath, () => new List<ImageInfo>());
+            var img = list.FirstOrDefault(i => i.Id == id);
+            if (img is null) return false;
+            // Оставляем только существующие группы: удалённая группа иначе висела бы в настройке
+            // вечно и молча вырезала картинку у всех, не давая понять почему.
+            var живые = ReadOr(GroupsPath, () => new List<DeviceGroup>()).Select(g => g.Id).ToHashSet(StringComparer.Ordinal);
+            img.GroupIds = (groupIds ?? Array.Empty<string>()).Where(живые.Contains).Distinct(StringComparer.Ordinal).ToList();
+            img.ExceptGroupIds = (exceptGroupIds ?? Array.Empty<string>()).Where(живые.Contains).Distinct(StringComparer.Ordinal).ToList();
+            Write(ImagesIndexPath, list);
+            return true;
+        }
+    }
+
     public bool DeleteImage(string id)
     {
         lock (_lock)
@@ -589,28 +631,50 @@ public class StorageService
         }
     }
 
+    /// <summary>
+    /// Текст документа по номеру, но честно: неизвестный номер это false, а не документ по
+    /// умолчанию. Нужно там, где номер приходит снаружи: показать оператору чужой текст под
+    /// именем запрошенного документа хуже, чем сказать, что такого документа нет.
+    /// </summary>
+    public bool TryGetDocument(string? id, out DocumentConfig doc)
+    {
+        lock (_lock)
+        {
+            if (string.IsNullOrWhiteSpace(id)) { doc = ReadOr(DocumentPath, DefaultDocument); return true; }
+            var info = GetDocumentInfoNoLock(id!);
+            if (info is null) { doc = DefaultDocument(); return false; }
+            doc = GetDocumentNoLock(info.Id);
+            return true;
+        }
+    }
+
     private DocumentInfo? GetDocumentInfoNoLock(string id)
     {
         var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
         return lib.Documents.FirstOrDefault(d => string.Equals(d.Id, (id ?? "").Trim(), StringComparison.OrdinalIgnoreCase));
     }
 
-    public void SaveDocument(DocumentConfig doc) => SaveDocument(null, doc);
-
-    public void SaveDocument(string? id, DocumentConfig doc)
+    /// <summary>
+    /// Записать текст документа. Неизвестный идентификатор это отказ, а не запись в документ по
+    /// умолчанию: молчаливая подмена означала бы, что «сохрани документ X» затирает совсем другой
+    /// документ. Возвращает false, если такого документа нет.
+    /// </summary>
+    public bool SaveDocument(string? id, DocumentConfig doc)
     {
         lock (_lock)
         {
             var info = id is null ? null : GetDocumentInfoNoLock(id);
+            if (id is not null && info is null) return false;
             if (id is null || info is null || info.IsDefault) { Write(DocumentPath, doc); }
             else
             {
                 var path = DocFilePath(info.Id);
-                if (path is null) return;
+                if (path is null) return false;   // имя не годится для файла: писать некуда
                 Directory.CreateDirectory(DocumentsDir);
                 Write(path, doc);
             }
             TouchDocument(info?.Id ?? DefaultIdNoLock(), doc.Title, doc.Kind);
+            return true;
         }
     }
 
@@ -665,6 +729,10 @@ public class StorageService
             // страница и заголовок, который оператор только что ввёл. Прежде новый заводился
             // копией образцового согласия, и человек, нажавший «Новый документ», получал чужой
             // готовый текст про обработку персональных данных и не понимал, откуда он взялся.
+            // Копия неизвестного документа это отказ, а не копия документа по умолчанию: «сделай
+            // копию документа X» отдавало копию совсем другого, и оператор об этом не узнавал.
+            if (!string.IsNullOrWhiteSpace(copyOfId) && GetDocumentInfoNoLock(copyOfId!) is null)
+                return (null, "Документ, с которого делается копия, не найден.");
             var текст = string.IsNullOrWhiteSpace(copyOfId)
                 ? new DocumentConfig
                 {
@@ -860,16 +928,19 @@ public class StorageService
 
     public void DeleteDocSession(string deviceId)
     {
+        lock (_lock) DeleteDocSessionNoLock(deviceId);
+    }
+
+    /// <summary>То же самое, но под уже взятым замком: вызывается изнутри других записей.</summary>
+    private void DeleteDocSessionNoLock(string deviceId)
+    {
         var path = SessionPath(deviceId);
         if (path is null) return;
-        lock (_lock)
-        {
-            // Кэш чистится вместе с файлом: следующая сессия не должна прочитать прежнюю.
-            _text.Remove(path);
-            try { File.Delete(path); }
-            catch (IOException) { /* файла уже нет или каталог не создавался - снимка и так нет */ }
-            catch (UnauthorizedAccessException) { /* права снесло руками; читать его всё равно никто не будет */ }
-        }
+        // Кэш чистится вместе с файлом: следующая сессия не должна прочитать прежнюю.
+        _text.Remove(path);
+        try { File.Delete(path); }
+        catch (IOException) { /* файла уже нет или каталог не создавался - снимка и так нет */ }
+        catch (UnauthorizedAccessException) { /* права снесло руками; читать его всё равно никто не будет */ }
     }
 
     // ---------------- Signatures ----------------
@@ -880,7 +951,10 @@ public class StorageService
     {
         lock (_lock)
         {
-            var id = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff") + "-" + Guid.NewGuid().ToString("N")[..6];
+            // Хвост прописными: номер печатается штрихкодом Code 39, а он строчных букв не знает
+            // и кодирует их прописными. Со строчным хвостом прочитанный со штрихкода номер
+            // отличался от настоящего, и запись по нему приходилось искать без учёта регистра.
+            var id = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff") + "-" + Guid.NewGuid().ToString("N")[..6].ToUpperInvariant();
             var dir = Path.Combine(SignaturesDir, id);
             Directory.CreateDirectory(dir);
             var rec = new SignatureRecord
@@ -964,7 +1038,9 @@ public class StorageService
         if (!IsSafeId(id)) return null;
         lock (_lock)
         {
-            var path = Path.Combine(SignaturesDir, id, "document.json");
+            var dir = SignatureDirNoLock(id);
+            if (dir is null) return null;
+            var path = Path.Combine(dir, "document.json");
             if (!File.Exists(path)) return null;
             try { return JsonSerializer.Deserialize<DocumentConfig>(File.ReadAllText(path), Json); }
             catch { return null; }
@@ -979,7 +1055,9 @@ public class StorageService
         {
             try
             {
-                var path = Path.Combine(SignaturesDir, id, file);
+                var dir = SignatureDirNoLock(id);
+                if (dir is null) return null;
+                var path = Path.Combine(dir, file);
                 return File.Exists(path) ? File.ReadAllBytes(path) : null;
             }
             catch { return null; }
@@ -1032,12 +1110,30 @@ public class StorageService
         return result.OrderByDescending(r => r.CreatedUtc).ToList();
     }
 
+    /// <summary>
+    /// Каталог записи по её номеру, без учёта регистра. Штрихкод в колонтитуле Code 39 строчных
+    /// букв не знает и печатает номер прописными: сканер читает «...-52D432», а каталог называется
+    /// «...-52d432», и на Linux это разные имена. Поиск записи по прочитанному со штрихкода номеру
+    /// иначе отвечал «не найдено» на собственную же бумагу.
+    /// </summary>
+    private string? SignatureDirNoLock(string id)
+    {
+        var прямо = Path.Combine(SignaturesDir, id);
+        if (Directory.Exists(прямо)) return прямо;
+        if (!Directory.Exists(SignaturesDir)) return null;
+        foreach (var d in Directory.EnumerateDirectories(SignaturesDir))
+            if (string.Equals(Path.GetFileName(d), id, StringComparison.OrdinalIgnoreCase)) return d;
+        return null;
+    }
+
     public SignatureRecord? GetSignature(string id)
     {
         if (!IsSafeId(id)) return null;
         lock (_lock)
         {
-            var meta = Path.Combine(SignaturesDir, id, "meta.json");
+            var dir = SignatureDirNoLock(id);
+            if (dir is null) return null;
+            var meta = Path.Combine(dir, "meta.json");
             if (!File.Exists(meta)) return null;
             try
             {
@@ -1054,8 +1150,13 @@ public class StorageService
     public string? GetSignatureImagePath(string id)
     {
         if (!IsSafeId(id)) return null;
-        var path = Path.Combine(SignaturesDir, id, "signature.png");
-        return File.Exists(path) ? path : null;
+        lock (_lock)
+        {
+            var dir = SignatureDirNoLock(id);
+            if (dir is null) return null;
+            var path = Path.Combine(dir, "signature.png");
+            return File.Exists(path) ? path : null;
+        }
     }
 
     // ---------------- Alert settings ----------------
@@ -1157,7 +1258,26 @@ public class StorageService
             if (string.IsNullOrWhiteSpace(r.Id)) r.Id = "rule-" + ShortId();
             ClampRule(r);
         }
-        lock (_lock) Write(SchedulePath, new ScheduleStore { Rules = list });
+        lock (_lock)
+        {
+            // Отметка о последнем запуске принадлежит не панели, а самому правилу. Панель её не
+            // присылает, и раньше любое сохранение расписания стирало «сегодня уже выполнено»:
+            // правило, отработавшее в семь утра, повторялось на ближайшем такте, если оператор в
+            // семь ноль одну поправил примечание в соседнем правиле. Заодно пропадала вся
+            // история запусков из карточки.
+            var прежние = ReadOr(SchedulePath, () => new ScheduleStore()).Rules ?? new List<ScheduleRule>();
+            var поId = прежние.Where(r => r is not null && !string.IsNullOrWhiteSpace(r.Id))
+                .GroupBy(r => r.Id, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+            foreach (var r in list)
+            {
+                if (!поId.TryGetValue(r.Id, out var было)) continue;
+                r.LastRunUtc = было.LastRunUtc;
+                r.LastRunLocalDate = было.LastRunLocalDate;
+                r.LastResult = было.LastResult;
+            }
+            Write(SchedulePath, new ScheduleStore { Rules = list });
+        }
         return list;
     }
 
@@ -1183,7 +1303,16 @@ public class StorageService
     {
         r.Time = NormalizeTime(r.Time);
         r.Days = (r.Days ?? new List<int>()).Where(d => d is >= 1 and <= 7).Distinct().OrderBy(d => d).ToList();
-        if (ScheduleActions.Find(r.Action) is null) r.Action = "screen-on";
+        // Неизвестное действие раньше молча превращалось во «включить экран»: правило с опечаткой
+        // в три часа ночи зажигало экраны всего парка, а в журнале стояло «Расписание «Включить
+        // экран»». Такое правило выключается, а не подменяется: выключенное видно в списке и
+        // ничего не делает.
+        if (ScheduleActions.Find(r.Action) is null)
+        {
+            r.Enabled = false;
+            r.LastResult = "Действие «" + (r.Action ?? "") + "» не опознано: правило выключено, выберите действие заново.";
+            r.Action = "screen-on";
+        }
         r.Value = Math.Clamp(r.Value, 0, 100);
         r.Text = (r.Text ?? "").Trim();
         if (r.Text.Length > 200) r.Text = r.Text[..200];
@@ -1226,7 +1355,11 @@ public class StorageService
     {
         var rec = new ScanRecord
         {
-            Id = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff") + "-" + Guid.NewGuid().ToString("N")[..6],
+            // Хвост прописными: номер записи печатается штрихкодом Code 39, а он строчных букв не
+            // знает и кодирует их прописными. Со строчным хвостом прочитанный со штрихкода номер
+            // отличался от настоящего, и запись по нему приходилось искать без учёта регистра.
+            // Теперь бумага и запись сходятся знак в знак.
+            Id = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff") + "-" + Guid.NewGuid().ToString("N")[..6].ToUpperInvariant(),
             CreatedUtc = DateTime.UtcNow,
             Code = code.Length <= MaxScanCodeLength ? code : code[..MaxScanCodeLength],
             Format = format.Length <= 40 ? format : format[..40],

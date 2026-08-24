@@ -41,6 +41,12 @@ public class DeviceTracker
         lock (_lock) return _connections.TryGetValue(deviceId, out var set) ? set.Count : 0;
     }
 
+    /// <summary>Номера живых соединений планшета. Нужны, чтобы разорвать их поимённо.</summary>
+    public List<string> ConnectionIds(string deviceId)
+    {
+        lock (_lock) return _connections.TryGetValue(deviceId, out var set) ? set.ToList() : new List<string>();
+    }
+
     /// <summary>Device ids currently connected more than once.</summary>
     public List<string> DuplicateDeviceIds()
     {

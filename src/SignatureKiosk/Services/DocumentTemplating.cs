@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using SignatureKiosk.Models;
 
@@ -213,13 +214,20 @@ public static partial class DocumentTemplating
         });
     }
 
+    // Через этот метод проходит ВЕСЬ оформленный текст документа: абзацы, заголовки страниц,
+    // подписи пунктов, заголовки и варианты групп, прощание. Всё, что здесь не перечислено,
+    // теряется по дороге к планшету, к наблюдению и к бумаге. Так молча пропали выделение
+    // маркером и свой размер в точках: их бережно хранили при сохранении и умели рисовать все
+    // три отрисовщика, а до них они просто не доезжали.
     private static TextRun ApplyRun(TextRun r, IReadOnlyDictionary<string, string>? map) => new()
     {
         Text = Apply(r.Text, map),
         Bold = r.Bold,
         Italic = r.Italic,
         Color = r.Color,
-        Size = r.Size
+        Size = r.Size,
+        Mark = r.Mark,
+        SizePt = r.SizePt
     };
 
     private static DocCheckbox Cb(DocCheckbox c, IReadOnlyDictionary<string, string>? map,
@@ -345,34 +353,40 @@ public static partial class DocumentTemplating
     }
 
     /// <summary>Выполняется ли условие: хотя бы один набор целиком.</summary>
-    public static bool Matches(VisibleWhen? cond, IReadOnlyDictionary<string, string>? fields)
+    public static bool Matches(VisibleWhen? cond, IReadOnlyDictionary<string, string>? fields, bool своиИмена = false)
     {
         if (cond is null) return true;
         foreach (var group in Groups(cond))
-            if (MatchesGroup(group, fields)) return true;
+            if (MatchesGroup(group, fields, своиИмена)) return true;
         return false;
     }
 
     /// <summary>Выполнен ли один набор: все его части одновременно.</summary>
-    private static bool MatchesGroup(VisibleWhen group, IReadOnlyDictionary<string, string>? fields)
+    private static bool MatchesGroup(VisibleWhen group, IReadOnlyDictionary<string, string>? fields, bool своиИмена = false)
     {
         foreach (var part in Parts(group))
-            if (!MatchesOne(part, fields)) return false;
+            if (!MatchesOne(part, fields, своиИмена)) return false;
         return true;
     }
 
-    private static bool MatchesOne(VisibleWhen? cond, IReadOnlyDictionary<string, string>? fields)
+    private static bool MatchesOne(VisibleWhen? cond, IReadOnlyDictionary<string, string>? fields, bool своиИмена = false)
     {
         if (cond is null || string.IsNullOrWhiteSpace(cond.Field)) return true;
         // «Не» переворачивает ответ части целиком, включая случай «даты нет». Иначе «возраст
         // меньше 14» и «не возраст меньше 14» оба оказались бы невыполненными при непришедшей
         // дате рождения, и клиент не увидел бы ни детского варианта, ни взрослого. Отрицание
         // обязано быть в точности обратным, иначе о нём нельзя рассуждать.
-        var ok = Holds(cond, fields);
+        var ok = Holds(cond, fields, своиИмена);
         return cond.Not ? !ok : ok;
     }
 
-    private static bool Holds(VisibleWhen cond, IReadOnlyDictionary<string, string>? fields)
+    /// <param name="своиИмена">
+    /// Значения принадлежат самому документу (отметки, выбор, вписанное), а не заказу. Приведение
+    /// к общему виду тогда не делается: оно описывает теги заказа («да» это true, «Ж» это F), а
+    /// планшет своих имён так не приводит. С приведением группа «Пол» с вариантом F показывала
+    /// блок в бумаге по условию «Пол равно Ж» и не показывала его на экране.
+    /// </param>
+    private static bool Holds(VisibleWhen cond, IReadOnlyDictionary<string, string>? fields, bool своиИмена = false)
     {
         fields ??= EmptyMap;
         var field = cond.Field.Trim();
@@ -380,8 +394,8 @@ public static partial class DocumentTemplating
         // Both sides go through the same normalisation, so a boolean tag sent as True matches a
         // condition written as true, and a condition saved before the tag became a boolean
         // (да / нет) keeps working instead of silently never matching.
-        var val = FieldSchema.Canonical(field, raw);
-        var target = FieldSchema.Canonical(field, cond.Value);
+        var val = своиИмена ? (raw ?? "").Trim() : FieldSchema.Canonical(field, raw);
+        var target = своиИмена ? (cond.Value ?? "").Trim() : FieldSchema.Canonical(field, cond.Value);
         if (IsDaysOp(cond.Op))
         {
             // Срок считается из значения тега. Нет даты или её не удалось разобрать: условие не
@@ -425,7 +439,7 @@ public static partial class DocumentTemplating
         if (cond.Op == "minchecked")
         {
             var имена = cond.Field.Split(',').Select(x => x.Trim()).Where(x => x.Length > 0);
-            if (!int.TryParse(cond.Value.Trim(), out var n) || n < 1) return false;
+            if (!int.TryParse((cond.Value ?? "").Trim(), out var n) || n < 1) return false;
             var отмечено = имена.Count(k => fields.TryGetValue(k, out var v) &&
                 string.Equals(v?.Trim(), "true", StringComparison.OrdinalIgnoreCase));
             return отмечено >= n;
@@ -554,6 +568,9 @@ public static partial class DocumentTemplating
             var kind = (resolved.Kind ?? "").Trim().ToLowerInvariant();
             if (kind == "signature" && resolved.Signatures.Count == 0) continue;
             if (kind == "scan" && resolved.Scans.Count == 0) continue;
+            // Пункты могли отсеяться по тегам: правила отметок должны говорить о тех, что
+            // остались, иначе клиент упрётся в требование про несуществующий пункт.
+            ПочиститьПравила(resolved);
             pages.Add(resolved);
         }
 
@@ -568,6 +585,12 @@ public static partial class DocumentTemplating
                 var next = PageOrdinalEnd(anchor);
                 foreach (var c in injected) c.Ord = next++;
                 anchor.Checkboxes.AddRange(injected);
+                // Страница, где клиент что-то подтверждает, из PDF исключаться не может. При
+                // сохранении это проверяется, но пунктов из заказа тогда ещё нет: страница без
+                // своих полей законно сохранена с «не печатать», а теперь на ней стоит согласие.
+                // В бумаге оставался один список «Отмеченные пункты» без заголовка и без текста,
+                // под которым человек расписался.
+                if (injected.Count > 0) anchor.InPdf = true;
             }
             else
             {
@@ -723,42 +746,110 @@ public static partial class DocumentTemplating
     /// «телефон не пусто» открывает блок прямо во время набора. Без этих значений блок, который
     /// человек своими руками открыл, пропадал из записи и из PDF.
     /// </param>
+    /// <summary>
+    /// Привести правила отметок страницы в соответствие с тем, что на ней осталось. Пункт мог
+    /// не подойти по тегу или по условию и уйти из документа, а правило продолжало на него
+    /// ссылаться: планшет считал отметки по видимым пунктам, сервер по присланным, и получалось
+    /// «не меньше двух из двух», где второго уже нет. Клиент проходил документ и получал отказ
+    /// на самой подписи.
+    /// </summary>
+    private static void ПочиститьПравила(DocPage p)
+    {
+        var живые = (p.Checkboxes ?? new List<DocCheckbox>())
+            .Where(c => c is not null && !string.IsNullOrWhiteSpace(c.Key))
+            .Select(c => c.Key.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var правила = new List<CheckRule>();
+        foreach (var r in p.CheckRules ?? new List<CheckRule>())
+        {
+            if (r is null || r.Keys is null) continue;
+            r.Keys = r.Keys.Where(k => !string.IsNullOrWhiteSpace(k) && живые.Contains(k.Trim())).ToList();
+            // Правило про один пункт бессмысленно: взаимоисключать не с чем, а «не меньше N»
+            // превращается в обычное «обязательный пункт».
+            if (r.Keys.Count < 2) continue;
+            // Требовать отметок больше, чем есть пунктов, значит запретить подписание навсегда.
+            if (r.Kind == "minchecked") r.N = Math.Clamp(r.N <= 0 ? 1 : r.N, 1, r.Keys.Count);
+            правила.Add(r);
+        }
+
+        // Взаимоисключающие пункты, каждый из которых обязателен, это документ, который нельзя
+        // пройти вовсе: обязательность требует отметить оба, правило запрещает отметить оба.
+        // Оператор почти наверняка имел в виду «выбрать ровно один», тем более что обязательность
+        // у нового пункта включена по умолчанию. Так и делаем: снимаем личную обязательность и
+        // добавляем правило «не меньше одного» на тот же перечень.
+        foreach (var r in правила.Where(x => x.Kind == "exclusive").ToList())
+        {
+            var обязательные = (p.Checkboxes ?? new List<DocCheckbox>())
+                .Where(c => c is { Required: true } && !string.IsNullOrWhiteSpace(c.Key)
+                            && r.Keys.Any(k => string.Equals(k, c.Key.Trim(), StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+            if (обязательные.Count < 2) continue;
+            foreach (var c in обязательные) c.Required = false;
+            var естьМинимум = правила.Any(x => x.Kind == "minchecked"
+                && x.Keys.Count == r.Keys.Count
+                && !x.Keys.Except(r.Keys, StringComparer.OrdinalIgnoreCase).Any());
+            if (!естьМинимум) правила.Add(new CheckRule { Kind = "minchecked", Keys = new List<string>(r.Keys), N = 1 });
+        }
+        p.CheckRules = правила;
+    }
+
+    /// <param name="signedKeys">
+    /// Имена полей подписи, в которых клиент действительно расписался. Имя поля живёт в условиях
+    /// наравне с отметкой: «покажите это, когда клиент расписался». Без этих значений условие на
+    /// имя поля подписи не выполнялось никогда, а обратное держалось всегда.
+    /// </param>
+    /// <param name="scannedCodes">Имена полей сканирования и считанные в них коды, по той же причине.</param>
     public static void ApplyLiveConditions(DocumentConfig doc,
         IReadOnlyDictionary<string, bool> checkboxStates, IReadOnlyDictionary<string, string> groupSelections,
-        IReadOnlyDictionary<string, string>? inputValues = null)
+        IReadOnlyDictionary<string, string>? inputValues = null,
+        IReadOnlyCollection<string>? signedKeys = null,
+        IReadOnlyDictionary<string, string>? scannedCodes = null)
     {
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var kv in checkboxStates) values[kv.Key] = kv.Value ? "true" : "false";
         foreach (var kv in groupSelections) values[kv.Key] = kv.Value ?? "";
         foreach (var kv in inputValues ?? new Dictionary<string, string>()) values[kv.Key] = kv.Value ?? "";
+        // Порядок тот же, что на планшете: отметки, выбор, вписанное, подписи, коды.
+        foreach (var k in signedKeys ?? Array.Empty<string>())
+            if (!string.IsNullOrWhiteSpace(k)) values[k.Trim()] = "подписано";
+        foreach (var kv in scannedCodes ?? new Dictionary<string, string>())
+            if (!string.IsNullOrWhiteSpace(kv.Key)) values[kv.Key.Trim()] = kv.Value ?? "";
 
         var pages = new List<DocPage>();
         foreach (var p in doc.Pages ?? new List<DocPage>())
         {
-            if (p is null || !Matches(p.VisibleWhen, values)) continue;
+            if (p is null || !Matches(p.VisibleWhen, values, своиИмена: true)) continue;
             p.VisibleWhen = null;
             p.Blocks = (p.Blocks ?? new List<DocBlock>())
-                .Where(b => b is not null && Matches(b.VisibleWhen, values)).ToList();
+                .Where(b => b is not null && Matches(b.VisibleWhen, values, своиИмена: true)).ToList();
             foreach (var b in p.Blocks) b.VisibleWhen = null;
             p.Checkboxes = (p.Checkboxes ?? new List<DocCheckbox>())
-                .Where(c => c is not null && Matches(c.VisibleWhen, values)).ToList();
+                .Where(c => c is not null && Matches(c.VisibleWhen, values, своиИмена: true)).ToList();
             foreach (var c in p.Checkboxes) c.VisibleWhen = null;
             p.Groups = (p.Groups ?? new List<DocGroup>())
-                .Where(g => g is not null && Matches(g.VisibleWhen, values)).ToList();
+                .Where(g => g is not null && Matches(g.VisibleWhen, values, своиИмена: true)).ToList();
             foreach (var g in p.Groups) g.VisibleWhen = null;
             p.Signatures = (p.Signatures ?? new List<DocSignature>())
-                .Where(x => x is not null && Matches(x.VisibleWhen, values)).ToList();
+                .Where(x => x is not null && Matches(x.VisibleWhen, values, своиИмена: true)).ToList();
             foreach (var x in p.Signatures) x.VisibleWhen = null;
             p.Scans = (p.Scans ?? new List<DocScan>())
-                .Where(x => x is not null && Matches(x.VisibleWhen, values)).ToList();
+                .Where(x => x is not null && Matches(x.VisibleWhen, values, своиИмена: true)).ToList();
             foreach (var x in p.Scans) x.VisibleWhen = null;
+            // Поля ввода фильтруются наравне со всем прочим. Без этого скрытое условием поле
+            // оставалось в снимке: обязательное делало документ неподписываемым навсегда (клиент
+            // его не видел и не мог заполнить), а необязательное с предзаполнением печаталось в
+            // PDF, хотя на экране его не было.
+            p.Inputs = (p.Inputs ?? new List<DocInput>())
+                .Where(x => x is not null && Matches(x.VisibleWhen, values, своиИмена: true)).ToList();
+            foreach (var x in p.Inputs) x.VisibleWhen = null;
+            ПочиститьПравила(p);
             pages.Add(p);
         }
         doc.Pages = pages;
 
-        doc.SignBlocks = (doc.SignBlocks ?? new List<DocBlock>()).Where(b => b is not null && Matches(b.VisibleWhen, values)).ToList();
+        doc.SignBlocks = (doc.SignBlocks ?? new List<DocBlock>()).Where(b => b is not null && Matches(b.VisibleWhen, values, своиИмена: true)).ToList();
         foreach (var b in doc.SignBlocks) b.VisibleWhen = null;
-        doc.SignBlocksBelow = (doc.SignBlocksBelow ?? new List<DocBlock>()).Where(b => b is not null && Matches(b.VisibleWhen, values)).ToList();
+        doc.SignBlocksBelow = (doc.SignBlocksBelow ?? new List<DocBlock>()).Where(b => b is not null && Matches(b.VisibleWhen, values, своиИмена: true)).ToList();
         foreach (var b in doc.SignBlocksBelow) b.VisibleWhen = null;
     }
 
@@ -874,7 +965,17 @@ public static partial class DocumentTemplating
         foreach (var p in doc.Pages)
         {
             var kind = (p.Kind ?? "").Trim().ToLowerInvariant();
-            if (kind is not ("signature" or "scan")) { p.Kind = null; continue; }
+            if (kind is not ("signature" or "scan"))
+            {
+                p.Kind = null;
+                // Обычная страница проходит мимо приведения экранов, но правило «страницу, где
+                // клиент что-то подтверждает, из PDF не исключить» относится и к ней. Раньше
+                // проверка стояла ниже этого выхода, и документ, пришедший по API или через
+                // импорт с inPdf:false на странице согласий, печатался без самих согласий.
+                if (HasInteraction(p)) p.InPdf = true;
+                NormalizeOrder(p);
+                continue;
+            }
 
             var sigs = p.Signatures ?? new List<DocSignature>();
             var scans = p.Scans ?? new List<DocScan>();
@@ -891,7 +992,17 @@ public static partial class DocumentTemplating
                 p.Kind = p.Scans.Count > 0 ? "scan" : null;
             }
             // Присланные по API чекбоксы на такой экран не дописываются: там одно дело.
-            if (p.Kind is not null) { p.Checkboxes = new List<DocCheckbox>(); p.Groups = new List<DocGroup>(); p.IncludeDynamic = false; }
+            // Присланные по API чекбоксы, выбор и поля ввода на такой экран не попадают: там одно
+            // дело. Поля ввода тут раньше забыли, и переключение готовой страницы в «экран
+            // подписи» оставляло их рядом с полем подписи, вопреки соседнему пояснению.
+            if (p.Kind is not null)
+            {
+                p.Checkboxes = new List<DocCheckbox>();
+                p.Groups = new List<DocGroup>();
+                p.Inputs = new List<DocInput>();
+                p.CheckRules = new List<CheckRule>();
+                p.IncludeDynamic = false;
+            }
             // Страницу, на которой клиент что-то подтверждает, из PDF исключить нельзя. Признак
             // не отвергается с ошибкой, а возвращается на место: оператор мог поставить его
             // раньше, а взаимодействие добавить потом, и терять из-за этого весь документ незачем.
@@ -1099,11 +1210,18 @@ public static partial class DocumentTemplating
             var что = new List<string>();
             if ((p.Signatures?.Count ?? 0) > 0) что.Add("поле подписи");
             if ((p.Scans?.Count ?? 0) > 0) что.Add("сканирование");
+            // Обязательные пункты, выбор и поля на таком документе это обман: планшет честно не
+            // пустит клиента дальше, пока он их не заполнит, а записи не будет вовсе. Человека
+            // заставляют подтвердить то, что нигде не сохранится.
+            if ((p.Checkboxes ?? new List<DocCheckbox>()).Any(c => c is { Required: true })) что.Add("обязательный пункт");
+            if ((p.Groups ?? new List<DocGroup>()).Any(g => g is { Required: true })) что.Add("обязательный выбор");
+            if ((p.Inputs ?? new List<DocInput>()).Any(x => x is { Required: true })) что.Add("обязательное поле");
             if (что.Count > 0) мешают.Add("страница " + (i + 1) + " (" + string.Join(", ", что) + ")");
         }
         if (мешают.Count == 0) return null;
-        return "Информационный документ не подписывают, поэтому поля подписи и сканирования на нём " +
-               "работать не будут: их результат некуда положить. Уберите их и повторите. Мешают: " +
+        return "Информационный документ не подписывают и никуда не сохраняют, поэтому поля подписи, " +
+               "сканирование и обязательные пункты на нём работать не будут: их результат некуда " +
+               "положить, а клиента они дальше не пустят. Уберите их и повторите. Мешают: " +
                string.Join("; ", мешают) + ".";
     }
 
@@ -1126,6 +1244,7 @@ public static partial class DocumentTemplating
     {
         // Вид документа: всё, кроме известного, это обычный подписной.
         doc.Kind = IsInfo(doc) ? "info" : null;
+        СказатьПроСовпавшиеИмена(doc);
         // Anything may arrive here from an imported file or an API client, including nulls inside
         // lists. Strip them: a single null element used to be stored happily and then throw on
         // every later render, breaking signing for the whole fleet until someone edited the file.
@@ -1241,7 +1360,11 @@ public static partial class DocumentTemplating
             {
                 var inp = p.Inputs[i];
                 inp.Key = CleanKey(inp.Key);
-                if (inp.Key.Length == 0) inp.Key = "input" + (i + 1);
+                // Имя сквозное по всему документу и не повторяет занятые: счёт в пределах
+                // страницы давал «input1» на каждой, а значения полей на планшете живут по имени,
+                // и второе поле само подхватывало вписанное в первое.
+                if (inp.Key.Length == 0) inp.Key = СвободноеИмя("input", занятые);
+                занятые.Add(inp.Key);
                 inp.Label = Clamp(inp.Label);
                 inp.Placeholder = Clamp(inp.Placeholder);
                 inp.Value = Clamp(inp.Value);
@@ -1268,6 +1391,14 @@ public static partial class DocumentTemplating
                 };
             }).Where(r => r.Keys.Count >= 2).Take(10).ToList();
             if (p.CheckRules.Count == 0) p.CheckRules = new List<CheckRule>();
+            // Правила приводятся к тому же виду, что и при показе: пара взаимоисключающих
+            // пунктов, каждый из которых обязателен, превращается в «выбрать ровно один».
+            // Иначе документ был бы непроходим, а оператор об этом не узнал бы.
+            var былиОбязательные = (p.Checkboxes ?? new List<DocCheckbox>()).Count(c => c is { Required: true });
+            ПочиститьПравила(p);
+            var сталиОбязательные = (p.Checkboxes ?? new List<DocCheckbox>()).Count(c => c is { Required: true });
+            if (сталиОбязательные < былиОбязательные)
+                Срезано("взаимоисключающие пункты, каждый из которых обязателен, пройти нельзя: правило приведено к «выбрать ровно один»");
 
             NormalizeOrder(p);
         }
@@ -1630,9 +1761,15 @@ public static partial class DocumentTemplating
             CleanGroup(alt);
             // Вложенности нет: «или» плоское. Иначе внутри набора оказался бы ещё один список
             // наборов, а редактор такое дерево показать не умеет.
+            if (alt.Or is { Count: > 0 })
+                Опасно("вложенное «или» внутри набора условий на «" + (alt.Field ?? "") + "»");
             alt.Or = null;
-            if (alt.Field.Length > 0) alts.Add(alt);
-            if (alts.Count >= MaxOrGroups) break;
+            if ((alt.Field ?? "").Length > 0) alts.Add(alt);
+            if (alts.Count >= MaxOrGroups)
+            {
+                Опасно("наборов в «или» больше " + MaxOrGroups);
+                break;
+            }
         }
         c.Or = alts.Count > 0 ? alts : null;
         // Условие без первого набора, но с остальными: первый из оставшихся становится основным,
@@ -1646,6 +1783,87 @@ public static partial class DocumentTemplating
     }
 
     /// <summary>Привести в порядок один набор: его собственную часть и присоединённые через «и».</summary>
+    /// <summary>
+    /// Что было выброшено при последнем разборе документа. Условия, вложенные глубже одного
+    /// уровня, редактор показать не умеет, и они снимаются. Само снятие намеренное, плохо было
+    /// молчание: из «А и (Б и В)» оставалось «А и Б», условие расширялось, и содержимое
+    /// показывалось там, где его прятали, а ответ на сохранение был обычным «ок».
+    /// </summary>
+    [ThreadStatic] private static List<string>? _срезано;
+    [ThreadStatic] private static List<string>? _опасно;
+
+    /// <summary>Собрать список того, что Sanitize выбросил из документа. Пусто означает «всё сохранено».</summary>
+    public static List<string> SanitizeWarnings(DocumentConfig doc)
+    {
+        _срезано = new List<string>();
+        try { Sanitize(doc); return _срезано; }
+        finally { _срезано = null; }
+    }
+
+    /// <summary>
+    /// Почему документ нельзя сохранить как есть. Речь только о том, что молча меняет его смысл:
+    /// условие, вложенное глубже, чем разбор умеет хранить, при сохранении срезается, и из
+    /// «А и (Б и В)» остаётся «А и Б». Условие становится шире задуманного, и содержимое
+    /// показывается там, где его прятали. Отказать честнее, чем сохранить не то, что задал
+    /// оператор. Сам документ не трогается: проверка идёт по копии.
+    /// </summary>
+    public static string? WhyNotSavable(DocumentConfig doc)
+    {
+        DocumentConfig? копия;
+        try { копия = JsonSerializer.Deserialize<DocumentConfig>(JsonSerializer.Serialize(doc)); }
+        catch { return null; }   // не разобрали копию: это не повод отказывать в сохранении
+        if (копия is null) return null;
+        _опасно = new List<string>();
+        try
+        {
+            Sanitize(копия);
+            if (_опасно.Count == 0) return null;
+            return "Условие сложнее, чем документ умеет хранить, и при сохранении оно изменилось бы само: "
+                   + "содержимое показалось бы там, где вы его прятали. Упростите условие. Мешает: "
+                   + string.Join("; ", _опасно) + ".";
+        }
+        finally { _опасно = null; }
+    }
+
+    /// <summary>То, из-за чего сохранять нельзя вовсе: смысл документа изменился бы молча.</summary>
+    private static void Опасно(string что)
+    {
+        if (_опасно is null || _опасно.Count >= 10) return;
+        if (!_опасно.Contains(что)) _опасно.Add(что);
+    }
+
+    /// <summary>
+    /// Имя элемента документа, совпавшее с именем тега заказа, молча забирает условие себе:
+    /// решать его будет отметка или подпись, а не то, что прислала внешняя система. Оператор
+    /// написал условие про заказ и получил условие про галочку, и узнать об этом было неоткуда.
+    /// </summary>
+    private static void СказатьПроСовпавшиеИмена(DocumentConfig doc)
+    {
+        if (_срезано is null) return;
+        var теги = new HashSet<string>(KnownFields, StringComparer.OrdinalIgnoreCase);
+        void Проверить(string? имя, string что)
+        {
+            var k = (имя ?? "").Trim();
+            if (k.Length > 0 && теги.Contains(k))
+                Срезано("имя «" + k + "» у элемента «" + что + "» совпадает с тегом API: условие на это имя будет решать элемент документа, а не присланное значение");
+        }
+        foreach (var p in doc.Pages ?? new List<DocPage>())
+        {
+            if (p is null) continue;
+            foreach (var c in p.Checkboxes ?? new List<DocCheckbox>()) Проверить(c?.Key, "пункт");
+            foreach (var g in p.Groups ?? new List<DocGroup>()) Проверить(g?.Key, "выбор");
+            foreach (var x in p.Inputs ?? new List<DocInput>()) Проверить(x?.Key, "поле ввода");
+            foreach (var x in p.Signatures ?? new List<DocSignature>()) Проверить(x?.Key, "поле подписи");
+            foreach (var x in p.Scans ?? new List<DocScan>()) Проверить(x?.Key, "поле сканирования");
+        }
+    }
+
+    private static void Срезано(string что)
+    {
+        if (_срезано is null || _срезано.Count >= 20) return;
+        if (!_срезано.Contains(что)) _срезано.Add(что);
+    }
+
     private static void CleanGroup(VisibleWhen c)
     {
         CleanOnePart(c);
@@ -1658,10 +1876,18 @@ public static partial class DocumentTemplating
             // Вложенности нет: «и» плоское, и разрешать её значило бы хранить дерево, которое
             // редактор всё равно не умеет показать. «Или» внутри присоединённой части снимается
             // по той же причине: иначе набор наборов протащили бы внутрь набора.
+            if (part.And is { Count: > 0 })
+                Опасно("вложенное «и» внутри условия на «" + (part.Field ?? "") + "»");
+            if (part.Or is { Count: > 0 })
+                Опасно("вложенное «или» внутри условия на «" + (part.Field ?? "") + "»");
             part.And = null;
             part.Or = null;
-            if (part.Field.Length > 0) extras.Add(part);
-            if (extras.Count >= MaxAndParts) break;
+            if ((part.Field ?? "").Length > 0) extras.Add(part);
+            if (extras.Count >= MaxAndParts)
+            {
+                Опасно("частей в «и» больше " + MaxAndParts);
+                break;
+            }
         }
         c.And = extras.Count > 0 ? extras : null;
         // Условие без первой части, но с присоединёнными: первая из них становится основной,
@@ -1732,6 +1958,12 @@ public static partial class DocumentTemplating
             {
                 if (b is null) continue;
                 foreach (var r in b.Runs ?? new List<TextRun>()) { if (r is not null) Scan(r.Text); }
+                // Ячейки таблицы тоже подставляются, значит и теги в них надо видеть. Без этого
+                // тег из таблицы не попадал ни в предупреждение «не прислали значение», ни в
+                // список использованных полей: в документе он подставлен, а в разделе «Данные
+                // подписанта» его нет.
+                foreach (var row in b.Table?.Rows ?? new List<List<string>>())
+                    foreach (var cell in row ?? new List<string>()) Scan(cell);
             }
             foreach (var c in p.Checkboxes ?? new List<DocCheckbox>()) { if (c is not null) Scan(c.Label); }
             foreach (var g in p.Groups ?? new List<DocGroup>())
@@ -1742,6 +1974,7 @@ public static partial class DocumentTemplating
             }
             foreach (var x in p.Signatures ?? new List<DocSignature>()) { if (x is not null) Scan(x.Label); }
             foreach (var x in p.Scans ?? new List<DocScan>()) { if (x is not null) Scan(x.Label); }
+            foreach (var x in p.Inputs ?? new List<DocInput>()) { if (x is not null) Scan(x.Label); }
         }
         foreach (var b in (doc.SignBlocks ?? new List<DocBlock>()).Concat(doc.SignBlocksBelow ?? new List<DocBlock>()))
         {
@@ -1828,6 +2061,9 @@ public static partial class DocumentTemplating
             foreach (var g in p.Groups ?? new List<DocGroup>()) yield return g?.VisibleWhen;
             foreach (var x in p.Signatures ?? new List<DocSignature>()) yield return x?.VisibleWhen;
             foreach (var x in p.Scans ?? new List<DocScan>()) yield return x?.VisibleWhen;
+            // Условия полей ввода тут забыли, и битая дата в условии на поле молча гасила его,
+            // не давая внешней системе ни одного объяснения.
+            foreach (var x in p.Inputs ?? new List<DocInput>()) yield return x?.VisibleWhen;
         }
         foreach (var b in doc.SignBlocks ?? new List<DocBlock>()) yield return b?.VisibleWhen;
         foreach (var b in doc.SignBlocksBelow ?? new List<DocBlock>()) yield return b?.VisibleWhen;

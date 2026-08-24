@@ -56,9 +56,9 @@ public class AlertMonitor : BackgroundService
                 // Повреждённый файл данных был отложен в сторону вместо того, чтобы его затёрло
                 // пустым значением. Оператор должен узнать об этом сразу: часть настроек в этот
                 // момент выглядит так, будто её никогда не было.
-                ReportCorruptFiles();
+                var повреждённые = ReportCorruptFiles();
 
-                var changed = await Check();
+                var changed = await Check() || повреждённые;
                 if (changed) await _coord.NotifyAdminsAlertsAsync();
 
                 // Polling the tablets means one network round trip each, and an unreachable tablet
@@ -142,11 +142,15 @@ public class AlertMonitor : BackgroundService
             if (_alerts.Raise(id, "offline", "error",
                     "Планшет не на связи: " + d.Name,
                     "Нет связи " + Describe(away) + ". Последний раз на связи " + d.LastSeenUtc.ToLocalTime().ToString("dd.MM.yyyy HH:mm") + ".",
-                    d.LastSeenUtc, d.Id, d.Name))
+                    d.LastSeenUtc, out var впервые, d.Id, d.Name))
             {
                 changed = true;
-                _log.Add("warn", "alerts", "Планшет не на связи дольше " + settings.OfflineMinutes + " мин: " + d.Name,
-                    null, d.Id, d.Name);
+                // В журнал только о самой пропаже, а не о каждом обновлении её текста: текст
+                // содержит «Нет связи N мин» и меняется ежеминутно, и выключенный на ночь
+                // планшет давал шесть сотен одинаковых строк, вытесняя из журнала всё остальное.
+                if (впервые)
+                    _log.Add("warn", "alerts", "Планшет не на связи дольше " + settings.OfflineMinutes + " мин: " + d.Name,
+                        null, d.Id, d.Name);
             }
         }
 
@@ -180,12 +184,14 @@ public class AlertMonitor : BackgroundService
             _healthCache.Clear();
             return ClearTabletAlerts();
         }
-        if (!alertsOn) ClearTabletAlerts();
+        // Снятые тревоги надо и показать снятыми: раньше значение отбрасывалось, и в открытой
+        // админке колокольчик держал прежний список до перезагрузки страницы.
+        var снято = !alertsOn && ClearTabletAlerts();
 
-        if (DateTime.UtcNow - _lastHealthUtc < HealthInterval) return false;
+        if (DateTime.UtcNow - _lastHealthUtc < HealthInterval) return снято;
         _lastHealthUtc = DateTime.UtcNow;
 
-        var changed = false;
+        var changed = снято;
         var online = _tracker.OnlineDeviceIds();
         var wantedBattery = new HashSet<string>(StringComparer.Ordinal);
         var wantedStorage = new HashSet<string>(StringComparer.Ordinal);
@@ -225,18 +231,23 @@ public class AlertMonitor : BackgroundService
             {
                 _healthCache.ClearHealAttempts(d.Id);
             }
-            else if (healingAllowed && IsAwayLongEnough(d, settings))
+            else if (IsAwayLongEnough(d, settings))
             {
-                var healed = await TryHeal(d, settings, cancel);
+                // Сам факт зависания сообщается независимо от автолечения. Раньше тревога жила
+                // только внутри ветки лечения: оператор выключал автолечение, чтобы прекратить
+                // перезагрузки, и вместе с ним переставал видеть, что планшет вообще завис.
+                var healed = healingAllowed && await TryHeal(d, settings, cancel);
                 if (alertsOn)
                 {
                     var id = "stuck:" + d.Id;
                     wantedStuck.Add(id);
                     // Say what is actually happening: after several attempts we stop trying, and
                     // then the operator is the only one who can fix it.
-                    var detail = healed
-                        ? "Планшет отвечает по сети, но не выходит на связь с сервисом. Выполняется автолечение."
-                        : "Планшет отвечает по сети, но не выходит на связь с сервисом. Автолечение не помогло, нужен осмотр планшета.";
+                    var detail = !healingAllowed
+                        ? "Планшет отвечает по сети, но не выходит на связь с сервисом. Автолечение выключено, нужен осмотр планшета."
+                        : healed
+                            ? "Планшет отвечает по сети, но не выходит на связь с сервисом. Выполняется автолечение."
+                            : "Планшет отвечает по сети, но не выходит на связь с сервисом. Автолечение не помогло, нужен осмотр планшета.";
                     if (_alerts.Raise(id, "stuck", healed ? "warn" : "error",
                             "Планшет завис: " + d.Name, detail, DateTime.UtcNow, d.Id, d.Name))
                         changed = true;
@@ -285,16 +296,18 @@ public class AlertMonitor : BackgroundService
     }
 
     /// <summary>Рассказать оператору о повреждённых файлах данных, отложенных хранилищем.</summary>
-    private void ReportCorruptFiles()
+    private bool ReportCorruptFiles()
     {
+        var изменилось = false;
         while (_storage.CorruptFiles.TryDequeue(out var item))
         {
             var text = "Файл данных «" + item.File + "» повреждён и отложен как «" + item.Backup +
                        "» (" + item.Reason + "). Его содержимое сейчас пустое. " +
                        "Файл сохранён в каталоге данных, из него можно восстановить записи.";
-            _alerts.Raise("corrupt:" + item.File, "storage", "error",
+            изменилось |= _alerts.Raise("corrupt:" + item.File, "storage", "error",
                 "Повреждён файл данных: " + item.File, text, DateTime.UtcNow);
         }
+        return изменилось;
     }
 
     private bool ClearTabletAlerts()
@@ -354,6 +367,18 @@ public class AlertMonitor : BackgroundService
     {
         var attempt = _healthCache.HealAttempts(device.Id);
         if (attempt >= MaxHealAttempts) return false;
+
+        // На планшете идёт подписание: лечить нельзя. Перезапуск страницы стирает всё, что клиент
+        // отметил и вписал, и возвращает его на первую страницу. В расписании такая проверка есть
+        // давно, здесь её забыли. Планшет подождёт: он всё равно уже несколько минут не на связи,
+        // а испортить приём человеку хуже, чем полечить его на минуту позже.
+        var состояние = _storage.ResolveState(device.Id);
+        if (состояние.Mode == "document")
+        {
+            _log.Add("info", "control",
+                "Автолечение отложено: на планшете " + device.Name + " идёт подписание.", null, device.Id, device.Name);
+            return true;
+        }
 
         // One attempt per interval, so a tablet that is restarting is not hit again and again.
         // Nothing was tried on this pass, but we have not given up either.

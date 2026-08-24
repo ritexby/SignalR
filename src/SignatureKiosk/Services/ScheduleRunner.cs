@@ -105,9 +105,37 @@ public class ScheduleRunner : BackgroundService
             if (!TryScheduledToday(rule.Time, now, out var due)) continue;
             var late = now - due;
             if (late < TimeSpan.Zero) continue;                // ещё рано
-            if (late > (action.CatchUp ? CatchUpWindow : NormalWindow)) continue;
+            if (late > (action.CatchUp ? CatchUpWindow : NormalWindow))
+            {
+                // Окно закрылось: правило сегодня уже не выполнится. Молчать об этом нельзя,
+                // иначе «Перезагрузить в 07:05» не срабатывает ни разу и узнать об этом неоткуда.
+                _storage.MarkScheduleRun(rule.Id, today, "Пропущено: время вышло");
+                _log.Add("warn", "schedule",
+                    "Расписание «" + action.Title + "» (" + rule.Time + ") сегодня пропущено: с назначенного времени прошло " +
+                    (int)late.TotalMinutes + " мин, это больше допустимого окна. Служба была недоступна или предыдущие правила заняли время.");
+                continue;
+            }
 
-            var result = await Execute(rule, action, cancel);
+            string result;
+            try
+            {
+                result = await Execute(rule, action, cancel);
+            }
+            catch (OperationCanceledException) when (cancel.IsCancellationRequested)
+            {
+                throw;   // служба останавливается: это не сбой правила
+            }
+            catch (Exception ex)
+            {
+                // Сбой одного правила не должен ронять весь проход: раньше исключение внутри
+                // выполнения оставляло правило непомеченным, оно повторялось каждые тридцать
+                // секунд весь свой догон, а правила ниже по списку не выполнялись вовсе.
+                result = "Не выполнено: " + ex.Message;
+                _storage.MarkScheduleRun(rule.Id, today, result);
+                _log.Add("error", "schedule",
+                    "Расписание «" + action.Title + "» (" + rule.Time + ") не выполнено: " + ex.Message, ex.ToString());
+                continue;
+            }
             _storage.MarkScheduleRun(rule.Id, today, result);
             _log.Add("info", "schedule",
                 "Расписание «" + action.Title + "» (" + rule.Time + "): " + result +

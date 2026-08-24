@@ -130,10 +130,21 @@ public class PdfService
             w.Gap(12);
         }
 
-        // Вписанное самим клиентом. Отдельным разделом от данных подписанта: одно прислала
-        // внешняя система, другое человек вписал своей рукой, и в подписанном документе это
-        // разные по весу вещи.
-        var вписано = (rec.Inputs ?? new List<SubmittedInput>()).Where(x => x is not null && !string.IsNullOrWhiteSpace(x.Value)).ToList();
+        // Вписанное самим клиентом печатается там, где стояло на экране, рядом с текстом, к
+        // которому относится. Здесь, в начале, остаётся только то, чему места в тексте не
+        // нашлось: поле со страницы, исключённой из PDF. Раньше сюда шло всё подряд, и каждое
+        // заполненное поле стояло в бумаге дважды. С отметками так не делают: отдельный список в
+        // конце убрали именно как повтор.
+        var вМесте = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p2 in doc.Pages ?? new List<DocPage>())
+        {
+            if (p2 is null || !p2.InPdf) continue;
+            foreach (var inp in p2.Inputs ?? new List<DocInput>())
+                if (inp is not null && !string.IsNullOrWhiteSpace(inp.Key)) вМесте.Add(inp.Key.Trim());
+        }
+        var вписано = (rec.Inputs ?? new List<SubmittedInput>())
+            .Where(x => x is not null && !string.IsNullOrWhiteSpace(x.Value) && !вМесте.Contains((x.Key ?? "").Trim()))
+            .ToList();
         if (вписано.Count > 0)
         {
             w.Line("Заполнено клиентом:", w.H2);
@@ -169,7 +180,11 @@ public class PdfService
                 if (block.List is "bullet" or "number" && block.Runs is { Count: > 0 })
                 {
                     w.ClearWrap();
-                    w.ListBlock(block.Runs, block.List == "number", block);
+                    // Плашка, рамка и отступ у списка такие же, как у обычного текста: на планшете
+                    // они рисуются, а тут вызов шёл мимо Boxed, и список на жёлтой плашке в
+                    // красной рамке печатался голым.
+                    var список = block;
+                    w.Boxed(список, () => w.ListBlock(список.Runs, список.List == "number", список));
                     w.Gap(8);
                     continue;
                 }
@@ -235,7 +250,7 @@ public class PdfService
                 {
                     // Плашка и рамка рисуются вокруг уже готового текста: высота известна только
                     // после вёрстки, поэтому сначала считается она, потом кладётся фон под низ.
-                    w.Boxed(block, () => w.Rich(block.Runs, isHeading: false, block.Align));
+                    w.Boxed(block, () => w.Rich(block.Runs, isHeading: false, block.Align, block.LineHeight));
                     w.Gap(8);
                 }
             }
@@ -342,16 +357,35 @@ public class PdfService
                     // Подпись, поставленная внутри страницы, печатается там же, где стояла на
                     // экране: иначе по документу нельзя понять, что именно ею подтверждено.
                     var sig = page.Signatures[index];
-                    if (placed.Contains((sig.Key ?? "").Trim())) continue;
+                    // Поле, которому оператор задал место на листе, в потоке не печатается: оно
+                    // отпечатается там, куда его поставили. Но только если подпись есть. Если
+                    // клиент в нём не расписался, ставить на лист нечего, и раньше от такого поля
+                    // в бумаге не оставалось ни следа: по документу не видно, что подписи ждали.
+                    // В режиме раскладки настоящих подписей нет вовсе, поэтому там размещённое
+                    // поле пропускается как раньше: иначе макет показывал бы лишний блок.
+                    if (placed.Contains((sig.Key ?? "").Trim()) && (capture is not null || PageSignature(sig.Key) is not null)) continue;
                     w.ClearWrap();
                     w.Gap(6);
                     w.SignatureBlock(sig.Label, PageSignature(sig.Key), "Подпись в этом поле не поставлена.",
                         sig.Key ?? "", sig.Width, sig.Height, sig.Align);
                     continue;
                 }
-                // Отсканированный код в PDF не печатается: это служебные данные заказа, а не то,
-                // что человек подписывает. В записи подписи он есть, и внешняя система его видит.
-                if (kind == 4) continue;
+                if (kind == 4)
+                {
+                    // Отсканированный код печатается там, где стояло поле: клиент видел его на
+                    // экране рядом с тем текстом, под которым расписался, и подписанный документ
+                    // должен показывать то же самое. Раньше код в бумагу не попадал вовсе, и по
+                    // ней нельзя было понять, какую пробирку человек поднёс к камере.
+                    var sc = page.Scans[index];
+                    w.ClearWrap();
+                    var код = (rec.Scans ?? new List<SubmittedScan>())
+                        .FirstOrDefault(x => x is not null && string.Equals(x.Key, sc.Key, StringComparison.OrdinalIgnoreCase))?.Code;
+                    var надпись = string.IsNullOrWhiteSpace(sc.Label) ? sc.Key : sc.Label;
+                    w.Rich(MarkedRuns("", new List<TextRun> { new() { Text = надпись + ": " } }, sc.Required)
+                        .Concat(new[] { new TextRun { Text = string.IsNullOrWhiteSpace(код) ? "код не отсканирован" : код!, Bold = true } })
+                        .ToList(), isHeading: false);
+                    continue;
+                }
                 if (kind == 5)
                 {
                     // Поле ввода печатается там, где стояло на экране: вписанное значение
@@ -456,8 +490,10 @@ public class PdfService
         if (capture is null) w.FlushBoxes();
         if (capture is null)
             w.Footer(doc.PdfFooterTitle ? doc.Title : null,
-                doc.PdfFooterRecordId || doc.PdfFooterBarcode ? rec.Id : null,
-                doc.PdfPageNumbers, doc.PdfFooterBarcode);
+                // Номер нужен обоим: и строке «Запись ...», и штрихкоду. Печатать ли саму строку,
+                // решает отдельный признак: раньше включённый штрихкод дописывал её сам.
+                rec.Id,
+                doc.PdfPageNumbers, doc.PdfFooterBarcode, doc.PdfFooterRecordId);
 
         return new Built { Flow = w, Signature = img, Images = keepImages, Stream = ms, Streams = keepStreams };
     }
@@ -570,9 +606,14 @@ public class PdfService
         /// Штрихкод это Code 39 из номера записи: рисуется полосками прямо здесь, потому что
         /// заводить ради него библиотеку значит тянуть зависимость ради десяти строк.
         /// </summary>
-        public void Footer(string? title, string? recordId, bool numbers, bool barcode)
+        /// <param name="recordId">Номер записи. Нужен и строке «Запись ...», и штрихкоду.</param>
+        /// <param name="showRecordId">Печатать ли саму строку «Запись ...». Это отдельный признак
+        /// от штрихкода, и в админке они тоже отдельные: включённый штрихкод не должен сам
+        /// дописывать текстовую строку.</param>
+        public void Footer(string? title, string? recordId, bool numbers, bool barcode, bool showRecordId)
         {
-            if (!numbers && string.IsNullOrEmpty(title) && string.IsNullOrEmpty(recordId) && !barcode) return;
+            var строкаЗаписи = showRecordId && !string.IsNullOrEmpty(recordId);
+            if (!numbers && string.IsNullOrEmpty(title) && !строкаЗаписи && !barcode) return;
             _gfx?.Dispose();
             _gfx = null!;
             var всего = _doc.PageCount;
@@ -583,7 +624,7 @@ public class PdfService
                 var y = page.Height.Point - Margin + 14;
                 var слева = new List<string>();
                 if (!string.IsNullOrEmpty(title)) слева.Add(title!);
-                if (!string.IsNullOrEmpty(recordId)) слева.Add("Запись " + recordId);
+                if (строкаЗаписи) слева.Add("Запись " + recordId);
                 if (слева.Count > 0)
                     g.DrawString(string.Join("     ", слева), Small, ТусклыйТекст, new XPoint(Margin, y));
                 if (numbers)
@@ -620,9 +661,11 @@ public class PdfService
                 "000101010", "010010100"
             };
             var знаки = "*" + new string(text.ToUpperInvariant().Where(c => алфавит.IndexOf(c) >= 0).ToArray()) + "*";
-            // Ширина одного модуля: узкая полоса. Широкая втрое, между знаками пробел в один
-            // модуль, значит на знак приходится 13 модулей плюс разделитель.
-            var модулей = знаки.Length * 13.0;
+            // Ширина одного модуля: узкая полоса. В знаке девять элементов: три широких по три
+            // модуля и шесть узких по одному, всего пятнадцать, плюс модуль межзнакового
+            // пробела, итого шестнадцать. Стояло тринадцать, и полоса выходила примерно в 1,23
+            // раза шире отведённого места: в колонтитул она по замыслу не помещалась.
+            var модулей = знаки.Length * 16.0;
             var m = Math.Min(1.2, maxW / модулей);
             if (m <= 0.1) return;
             var cx = x;
@@ -690,7 +733,12 @@ public class PdfService
         }
 
         /// <summary>Single line (no wrapping), for headings / meta.</summary>
-        public void Line(string text, XFont font) => Draw(text, font);
+        /// <summary>
+        /// Строка текста с переносом. Раньше здесь была одна строка без переноса, и заголовок
+        /// документа длиннее полусотни знаков уезжал за правое поле и обрезался краем листа.
+        /// Ширина текста на A4 это 495 точек, то есть примерно 50 знаков заголовком в 18 пунктов.
+        /// </summary>
+        public void Line(string text, XFont font) => Paragraph(text ?? "", font);
 
         /// <summary>Wrapped multi-paragraph body text.</summary>
         public void Paragraph(string text, XFont font)
@@ -763,6 +811,24 @@ public class PdfService
             _ => heading ? 14 : 11
         });
 
+        /// <summary>
+        /// Размер куска текста. Свой размер в точках, если он задан, иначе ступень. Точки те же,
+        /// что в редакторе: на бумаге получается ровно то, что оператор задал, с поправкой на
+        /// общий масштаб документа.
+        /// </summary>
+        private double RunSize(TextRun run, bool heading) =>
+            run.SizePt > 0 ? _scale * Math.Clamp(run.SizePt, 8, 40) : SizePt(run.Size, heading);
+
+        /// <summary>Цвет выделения маркером или null, если выделения нет.</summary>
+        private static XBrush? MarkBrush(string? mark)
+        {
+            if (string.IsNullOrEmpty(mark) || mark.Length != 7 || mark[0] != '#') return null;
+            if (!int.TryParse(mark.AsSpan(1, 2), System.Globalization.NumberStyles.HexNumber, null, out var r)) return null;
+            if (!int.TryParse(mark.AsSpan(3, 2), System.Globalization.NumberStyles.HexNumber, null, out var g)) return null;
+            if (!int.TryParse(mark.AsSpan(5, 2), System.Globalization.NumberStyles.HexNumber, null, out var b)) return null;
+            return new XSolidBrush(XColor.FromArgb(r, g, b));
+        }
+
         private static XBrush BrushFor(string? color)
         {
             if (!string.IsNullOrEmpty(color) && color.Length == 7 && color[0] == '#'
@@ -775,8 +841,12 @@ public class PdfService
 
         /// <summary>Render a list of styled runs with word-wrap and pagination. Italic is simulated with
         /// a shear, since no proportional italic face is embedded, so this stays a single-font document.</summary>
-        public void Rich(List<TextRun> runs, bool isHeading, string? align = null)
+        public void Rich(List<TextRun> runs, bool isHeading, string? align = null, int lineHeightPct = 0)
         {
+            // Межстрочный интервал блока в процентах. На планшете он применяется, в бумаге его
+            // не передавали вовсе, и абзац с интервалом 200 % на экране был просторным, а на
+            // листе обычным.
+            var межстрочный = lineHeightPct > 0 ? Math.Clamp(lineHeightPct, 100, 250) / 100.0 : 1.2;
             // Заголовок в самом низу листа отрывается от того, что он озаглавливает. Если под ним
             // не осталось места хотя бы на три строки текста, он уезжает на следующую страницу
             // вместе со своим разделом.
@@ -788,7 +858,7 @@ public class PdfService
             // gap: перед словом стоит пробел. По этим пробелам растягивается строка при
             // выравнивании по обоим краям, поэтому куски разорванного слова, склеенные без
             // пробела, растягиванием не разъезжаются.
-            var pending = new List<(string text, XFont font, XBrush brush, bool italic, double x, double w, bool gap)>();
+            var pending = new List<(string text, XFont font, XBrush brush, bool italic, double x, double w, bool gap, XBrush? mark)>();
             double x = LineLeft, lineH = 0;
             var mode = (align ?? "").Trim().ToLowerInvariant();
 
@@ -797,7 +867,7 @@ public class PdfService
             void Flush(bool lastLine)
             {
                 if (pending.Count == 0) return;
-                double h = lineH * 1.2;
+                double h = lineH * межстрочный;
                 Ensure(h);
                 // Строка могла уехать на новую страницу изнутри обтекания: картинка осталась на
                 // прошлой, и её отступ здесь уже ничего не обтекает. Слова собраны со старым
@@ -824,6 +894,20 @@ public class PdfService
                     }
                 }
                 var passed = 0;
+                // Выделение маркером рисуется до слов и по всей строке сразу: иначе полоса
+                // ложилась бы поверх букв и закрывала их.
+                var прошло = 0;
+                foreach (var t in pending)
+                {
+                    if (t.gap) прошло++;
+                    if (t.mark is null) continue;
+                    var мx = t.x + shift + stretch * прошло;
+                    // Полоса чуть шире слова и захватывает пробел перед ним: иначе выделенная
+                    // фраза выглядит как набор отдельных прямоугольников.
+                    var слева = t.gap ? мx - _gfx.MeasureString(" ", t.font).Width : мx;
+                    _gfx.DrawRectangle(t.mark, слева, baseline - t.font.GetHeight() * 0.85,
+                        (мx - слева) + t.w, t.font.GetHeight() * 1.05);
+                }
                 foreach (var t in pending)
                 {
                     if (t.gap) passed++;
@@ -835,8 +919,9 @@ public class PdfService
 
             foreach (var run in runs ?? new List<TextRun>())
             {
-                var font = FontFor(SizePt(run.Size, isHeading), isHeading || run.Bold);
+                var font = FontFor(RunSize(run, isHeading), isHeading || run.Bold);
                 var brush = BrushFor(run.Color);
+                var mark = MarkBrush(run.Mark);
                 double space = _gfx.MeasureString(" ", font).Width;
                 var segments = (run.Text ?? "").Replace("\r", "").Split('\n');
                 for (int si = 0; si < segments.Length; si++)
@@ -861,7 +946,7 @@ public class PdfService
                             double sp = pending.Count > 0 && first ? space : 0;
                             if (pending.Count > 0 && x + sp + ww > LineRight) { Flush(false); sp = 0; }
                             x += sp;
-                            pending.Add((word, font, brush, run.Italic, x, ww, sp > 0));
+                            pending.Add((word, font, brush, run.Italic, x, ww, sp > 0, mark));
                             x += ww;
                             lineH = Math.Max(lineH, font.GetHeight());
                             first = false;

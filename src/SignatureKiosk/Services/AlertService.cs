@@ -19,12 +19,24 @@ public class AlertService
     /// operator's view needs updating (newly raised, or its text changed).</summary>
     public bool Raise(string id, string kind, string severity, string title, string detail,
         DateTime sinceUtc, string? deviceId = null, string? deviceName = null)
+        => Raise(id, kind, severity, title, detail, sinceUtc, out _, deviceId, deviceName);
+
+    /// <summary>
+    /// То же самое, но заодно говорит, впервые ли поднята эта тревога. Разница важна для журнала:
+    /// текст тревоги про планшет не на связи содержит «Нет связи N мин» и меняется каждую минуту,
+    /// поэтому запись «по любому изменению» давала строку в минуту на каждый выключенный планшет
+    /// и за ночь вытесняла из журнала всё остальное.
+    /// </summary>
+    public bool Raise(string id, string kind, string severity, string title, string detail,
+        DateTime sinceUtc, out bool впервые, string? deviceId = null, string? deviceName = null)
     {
         var changed = false;
+        var новая = false;
         _active.AddOrUpdate(id,
             _ =>
             {
                 changed = true;
+                новая = true;
                 return new Alert
                 {
                     Id = id, Kind = kind, Severity = severity, Title = title, Detail = detail,
@@ -55,6 +67,7 @@ public class AlertService
             foreach (var old in _active.Values.OrderBy(a => a.UpdatedUtc).Take(_active.Count - MaxActive).ToList())
                 _active.TryRemove(old.Id, out _);
 
+        впервые = новая;
         return changed;
     }
 

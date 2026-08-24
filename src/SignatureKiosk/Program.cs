@@ -86,6 +86,21 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    // Отказ с пустым телом это единственный ответ во всём API без объяснения: в журнале
+    // интегратора он выглядит как «пустой ответ от киоска», и показать оператору нечего.
+    options.OnRejected = async (ctx, cancel) =>
+    {
+        ctx.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        ctx.HttpContext.Response.ContentType = "application/json; charset=utf-8";
+        var через = ctx.Lease.TryGetMetadata(System.Threading.RateLimiting.MetadataName.RetryAfter, out var span)
+            ? (int)Math.Ceiling(span.TotalSeconds) : 60;
+        ctx.HttpContext.Response.Headers.RetryAfter = через.ToString();
+        await ctx.HttpContext.Response.WriteAsJsonAsync(new
+        {
+            error = "Слишком много запросов с этого адреса. Повторите через " + через + " с.",
+            retryAfterSec = через
+        }, cancel);
+    };
 
     static Func<HttpContext, RateLimitPartition<string>> Fixed(int permitPerMinute) =>
         httpContext => RateLimitPartition.GetFixedWindowLimiter(
@@ -292,15 +307,28 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
     if ((sub.Scans?.Count ?? 0) > 40 || (sub.Scans ?? new List<SubmittedScan>())
             .Any(x => x is null || (x.Code?.Length ?? 0) > StorageService.MaxScanCodeLength))
         return Results.BadRequest(new { error = "invalid scans" });
+    // Выбор в группах и вписанное клиентом проверяются так же, как всё остальное. Раньше эти два
+    // списка уходили в запись как есть: null внутри ронял чтение списка подписей, а длина не была
+    // ограничена ничем, кроме размера тела запроса, и в meta.json и в PDF попадало что угодно.
+    if ((sub.Groups?.Count ?? 0) > 200 || (sub.Groups ?? new List<SubmittedGroup>())
+            .Any(x => x is null || (x.Title?.Length ?? 0) > 2000 || (x.Selected?.Length ?? 0) > 2000))
+        return Results.BadRequest(new { error = "invalid groups" });
+    if ((sub.Inputs?.Count ?? 0) > 200 || (sub.Inputs ?? new List<SubmittedInput>())
+            .Any(x => x is null || (x.Label?.Length ?? 0) > 2000 || (x.Value?.Length ?? 0) > 2000))
+        return Results.BadRequest(new { error = "invalid inputs" });
 
     var deviceId = ctx.User.FindFirst("device_id")?.Value;
     if (deviceId is null) return Results.BadRequest(new { error = "device required" });
 
     var submissionId = sub.SubmissionId?.Trim();
     var cleared = false;
+    // Имя показа, который мы проверяли. Нужно, чтобы в конце стереть именно его, а не тот, что
+    // успел прийти на планшет, пока шла проверка.
+    string? нашПоказ = null;
     try
     {
         var state = storage.ResolveState(deviceId);
+        нашПоказ = state.SessionId;
         var signing = state.Mode == "document";
 
         // A record already stored for this submission means the signing session that produced it is
@@ -367,6 +395,20 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         DocumentConfig resolvedDoc;
         Dictionary<string, string>? recordFields;
         string? кодДокумента = null, названиеДокумента = null;
+        // Планшет присылает имя показа, под которым он получил документ. Разошлось значит, что на
+        // планшет успели послать другой документ, пока этот клиент подписывал: его отметки легли
+        // бы в снимок следующего человека. Отказываем, сессию нового клиента не трогая.
+        var сВопросом = (sub.SessionId ?? "").Trim();
+        if (сВопросом.Length > 0 && !string.Equals(сВопросом, state.SessionId ?? "", StringComparison.Ordinal))
+        {
+            cleared = true;
+            return Results.Json(new
+            {
+                error = "На планшет уже отправлен другой документ, эта подпись к нему не относится. " +
+                        "Отправьте документ на планшет заново."
+            }, statusCode: StatusCodes.Status409Conflict);
+        }
+
         var session = string.IsNullOrEmpty(state.SessionId) ? null : storage.GetDocSession(deviceId);
         if (session is not null && session.SessionId == state.SessionId)
         {
@@ -399,14 +441,29 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
             if (k.Length > 0) finalInputs[k] = (inp!.Value ?? "").Trim();
         }
         // Блоки, скрытые условием, клиент не видел: их не должно быть и в PDF.
-        DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups, finalInputs);
+        // Имена полей подписи и сканирования тоже участвуют в условиях: планшет их так считает,
+        // и сервер обязан считать так же, иначе в записи окажется не то, что клиент видел.
+        var подписаны = extraSignatures.Select(x => x.Key).Where(k => !string.IsNullOrWhiteSpace(k)).ToList();
+        var коды = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sc in sub.Scans ?? new List<SubmittedScan>())
+        {
+            var k = DocumentTemplating.CleanKey(sc?.Key);
+            if (k.Length > 0) коды[k] = sc!.Code ?? "";
+        }
+        DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups, finalInputs, подписаны, коды);
         if (recordFields is { Count: 0 }) recordFields = null;
 
         // Информационный документ не подписывают: на планшете экрана подписи нет вовсе, и запрос
         // сюда означает либо сломанную страницу, либо чужой запрос. Записи о согласии из него
         // быть не должно: согласия никто не давал.
         if (DocumentTemplating.IsInfo(resolvedDoc))
+        {
+            // Сессию не трогаем, как и при всех прочих отказах: документ показан клиенту, он его
+            // читает, и стирать показанное из-за чужого кривого запроса нельзя. Раньше эта ветка
+            // одна из всех флаг не выставляла, и любой такой запрос гасил чужой документ.
+            cleared = true;
             return Results.BadRequest(new { error = "Этот документ информационный: его не подписывают." });
+        }
 
         // Обязательное должно быть заполнено. Это проверяет и страница планшета, но полагаться
         // на одну её нельзя: сломанная или подделанная страница прислала бы запись о согласии
@@ -453,7 +510,11 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
     {
         if (cleared) return;
         cleared = true;
-        try { coord.ClearSignerSession(deviceId); }
+        // Стираем ровно тот показ, который проверяли. Между чтением снимка и этой строкой на
+        // планшет мог прийти следующий документ: без сверки мы стёрли бы сессию нового клиента,
+        // у которого документ уже на экране, и он получил бы на подписи «на этом планшете ничего
+        // не подписывают».
+        try { coord.ClearSignerSession(deviceId, нашПоказ); }
         catch (Exception ex) { app.Logger.LogError(ex, "Failed to clear signer session for {Device}", deviceId); }
     }
 }).RequireAuthorization("Device").RequireRateLimiting("sign");
@@ -597,6 +658,9 @@ admin.MapPut("/devices/{id}", async (string id, DeviceUpdateDto dto, KioskCoordi
 admin.MapPost("/devices/{id}/revoke", async (string id, KioskCoordinator coord) =>
 {
     if (!storage.SetDeviceStatus(id, "revoked")) return Results.NotFound();
+    // Отзыв это не пометка в списке, а «убрать всё с этого экрана прямо сейчас»: данные
+    // подписанта стираются, планшет уходит на экран активации, соединение рвётся.
+    await coord.RevokeDeviceAsync(id);
     await coord.NotifyAdminsDevicesAsync();
     return Results.Ok(new { ok = true });
 });
@@ -636,8 +700,15 @@ admin.MapGet("/groups", () => Results.Ok(storage.GetGroups()));
 admin.MapPost("/groups", (GroupDto dto) => Results.Ok(storage.AddGroup(dto?.Name ?? "")));
 admin.MapPut("/groups/{id}", (string id, GroupDto dto) =>
     storage.RenameGroup(id, dto?.Name ?? "") ? Results.Ok(new { ok = true }) : Results.NotFound());
-admin.MapDelete("/groups/{id}", (string id) =>
-    storage.DeleteGroup(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
+admin.MapDelete("/groups/{id}", (string id, KioskCoordinator coord) =>
+{
+    if (!storage.DeleteGroup(id)) return Results.NotFound();
+    // Набор мог решать, где показывать картинки рекламы. Ссылки на него из картинок вычищены,
+    // значит состав рекламы у планшетов изменился прямо сейчас: они держат выданный им список и
+    // сами о наборах не знают, поэтому список пересобирается и уходит заново.
+    _ = coord.RefreshSlidesAsync();
+    return Results.Ok(new { ok = true });
+});
 
 // ---- Workstations ----
 admin.MapGet("/workstations", () => Results.Ok(storage.GetWorkstations()));
@@ -671,6 +742,8 @@ admin.MapGet("/images", () =>
     {
         i.Id, i.OriginalName, i.UploadedUtc, url = "/media/" + i.FileName,
         i.ShowFrom, i.ShowTo,
+        // Где показывать и где не показывать. Пустые списки означают «везде».
+        i.GroupIds, i.ExceptGroupIds,
         // Показывается ли она сегодня. Считает сервер: у него и часы, и правило, а оператор
         // иначе гадал бы, попадает ли сегодняшний день в заданный срок.
         showsToday = KioskCoordinator.ImageShowsToday(i, today)
@@ -699,6 +772,30 @@ admin.MapPut("/images/{id}/dates", (string id, ImageDatesDto? dto, KioskCoordina
     // не знают, поэтому список пересобирается и уходит заново.
     _ = coord.RefreshSlidesAsync();
     return Results.Ok(new { ok = true, showFrom = f?.ToString("yyyy-MM-dd"), showTo = t?.ToString("yyyy-MM-dd") });
+});
+
+// Где показывать картинку: в каких группах планшетов и в каких не показывать. Пустые списки
+// означают «везде», как было до появления этой настройки.
+admin.MapPut("/images/{id}/groups", (string id, ImageGroupsDto? dto, KioskCoordinator coord) =>
+{
+    var только = dto?.GroupIds ?? new List<string>();
+    var кроме = dto?.ExceptGroupIds ?? new List<string>();
+    // Группа и в «показывать», и в «кроме» это противоречие в самой настройке: разрешение и
+    // запрет на одно и то же. Молча выбрать одно из двух значит оставить оператора в
+    // уверенности, что он задал другое.
+    var спор = только.Intersect(кроме, StringComparer.Ordinal).ToList();
+    if (спор.Count > 0)
+    {
+        var имена = storage.GetGroups().Where(g => спор.Contains(g.Id)).Select(g => g.Name).ToList();
+        return Results.BadRequest(new { error = "Группа указана и в «показывать», и в «кроме»: " + string.Join(", ", имена.Count > 0 ? имена : спор) });
+    }
+    if (!storage.SetImageGroups(id, только, кроме))
+        return Results.NotFound(new { error = "Картинка не найдена." });
+    // Состав рекламы у планшетов изменился прямо сейчас: они держат выданный им список и сами о
+    // группах не знают, поэтому список пересобирается и уходит заново.
+    _ = coord.RefreshSlidesAsync();
+    var сохранено = storage.GetImages().FirstOrDefault(i => i.Id == id);
+    return Results.Ok(new { ok = true, groupIds = сохранено?.GroupIds ?? new List<string>(), exceptGroupIds = сохранено?.ExceptGroupIds ?? new List<string>() });
 });
 
 admin.MapPost("/images", async (HttpRequest req) =>
@@ -854,7 +951,13 @@ admin.MapPut("/document", (DocumentConfig? doc, HttpContext ctx, string? id) =>
             error = "Документ уже изменён в другом окне или другим оператором. " +
                     "Возьмите свежую версию, иначе чужая работа будет затёрта."
         }, statusCode: StatusCodes.Status409Conflict);
-    DocumentTemplating.Sanitize(doc);
+    // Условие, которое при сохранении изменилось бы само, это отказ, а не предупреждение: иначе
+    // документ сохранится с другим смыслом, и содержимое покажется там, где его прятали.
+    var нельзя = DocumentTemplating.WhyNotSavable(doc);
+    if (нельзя is not null) return Results.BadRequest(new { error = нельзя });
+    // Остальное разбор рассказывает как замечания: имя элемента, совпавшее с тегом API, и
+    // прочее, что стоит знать, но что смысла документа не меняет.
+    var срезано = DocumentTemplating.SanitizeWarnings(doc);
     if (DocumentTemplating.IsInfo(doc))
     {
         var почемуНельзя = DocumentTemplating.WhyNotInfo(doc);
@@ -867,9 +970,10 @@ admin.MapPut("/document", (DocumentConfig? doc, HttpContext ctx, string? id) =>
             error = "Эти картинки нельзя использовать в документе: их не удастся вложить в PDF. " +
                     "Подойдут PNG, JPG или BMP. Проблемные файлы: " + string.Join(", ", badImages)
         });
-    storage.SaveDocument(док.Id, doc);
+    if (!storage.SaveDocument(док.Id, doc))
+        return Results.NotFound(new { error = "Документ не найден: " + док.Id });
     ctx.Response.Headers["X-Doc-Rev"] = storage.GetDocumentRev(док.Id);
-    return Results.Ok(new { ok = true });
+    return Results.Ok(new { ok = true, warnings = срезано });
 });
 
 // Preview: resolve the template with operator-supplied test values EXACTLY as a tablet would see
@@ -879,7 +983,12 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
 {
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
-    var doc = dto?.Document ?? storage.GetDocument(dto?.DocumentId);
+    // Неизвестный номер документа это отказ, а не документ по умолчанию: иначе оператор увидел
+    // бы чужой текст под именем запрошенного документа и решил, что открыл нужный.
+    DocumentConfig doc;
+    if (dto?.Document is not null) doc = dto.Document;
+    else if (!storage.TryGetDocument(dto?.DocumentId, out doc))
+        return Results.NotFound(new { error = "Документ не найден: " + dto?.DocumentId });
     DocumentTemplating.Sanitize(doc);
     var badDate = DocumentTemplating.ValidateAgeFields(doc, dto?.Fields);
     if (badDate is not null) return Results.BadRequest(new { error = badDate });
@@ -935,7 +1044,10 @@ admin.MapGet("/devices/{id}/screen", (string id, KioskCoordinator coord) =>
 // с ним. Рисовать PDF в браузере для этого не нужно.
 admin.MapPost("/document/pdf-layout", (PreviewDto? dto, PdfService pdf) =>
 {
-    var doc = dto?.Document ?? storage.GetDocument(dto?.DocumentId);
+    DocumentConfig doc;
+    if (dto?.Document is not null) doc = dto.Document;
+    else if (!storage.TryGetDocument(dto?.DocumentId, out doc))
+        return Results.NotFound(new { error = "Документ не найден: " + dto?.DocumentId });
     DocumentTemplating.Sanitize(doc);
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
@@ -1193,7 +1305,12 @@ admin.MapDelete("/alerts/{id}", async (string id, AlertService alerts, KioskCoor
 
 // ---- Operational log ----
 admin.MapGet("/logs", (EventLogService logs, string? level, string? q, int? limit) =>
-    Results.Ok(new { total = logs.Count, entries = logs.List(level, q, limit ?? 300) }));
+{
+    // total это сколько записей подошло под отбор, а не сколько их всего в кольце: иначе при
+    // выбранном уровне оператор читал «Показано 12 из 1843» как «остальное от меня спрятали».
+    var записи = logs.Filtered(level, q, limit ?? 300, out var подошло);
+    return Results.Ok(new { total = подошло, entries = записи });
+});
 
 admin.MapDelete("/logs", (EventLogService logs) => { logs.Clear(); return Results.Ok(new { ok = true }); });
 
@@ -1282,7 +1399,8 @@ admin.MapPost("/document/import", (DocumentBackup? backup, string? code, string?
 
     var (info, error) = storage.AddDocument(свободный, string.IsNullOrWhiteSpace(title) ? doc.Title : title, null);
     if (error is not null) return Results.BadRequest(new { error });
-    storage.SaveDocument(info!.Id, doc);
+    if (!storage.SaveDocument(info!.Id, doc))
+        return Results.NotFound(new { error = "Документ не найден: " + info!.Id });
     return Results.Ok(new { ok = true, pages = doc.Pages.Count, images = restored, id = info.Id, code = info.Code });
 });
 
@@ -1292,7 +1410,16 @@ admin.MapPost("/show-document", async (ShowDocumentDto dto, KioskCoordinator coo
 {
     var deviceId = DeviceFromTarget(dto?.Target);
     if (deviceId is null)
+    {
+        // Отозванный планшет сюда не проходит. Сказать об этом прямо: «выберите планшет», когда
+        // планшет выбран, читается как поломка формы, а не как отказ по существу.
+        var сырой = (dto?.Target ?? "").StartsWith("device:", StringComparison.Ordinal)
+            ? dto!.Target!["device:".Length..] : (dto?.Target ?? "");
+        var отозван = storage.GetDevice(сырой);
+        if (отозван is { Status: "revoked" })
+            return Results.BadRequest(new { error = "Планшет «" + отозван.Name + "» отозван: показывать на нём ничего нельзя. Верните его в работу на вкладке «Планшеты» или выберите другой." });
         return Results.BadRequest(new { error = "Документ показывается только на один планшет. Выберите планшет." });
+    }
     var badField = FieldSchema.Validate(dto?.Fields);
     if (badField is not null) return Results.BadRequest(new { error = badField });
     var (док, badCode) = PickDocument(dto?.DocumentCode);
@@ -1424,8 +1551,21 @@ ext.MapGet("/documents", () => Results.Ok(storage.GetDocuments().Select(d => new
 ext.MapGet("/workstations", () =>
     Results.Ok(storage.GetWorkstations().Select(w => new { w.Id, w.ExternalId, w.Name, w.Location })));
 
+// Завести рабочее место. Запрос идемпотентен по коду: медсистема обычно шлёт «создай, если
+// нет» на каждый заказ, и без этого копились места с одинаковым кодом. Планшет, привязанный ко
+// второму такому месту, становился недостижим: отбор берёт первое совпадение и отвечает «нет
+// планшета на этом месте», хотя планшет в кабинете стоит и работает.
 ext.MapPost("/workstations", (WorkstationDto dto) =>
-    Results.Ok(storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location)));
+{
+    var код = (dto?.ExternalId ?? "").Trim();
+    if (код.Length > 0)
+    {
+        var было = storage.GetWorkstations()
+            .FirstOrDefault(w => string.Equals(w.ExternalId, код, StringComparison.OrdinalIgnoreCase));
+        if (было is not null) return Results.Ok(было);
+    }
+    return Results.Ok(storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location));
+});
 
 ext.MapPost("/enrollments", (ExtEnrollmentDto dto) =>
 {
@@ -1449,20 +1589,73 @@ ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto)
 // A document carries the signer's personal data, so this must resolve to exactly ONE device:
 // if a workstation has several tablets, we refuse rather than pick one arbitrarily and risk
 // showing one client's data on another client's screen. status is 0 on success.
+// Кому уйдёт документ по запросу внешней системы. Правило одно: документ всегда показывается
+// ровно на одном планшете, и если выбрать однозначно нельзя, лучше отказать, чем угадать: чужие
+// данные перед чужим человеком не исправишь.
+//
+// По прямому номеру планшета выбор задан. По коду рабочего места планшетов может оказаться
+// несколько; тогда списанные не в счёт, а из оставшихся берётся тот, что на связи, если он там
+// один: остальные сейчас не могут показать вообще ничего, и вопрос «кто это увидит» имеет
+// единственный ответ. На связи несколько или ни одного означает настоящую неоднозначность, и
+// это отказ с перечнем, чтобы вызывающий подставил deviceId.
 (string? id, int status, string? error) ResolveExtDeviceId(string? deviceId, string? workstationExternalId)
 {
     if (!string.IsNullOrWhiteSpace(deviceId))
-        return storage.GetDevice(deviceId!) is not null
-            ? (deviceId, 0, null)
-            : (null, StatusCodes.Status404NotFound, "device not found");
+    {
+        // Списанный планшет не выбирается и по прямому номеру. Отбор по рабочему месту его уже
+        // пропускал, а тут он проходил насквозь: документ с данными клиента уезжал на
+        // устройство, которое отозвано и ничего не покажет, а внешняя система получала «ок».
+        var прямо = storage.GetDevice(deviceId!);
+        if (прямо is null) return (null, StatusCodes.Status404NotFound, "device not found");
+        if (прямо.Status == "revoked")
+            return (null, StatusCodes.Status404NotFound, "this tablet is revoked");
+        // Прислали и номер планшета, и код рабочего места. Раньше второе молча отбрасывалось, а
+        // это самый опасный вид расхождения: заказ несёт вчерашний номер планшета, который с тех
+        // пор перевезли в другой кабинет, и правильный код кабинета. Документ с данными пациента
+        // уезжал в чужой кабинет, а в ответе стояло «ок».
+        if (!string.IsNullOrWhiteSpace(workstationExternalId))
+        {
+            var место = storage.GetWorkstations()
+                .FirstOrDefault(w => string.Equals(w.ExternalId, workstationExternalId!.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (место is null)
+                return (null, StatusCodes.Status404NotFound, "workstation not found: " + workstationExternalId);
+            if (!string.Equals(прямо.WorkstationId, место.Id, StringComparison.Ordinal))
+                return (null, StatusCodes.Status409Conflict,
+                    "deviceId and workstationExternalId disagree: tablet '" + прямо.Name + "' is not at workstation '" +
+                    (место.Name ?? место.ExternalId) + "'. Pass one of them, not both.");
+        }
+        return (deviceId, 0, null);
+    }
     if (!string.IsNullOrWhiteSpace(workstationExternalId))
     {
         var ws = storage.GetWorkstations().FirstOrDefault(w => w.ExternalId == workstationExternalId);
         if (ws is null) return (null, StatusCodes.Status404NotFound, "workstation not found");
-        var matches = storage.GetDevices().Where(d => d.WorkstationId == ws.Id).Select(d => d.Id).ToList();
-        if (matches.Count == 0) return (null, StatusCodes.Status404NotFound, "no tablet is assigned to this workstation");
-        if (matches.Count > 1) return (null, StatusCodes.Status409Conflict, "several tablets are assigned to this workstation; pass deviceId to choose one");
-        return (matches[0], 0, null);
+        var наМесте = storage.GetDevices().Where(d => d.WorkstationId == ws.Id).ToList();
+        // Отозванный планшет это списанный планшет: он лежит в списке ради истории, показать на
+        // нём ничего нельзя. Раньше он считался наравне с живым, и рабочее место с одним рабочим
+        // планшетом и одним списанным получало отказ «их тут несколько». Расписание и наблюдение
+        // отозванные пропускают давно, а здесь их считали.
+        var живые = наМесте.Where(d => d.Status != "revoked").ToList();
+        if (живые.Count == 0)
+            return (null, StatusCodes.Status404NotFound, наМесте.Count > 0
+                ? "the only tablet(s) assigned to this workstation are revoked"
+                : "no tablet is assigned to this workstation");
+        if (живые.Count > 1)
+        {
+            // Несколько рабочих планшетов на одном месте. Если на связи ровно один, выбор
+            // очевиден: остальные сейчас не могут показать вообще ничего, и никакой
+            // неоднозначности в том, кто увидит документ, нет.
+            var наСвязи = живые.Where(d => tracker.IsOnline(d.Id)).ToList();
+            if (наСвязи.Count == 1) return (наСвязи[0].Id, 0, null);
+            // На связи несколько или ни одного: угадывать нельзя. Документ уходит только на один
+            // планшет, и ошибка тут означает чужие данные перед чужим человеком. Имена, номера и
+            // состояние прямо в ответе: без них внешней системе некуда девать «pass deviceId».
+            var перечень = string.Join(", ", живые.Select(d =>
+                d.Name + " (" + d.Id + ", " + (tracker.IsOnline(d.Id) ? "на связи" : "не на связи") + ")"));
+            return (null, StatusCodes.Status409Conflict,
+                "several tablets are assigned to this workstation; pass deviceId to choose one: " + перечень);
+        }
+        return (живые[0].Id, 0, null);
     }
     return (null, StatusCodes.Status400BadRequest, "pass deviceId or workstationExternalId");
 }
@@ -1483,11 +1676,15 @@ ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto)
     return (found, null);
 }
 
+// Отозванный планшет адресатом быть не может. Внешнее API это проверяет и опирается на то, что
+// «показать на нём ничего нельзя»; в админке проверки не было, и документ следующего клиента
+// уходил на экран, который отозвали как раз затем, чтобы он ничего не показывал.
 string? DeviceFromTarget(string? target)
 {
     if (string.IsNullOrWhiteSpace(target)) return null;
     var id = target.StartsWith("device:", StringComparison.Ordinal) ? target["device:".Length..] : target;
-    return storage.GetDevice(id) is not null ? id : null;
+    var dev = storage.GetDevice(id);
+    return dev is not null && dev.Status != "revoked" ? id : null;
 }
 
 // Show the signing document on one tablet with per-signer data. Placeholders {{...}} in the
@@ -1510,9 +1707,31 @@ ext.MapPost("/show-document", async (ExtShowDocumentDto dto, KioskCoordinator co
         return Results.Json(new { error }, statusCode: status);
     var badImage = KioskCoordinator.ParseApiImages(dto?.Images, out var картинки);
     if (badImage is not null) return Results.BadRequest(new { error = badImage });
-    await coord.ShowDocumentAsync(deviceId, dto?.Fields, dto?.Checkboxes, dto?.Groups, картинки, док);
+    // На связи ли планшет прямо сейчас. Внешней системе нельзя показать предупреждение, как
+    // оператору: у неё есть только ответ. Раньше «ok:true» приходил одинаково и когда документ
+    // появился на экране, и когда планшет выключен, и медсистема считала, что пациент читает
+    // согласие, которого никто не показывал.
+    var наСвязи = tracker.IsOnline(deviceId);
+    var отброшено = new List<string>();
+    // Присланные пункты переводятся в пункты документа здесь: обязательность у них только та,
+    // о которой сказали явно, а не «включена по умолчанию», как у пункта, поставленного оператором.
+    var присланныеПункты = (dto?.Checkboxes ?? new List<ApiCheckboxDto>())
+        .Where(x => x is not null).Select(x => x.ВПункт()).ToList();
+    await coord.ShowDocumentAsync(deviceId, dto?.Fields, присланныеПункты, dto?.Groups, картинки, док, отброшено);
     var missing = DocumentTemplating.Missing(шаблон, dto?.Fields);
-    return Results.Ok(new { ok = true, deviceId, document = док.Code, missingPlaceholders = missing });
+    return Results.Ok(new
+    {
+        ok = true, deviceId, document = док.Code, missingPlaceholders = missing,
+        // shown: документ действительно на экране. false означает, что он сохранён и покажется,
+        // когда планшет подключится, но не позже чем через два часа: потом он стирается сам.
+        shown = наСвязи,
+        deviceOnline = наСвязи,
+        // Что из заказа не поместилось в пределы и до клиента не доехало. Пустой список это
+        // «доехало всё».
+        dropped = отброшено,
+        note = наСвязи ? null
+            : "Планшет сейчас не на связи. Документ сохранён и покажется, как только планшет подключится; если этого не случится за два часа, он будет стёрт."
+    });
 });
 
 // Ask a tablet to scan a barcode / QR code and WAIT for the result, returning the code in the
@@ -1554,6 +1773,21 @@ ext.MapPost("/scan-request", async (ExtScanRequestDto dto, KioskCoordinator coor
         // The client went away: do not touch the tablet and do not write to a dead connection.
         if (ctx.RequestAborted.IsCancellationRequested) return Results.Empty;
 
+        // Отчего ожидание кончилось. Раньше на все случаи отвечали «код не был отсканирован»,
+        // хотя таймаут мог и не наступить: заявку могла вытеснить другая или её отменили. Две
+        // интеграции, спорящие за один планшет, читали это как поломку камеры.
+        var почему = broker.WhyEnded(wait);
+        broker.Forget(wait);
+        if (почему == "вытеснена")
+            return Results.Json(new
+            {
+                ok = false, deviceId,
+                error = "На этот планшет пришла другая заявка на сканирование, ваша снята. Повторите запрос, когда планшет освободится."
+            }, statusCode: StatusCodes.Status409Conflict);
+        if (почему == "отменена")
+            return Results.Json(new { ok = false, deviceId, error = "Сканирование отменено." },
+                statusCode: StatusCodes.Status409Conflict);
+
         // Only close the camera if nobody else is waiting for this tablet. A newer request may have
         // superseded this one, and stopping the camera would cancel THAT scan mid-air.
         if (!broker.IsWaiting(deviceId)) await coord.StopScanAsync(deviceId);
@@ -1563,12 +1797,16 @@ ext.MapPost("/scan-request", async (ExtScanRequestDto dto, KioskCoordinator coor
 });
 
 // Cancel a scan in progress on a tablet.
-ext.MapPost("/scan-cancel", async (ExtShowDocumentDto dto, KioskCoordinator coord) =>
+ext.MapPost("/scan-cancel", async (ExtShowDocumentDto dto, KioskCoordinator coord, ScanBroker broker) =>
 {
     var (deviceId, status, error) = ResolveExtDeviceId(dto?.DeviceId, dto?.WorkstationExternalId);
     if (deviceId is null) return Results.Json(new { error }, statusCode: status);
+    // Ожидающего надо разбудить, а не только погасить камеру: раньше отмена отвечала «ок», а
+    // заявка висела до своего таймаута (до пяти минут), всё это время считалась живой и не
+    // давала закрыть камеру даже чужому таймауту.
+    var разбужен = broker.CancelWaiter(deviceId, "отменена");
     await coord.StopScanAsync(deviceId);
-    return Results.Ok(new { ok = true, deviceId });
+    return Results.Ok(new { ok = true, deviceId, cancelledWaiter = разбужен });
 });
 
 // Recent scans (newest first), so an integrator can poll instead of waiting.

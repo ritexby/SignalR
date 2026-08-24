@@ -29,8 +29,13 @@ public class KioskHealthCache
     public void Clear()
     {
         _health.Clear();
-        _healAttempts.Clear();
+        // Счёт попыток лечения не сбрасывается вместе с показаниями. Показания устарели, а
+        // «сдались после трёх попыток» это вывод о самом планшете: обнулять его при каждой смене
+        // настроек значило бы выдавать заведомо сломанному планшету ещё три перезагрузки подряд.
     }
+
+    /// <summary>Забыть, что этот планшет уже лечили. Оператор его осмотрел и хочет попробовать снова.</summary>
+    public void ResetHealAttempts() => _healAttempts.Clear();
 
     /// <summary>Drop the readings of tablets that no longer exist.</summary>
     public void KeepOnly(ICollection<string> deviceIds)

@@ -187,7 +187,14 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 /* Панель одна на весь редактор и стоит на своём месте всегда, прилипая под шапкой при
    прокрутке. Пятнадцать одинаковых панелей делали карточку блока вдвое выше, а всплывающая
    над полем закрывала собой то, что было выше: кнопку условия, подпись и часть текста. */
-.rt-bar-host { position: sticky; top: var(--topbar-h, 64px); z-index: 15; padding: 6px 0 10px; background: var(--panel); }
+/* Шапка документа висит на экране: закладки, выбор планшета и все кнопки доступны с любого
+   места документа. Панель оформления текста прилипает сразу под ней, а не поверх. */
+.doc-head-sticky { position: sticky; top: var(--topbar-h, 64px); z-index: 18;
+  background: var(--panel); padding-bottom: 8px; margin-bottom: 4px;
+  box-shadow: 0 6px 10px -8px rgba(16,24,40,.35); }
+.doc-head-row { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.doc-head-row h2 { margin: 0; }
+.rt-bar-host { position: sticky; top: calc(var(--topbar-h, 64px) + var(--doc-head-h, 0px)); z-index: 15; padding: 6px 0 10px; background: var(--panel); }
 .rt-float { box-shadow: var(--sh2); border-color: var(--line); background: #fff; }
 /* Пока поле не выбрано, панель на месте, но не работает: ничего не прыгает, и сразу видно,
    что оформлять пока нечего. */
@@ -305,6 +312,28 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .pv-live:hover { border-color: #cbd5e1; }
 .pv-live.on:hover { border-color: var(--accent); }
 .pv-group { display: flex; flex-direction: column; gap: 8px; margin: 4px 0; }
+/* Варианты зависимых чекбоксов стоят в строку, как на планшете. Своего правила у них не было,
+   и они выкладывались столбиком: на планшете «ДА» и «НЕТ» рядом, а в наблюдении и в
+   предпросмотре друг под другом, то есть оператор проверял не тот вид, который увидит клиент. */
+.pv-group-options { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; align-items: stretch; }
+.pv-group-options > * { flex: 1 1 140px; }
+
+/* Список, таблица, черта и вписанное клиентом: то же, что рисует планшет. */
+.pv-list { margin: 8px 0; padding-left: 26px; }
+.pv-list li { margin: 2px 0; }
+.pv-divider { border-top: 1px solid var(--field-line); margin: 12px 0; }
+.pv-table-wrap { overflow-x: auto; margin: 8px 0; }
+.pv-table { border-collapse: collapse; width: 100%; }
+.pv-table th, .pv-table td { border: 1px solid #97a2b2; padding: 5px 8px; text-align: left; vertical-align: top; }
+.pv-table th { background: #e6ebf2; font-weight: 700; }
+.pv-inline-input { margin: 8px 0; }
+/* Поле ввода в предпросмотре настоящее: в него печатают, и от набранного пересчитываются
+   условия. Вид тот же, что у остальных полей админки. */
+.pv-input { margin: 10px 0; }
+.pv-input-field { width: 100%; box-sizing: border-box; padding: 10px 12px; font-size: 1rem;
+  border: 1.5px solid var(--field-line); border-radius: 9px; background: #fff; color: var(--text); }
+.pv-input-field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(21,128,61,.14); }
+.watch-value { font-weight: 600; color: var(--text); padding: 4px 0; }
 /* Подпись и сканирование в предпросмотре: видно место, которое они займут на планшете. */
 .pv-inline-sign, .pv-inline-scan { display: flex; flex-direction: column; gap: 8px; padding: 12px;
   border: 2px solid #e5e7eb; border-radius: 12px; background: #fff; margin: 4px 0; }
@@ -462,7 +491,9 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .modal .field { text-align: left; margin-bottom: 12px; }
 .modal .btn-primary { width: 100%; margin-top: 8px; }
 
-.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111827; color: #fff; padding: 12px 20px; border-radius: 10px; font-size: .95rem; z-index: 100; box-shadow: 0 6px 20px rgba(0,0,0,.2); transition: opacity .2s; opacity: 0; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111827; color: #fff; padding: 12px 20px; border-radius: 10px; font-size: .95rem; z-index: 100; box-shadow: 0 6px 20px rgba(0,0,0,.2); transition: opacity .2s; opacity: 0; max-width: min(720px, 92vw); text-align: center; line-height: 1.4; }
+/* Отказ должен читаться как отказ, а не как «сохранено». */
+.toast.toast-bad { background: #7f1d1d; box-shadow: 0 6px 20px rgba(127,29,29,.45); font-weight: 600; }
 
 /* ---- API docs ---- */
 .api-docs { display: flex; flex-direction: column; gap: 14px; }
@@ -594,7 +625,9 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 
 /* ---- Оглавление документа ---- */
 .doc-layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: var(--s5); align-items: start; }
-.doc-toc { position: sticky; top: 78px; display: flex; flex-direction: column; gap: var(--s3); max-height: calc(100vh - 100px); overflow-y: auto; padding: var(--s3); background: #fff; border: 1px solid var(--line); border-radius: var(--r2); box-shadow: var(--sh2); }
+/* Оглавление липнет ПОД шапкой документа, а не над ней: без своего слоя и с отступом от одной
+   только верхней полосы верхние пункты уезжали под шапку и переставали нажиматься. */
+.doc-toc { position: sticky; z-index: 12; top: calc(var(--topbar-h, 64px) + var(--doc-head-h, 96px) + 8px); display: flex; flex-direction: column; gap: var(--s3); max-height: calc(100vh - 100px); overflow-y: auto; padding: var(--s3); background: #fff; border: 1px solid var(--line); border-radius: var(--r2); box-shadow: var(--sh2); }
 .toc-title { display: flex; align-items: center; gap: 7px; font-size: .74rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }
 .toc-title .ic { width: 15px; height: 15px; }
 .toc-list { display: flex; flex-direction: column; gap: 3px; }
@@ -653,6 +686,12 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .problems .toolbar-actions { margin-left: 0; justify-content: flex-end; }
 /* Пока элемент тащат, выделение текста только мешает. */
 body.dragging-now { user-select: none; cursor: grabbing; }
+/* На время перетаскивания закреплённые сверху полосы уходят: вместе они занимают около
+   двухсот семидесяти точек, и элемент, утащенный к верху списка, оказывался под ними. Бросить
+   его туда было нельзя, потому что курсор попадал не в список, а в полосу. */
+body.dragging-now .doc-head-sticky,
+body.dragging-now .rt-bar-host { position: static; z-index: auto; }
+body.dragging-now .topbar { pointer-events: none; }
 
 /* ---------- Содержимое страницы: один список из блоков, чекбоксов и групп ---------- */
 /* Текст, пункт и выбор одного варианта стоят вперемешку, в порядке чтения. Каждый вид
@@ -678,8 +717,16 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 /* Один шрифт во всех блоках. Документ хранит только жирный, курсив, цвет и три размера, поэтому
    чужой шрифт, кегль в пунктах или заливка, попавшие в разметку при вставке, не должны влиять на
    вид: иначе в админке блок выглядит одним, а на планшете другим. */
-.rt-editor, .rt-editor * { font-family: inherit !important; letter-spacing: normal !important; text-transform: none !important; background: transparent !important; }
-.rt-editor *:not(.rt-l):not(.rt-h) { font-size: inherit !important; }
+.rt-editor, .rt-editor *:not([style*="background"]) { font-family: inherit !important; letter-spacing: normal !important; text-transform: none !important; background: transparent !important; }
+/* Выделение маркером оператор ставит сам, и приходит оно инлайновым фоном. Правило выше гасило
+   его своим !important: цвет сохранялся в документе и был виден на планшете, а в редакторе
+   маркер выглядел как нажатие впустую. Та же история, что была со своим размером в точках. */
+.rt-editor *[style*="background"] { font-family: inherit !important; letter-spacing: normal !important; text-transform: none !important; }
+/* Размер внутри редактора нормализуется, чтобы вставленный откуда угодно текст не приносил с
+   собой чужих размеров. Но свой размер в точках оператор задаёт сам, и он приходит инлайновым
+   стилем: это правило перебивало его своим !important, размер сохранялся в документе, а в
+   редакторе не менялся ничего. Куски с явно заданным размером теперь не трогаем. */
+.rt-editor *:not(.rt-l):not(.rt-h):not([style*="font-size"]) { font-size: inherit !important; }
 .rt-editor .rt-l { font-size: 1.3rem !important; }
 .rt-editor .rt-h { font-size: 1.7rem !important; }
 
@@ -761,10 +808,23 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 .watch-head { display: flex; align-items: center; gap: 10px; }
 .watch-head h3 { margin: 0; }
 .watch-live { font-size: .78rem; color: #fff; background: var(--accent); border-radius: 999px; padding: 2px 10px; }
+/* Размер экрана планшета: не украшение, а объяснение, почему у клиента текст переносится
+   иначе, чем в редакторе. */
+.watch-size { font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums;
+  border: 1px solid #b8c2d1; border-radius: 999px; padding: 2px 10px; }
 .watch-live::before { content: "●"; margin-right: 5px; animation: watch-pulse 1.6s infinite; }
 @keyframes watch-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 .watch-frame { background: #f1f3f6; border: 1px solid #b8c2d1; border-radius: 12px; padding: 14px;
   max-height: calc(100vh - 260px); overflow: auto; }
+/* Рамка подогнанной копии: содержимое внутри свёрстано по настоящей ширине планшета и
+   уменьшено масштабом, поэтому лишнее прячем, а высоту рамке задаёт код. */
+.watch-frame-scaled { overflow: hidden; padding: 1px; }
+.watch-frame-scaled .watch-screen { border-radius: 0; box-shadow: none; border: 1px solid #b8c2d1; }
+/* Размер текста внутри копии приходит числом от ширины планшета: доли ширины окна тут
+   считались бы от окна оператора и давали чужие переносы. */
+.watch-screen { --pv-doc-text: 1.05rem; }
+.watch-screen .pv-text, .watch-screen .watch-label, .watch-screen .pv-group-title,
+.watch-screen .pv-inline-title { font-size: var(--pv-doc-text); }
 .watch-screen { background: #fff; border-radius: 12px; padding: 18px 20px; min-height: 260px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, .08); }
 .watch-note { color: var(--muted); text-align: center; padding: 40px 0; }
@@ -795,6 +855,19 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 .toast-watch .btn:hover { background: rgba(255, 255, 255, .16); border-color: #fff; color: #fff; }
 
 /* Однострочное поле с оформлением: то же, что редактор абзаца, но в строку элемента. */
+/* Список видно прямо в редакторе, а не только в предпросмотре. Строки блока разделены
+   переводом строки, поэтому маркер рисуется фоном строки: настоящие ul и ol здесь развалили бы
+   набор текста, а увидеть, как список будет выглядеть, оператору надо во время набора. */
+.rt-as-bullet .rt-li, .rt-as-number .rt-li { position: relative; padding-left: 26px; }
+.rt-as-bullet .rt-li::before { content: "•"; position: absolute; left: 8px; color: var(--muted); font-weight: 700; }
+.rt-as-number { counter-reset: ртсписок; }
+.rt-as-number .rt-li { counter-increment: ртсписок; }
+.rt-as-number .rt-li::before { content: counter(ртсписок) "."; position: absolute; left: 2px;
+  color: var(--muted); font-weight: 700; font-variant-numeric: tabular-nums; }
+.rt-list-btn { font-weight: 700; min-width: 30px; }
+.rt-list-btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.rt-list-hint { display: block; margin-top: 4px; font-size: .8rem; color: var(--muted); }
+
 .rt-editor.rt-inline { flex: 1 1 auto; min-height: 0; padding: 8px 10px; line-height: 1.4;
   border: 1px solid var(--line); border-radius: 8px; background: #fff; overflow-wrap: anywhere; }
 .rt-editor.rt-inline:empty::before { content: attr(data-placeholder); color: var(--muted); }
@@ -830,7 +903,28 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 .img-date-state { flex-basis: 100%; font-size: .75rem; color: var(--muted); }
 .img-date-state.on { color: #15803d; }
 .img-date-state.off { color: #b91c1c; font-weight: 600; }
+.img-date-state.idle { color: var(--muted); font-weight: 600; }
 .card.img-hidden-today img { opacity: .45; filter: grayscale(1); }
+
+/* Где показывать картинку: строка на карточке и панель выбора групп */
+.img-where { padding: 0 8px 8px; }
+.img-where-btn { display: block; width: 100%; text-align: left; background: #fff; border: 1px solid var(--line);
+  border-radius: 7px; padding: 5px 7px; font-size: .75rem; color: var(--text); cursor: pointer; line-height: 1.3; }
+.img-where-btn:hover { border-color: var(--accent); }
+.img-where-cap { color: var(--muted); margin-right: 4px; }
+.img-where-val { font-weight: 600; }
+.img-where-warn { margin-top: 4px; font-size: .72rem; color: #b91c1c; font-weight: 600; line-height: 1.3; }
+.groups-pop { position: fixed; z-index: 80; width: 300px; max-height: 70vh; overflow: auto; background: #fff;
+  border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 32px rgba(15,23,42,.18); padding: 12px 14px; cursor: default; }
+.groups-pop-title { font-weight: 700; font-size: .95rem; margin-bottom: 4px; }
+.groups-pop-hint { font-size: .78rem; color: var(--muted); line-height: 1.4; margin-bottom: 10px; }
+.groups-pop-empty { font-size: .82rem; color: var(--muted); line-height: 1.4; padding: 6px 0 10px; }
+.groups-pop-sec { margin-bottom: 10px; }
+.groups-pop-sub { font-size: .78rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 5px; }
+.groups-pop-row { display: flex; align-items: center; gap: 7px; padding: 3px 0; font-size: .88rem; cursor: pointer; }
+.groups-pop-row input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.groups-pop-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); margin-top: 4px; }
+.groups-pop-foot .btn { padding: 7px 14px; font-size: .85rem; }
 /* Обтекание картинки текстом в предпросмотре и в окне наблюдения. */
 .pv-image-wrap img { width: 100%; }
 .pv-check, .pv-group, .pv-inline-sign, .pv-inline-scan, .pv-heading, .watch-check { clear: both; }
@@ -854,8 +948,66 @@ body.watch-solo .content { padding-top: 12px; }
 .special-name { flex: 1; color: var(--muted, #64748b); }
 
 /* Панель оформления блока: плашка, рамка, отступ, межстрочный, список в одну строку. */
-.block-style { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0; }
-.block-style input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--field-line); border-radius: 6px; }
+/* Автовозврат стоит под заголовком документа: он относится ко всему документу, а не к
+   последней странице, возле которой лежал раньше. Подсказка идёт следом в строку, чтобы не
+   разрывать поле и объяснение. */
+.doc-idle { flex-wrap: wrap; margin: 2px 0 10px; }
+.doc-idle .field-hint { flex: 1 1 100%; margin: 0; font-weight: 400; }
+
+/* Флаги в шапке страницы и блока. Всё, что относится к странице, стоит в шапке страницы; всё,
+   что относится к блоку, в шапке блока. Прежде они лежали под содержимым, и на длинной странице
+   до них надо было доскроливать, чтобы узнать, попадёт ли она в PDF. Подписи короткие, полное
+   объяснение осталось в подсказке при наведении. */
+.head-flag { flex: 0 0 auto; gap: 5px; font-size: .84rem; font-weight: 600; color: #4b5563;
+  white-space: nowrap; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px;
+  background: #fff; cursor: pointer; }
+.head-flag:hover { border-color: var(--field-line); }
+.head-flag input { margin: 0; }
+.page-flags { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  flex: 0 0 auto; margin-left: auto; }
+.page-title .page-summary { flex: 1 1 auto; }
+/* Снятый флаг «в PDF» это предупреждение, а не мелочь: блока не будет в бумаге. */
+.head-flag.pdf-flag:has(input:not(:checked)) { border-color: #c08a2e; background: #fffaf0; color: #92400e; }
+.block-mode .head-flag { margin-left: auto; }
+
+/* Оформление блока. Свёрнутая строка вместо пяти полей: пока оформление не задано, оператору
+   незачем видеть настройки, к которым он не знает, что относится. Заголовок сам говорит, что
+   задано, и открытым остаётся только то, чем действительно пользуются. */
+.block-style-box { margin: 8px 0; border: 1px solid var(--line); border-radius: 10px;
+  background: #fbfcfe; }
+.block-style-box.on { border-color: #b3c8e8; background: #f6faff; }
+.block-style-head { display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 8px 12px; list-style: none; user-select: none; }
+.block-style-head::-webkit-details-marker { display: none; }
+.block-style-head::before { content: "▸"; color: var(--muted); font-size: 12px; line-height: 1; }
+.block-style-box[open] .block-style-head::before { content: "▾"; }
+.block-style-name { font-size: .8rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .04em; color: #5a6473; }
+.block-style-sum { font-size: .85rem; color: var(--muted); }
+.block-style-box.on .block-style-sum { color: #1d4ed8; font-weight: 600; }
+.block-style { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center;
+  margin: 0; padding: 0 12px 12px; }
+
+/* Поля внутри мелких подписей. Своего оформления у них не было вовсе, и браузер рисовал их
+   по-своему: на фоне остальной админки это выглядело чужой вставкой. */
+.field-sm input[type=text], .field-sm input[type=number], .field-sm input[type=search],
+.field-sm select, .block-style input[type=text], .block-style input[type=number],
+.block-style select {
+  font-family: inherit; font-size: .9rem; font-weight: 400; color: var(--text);
+  padding: 6px 9px; min-height: 32px; box-sizing: border-box;
+  border: 1px solid var(--field-line); border-radius: 8px; background: #fff;
+}
+.field-sm select, .block-style select { padding-right: 24px; }
+.field-sm input[type=text]:focus, .field-sm input[type=number]:focus, .field-sm select:focus,
+.block-style input[type=text]:focus, .block-style input[type=number]:focus,
+.block-style select:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(21,128,61,.14);
+}
+/* Числовым полям нужен свой запас: подсказка «обычный» обрезалась до «обычнь». */
+.block-style input[type=number] { width: 84px; }
+.block-style input[data-role=blocklh] { width: 112px; }
+.block-image .field-sm input[type=text] { flex: 1 1 220px; min-width: 180px; }
+.block-style input[type="color"] { width: 38px; height: 32px; padding: 2px; border: 1px solid var(--field-line); border-radius: 8px; }
 
 /* Редактор таблицы: ячейки сеткой, ширины столбцов сверху. */
 .block-table { margin: 8px 0; }
@@ -866,7 +1018,40 @@ body.watch-solo .content { padding-top: 12px; }
 .table-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* Правила отметок у страницы. */
-.rules-panel { margin: 10px 0; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; }
+/* Правила отметок. Свёрнуты, пока их нет, и спрятаны целиком там, где связывать нечего. */
+.rules-box { margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfe; }
+.rules-box.on { border-color: #b3c8e8; background: #f6faff; }
+.rules-head { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 8px 12px;
+  list-style: none; user-select: none; }
+.rules-head::-webkit-details-marker { display: none; }
+.rules-head::before { content: "▸"; color: var(--muted); font-size: 12px; line-height: 1; }
+.rules-box[open] .rules-head::before { content: "▾"; }
+.rules-name { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: #5a6473; }
+.rules-sum { font-size: .85rem; color: var(--muted); }
+.rules-box.on .rules-sum { color: #1d4ed8; font-weight: 600; }
+/* Значок «?» рядом с полем или инструментом. Маленький и приглушённый, пока на него не
+   навели: объяснение нужно тому, кто его ищет, и не должно мешать тому, кто уже знает. */
+.help-dot { width: 18px; height: 18px; flex: 0 0 auto; padding: 0; margin-left: 6px;
+  border: 1px solid var(--field-line); border-radius: 50%; background: #fff; color: #4b5563;
+  font-size: 12px; font-weight: 700; line-height: 1; cursor: help; vertical-align: middle; }
+.help-dot:hover { border-color: var(--accent); color: var(--accent); }
+.help-bubble { position: absolute; z-index: 70; max-width: 420px; margin-top: 6px;
+  background: #1a1c22; color: #fff; font-size: .85rem; font-weight: 400; line-height: 1.45;
+  padding: 10px 12px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.28);
+  white-space: normal; text-transform: none; letter-spacing: normal; }
+.cond-adds, .section-label, .field, .field-sm, .head-flag, .spotlight-head, .rules-head,
+.block-style-head { position: relative; }
+
+.rules-help { margin: 0 12px 8px; }
+/* Подсказки «как это работает». Пояснение должно стоять там, где человек в него упирается, а
+   не в отдельной справке, которую никто не открывает. Приглушённые и мелкие: их читают один
+   раз, а потом они не должны мешать. */
+.style-help { margin: 0 12px 8px; }
+.cond-help, .mode-help { margin: 2px 0 8px; }
+.spotlight-help { margin: 4px 0 10px; }
+.pv-from-spot { margin: 0 0 10px; color: #1d4ed8; font-weight: 600; }
+.rules-panel { margin: 0; padding: 0 12px 12px; }
 .rules-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .rule-row { display: flex; align-items: center; gap: 8px; }
 .rule-text { flex: 1; }
@@ -897,10 +1082,17 @@ body.watch-solo .content { padding-top: 12px; }
 /* Погашенное: клиент этого при заданных значениях не увидит. Не скрывается совсем, иначе
    оператор не понял бы, куда делся элемент, и не смог бы его поправить. */
 .pages-editor.spot-on .spot-off { opacity: .32; filter: grayscale(1); position: relative; }
+/* Пометка говорит не только «не покажется», но и почему: бледный прямоугольник без объяснения
+   заставляет оператора искать причину в свёрнутом условии. Полная фраза в подсказке. */
 .pages-editor.spot-on .spot-off::after {
-  content: "не покажется"; position: absolute; top: 4px; right: 6px;
-  background: #64748b; color: #fff; font-size: .72rem; padding: 1px 6px; border-radius: 999px;
+  content: "не покажется"; position: absolute; top: 4px; right: 6px; max-width: 70%;
+  background: #475569; color: #fff; font-size: .72rem; padding: 2px 8px; border-radius: 999px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.pages-editor.spot-on .spot-off[data-spot-why]::after { content: "не покажется: " attr(data-spot-why); }
+/* Погашенное всё-таки читают: на 0.32 текст пропадал вовсе, и понять, что именно погасло,
+   было нельзя. Достаточно ясно, что это фон, но слова остаются словами. */
+.pages-editor.spot-on .spot-off { opacity: .55; }
 /* Страница, от которой ничего не осталось: клиент увидит пустой экран. */
 .pages-editor.spot-on .spot-empty { outline: 2px solid #dc2626; outline-offset: 2px; }
 .pages-editor.spot-on .spot-empty::before {

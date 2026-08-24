@@ -245,7 +245,11 @@ html, body {
    занимает столько, сколько есть, иначе расписываться приходится в узкой полоске. */
 .screen-sign .page-sign-wrap { height: min(52vh, 460px); }
 .screen-sign .page-sign-title { font-size: 1.15rem; }
-.screen-scan .scan-inline { min-height: min(52vh, 460px); }
+/* Страница-экран сканирования: место под камеру занимает столько, сколько нужно. Правило
+   ссылалось на класс .scan-inline, которого страница не создаёт вовсе (сканирование рисуется
+   как .page-scan), и обещанный отдельный экран под камеру ничем не отличался от обычной
+   страницы. */
+.screen-scan .page-scan { min-height: min(52vh, 460px); }
 
 /* Двойные зависимые чекбоксы: варианты в одну строку под вопросом. Их два или три и они
    короткие, поэтому столбик отрывал ответ от вопроса и занимал пол-экрана впустую.
@@ -265,7 +269,7 @@ html, body {
    а рядом с картинкой превратились бы в обрывки. */
 .doc-image-wrap { margin-bottom: 12px; }
 .doc-image-wrap img { width: 100%; }
-.checks, .group, .page-sign, .scan-inline { clear: both; }
+.checks, .group, .page-sign, .page-scan { clear: both; }
 .doc-text::after { content: ""; display: block; clear: none; }
 h2 { clear: both; }
 

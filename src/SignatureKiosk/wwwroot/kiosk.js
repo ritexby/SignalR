@@ -198,12 +198,30 @@
     doc.inputs = {};         // имя поля ввода -> вписанное значение
     doc.pagePads = {};       // имя поля подписи -> перо, чтобы очистить и восстановить
     doc.pad = null;
+    // Итоговая подпись и её копия для наблюдателя. Стереть их обязательно: без этого подпись
+    // прежнего клиента оставалась в памяти, и оператор видел её в наблюдении на экране подписи
+    // следующего человека, который ещё ничего не нарисовал.
+    doc.finalSign = "";
+    doc.finalInk = "";
     doc.submitting = false;
     doc.screens = [];
     (doc.config.pages || []).forEach(function (p, i) {
       doc.screens.push({ type: "page", pageIndex: i });
       // Honour the initial checked state of API-supplied checkboxes.
       (p.checkboxes || []).forEach(function (cb, ci) { if (cb && cb.checked) doc.checks[checkKey(i, ci)] = true; });
+      // Заказ мог прислать отмеченными оба взаимоисключающих пункта. Клиент к ним не притронется
+      // и обработчик отметки не сработает ни разу, а сервер такую подпись отвергнет: оставляем
+      // первый и снимаем остальные, как это делает отметка руками.
+      (p.checkRules || []).forEach(function (rule) {
+        if (!rule || rule.kind !== "exclusive" || !rule.keys) return;
+        var первый = -1;
+        (p.checkboxes || []).forEach(function (cb, ci) {
+          if (!cb || !cb.key || rule.keys.indexOf(cb.key) < 0) return;
+          if (!doc.checks[checkKey(i, ci)]) return;
+          if (первый < 0) { первый = ci; return; }
+          doc.checks[checkKey(i, ci)] = false;
+        });
+      });
       // И выбор в группах, если внешняя система его прислала.
       (p.groups || []).forEach(function (g) { if (g && g.key) doc.picks[g.key] = g.selected || ""; });
     });
@@ -233,7 +251,10 @@
   // server clear their data. Any interaction on the document resets the timer.
   function stopIdle() { if (doc.idleTimer) { clearTimeout(doc.idleTimer); doc.idleTimer = null; } }
   function startIdle() { stopIdle(); if (doc.idleMs > 0) doc.idleTimer = setTimeout(onIdle, doc.idleMs); }
-  function resetIdle() { if (doc.idleMs > 0 && doc.config) startIdle(); }
+  // На камере таймер бездействия намеренно остановлен: клиент там ищет код, а не бездействует.
+  // Слушатель теперь висит на всём документе, поэтому проверяем слой явно, иначе касание экрана
+  // сканирования взводило бы таймер обратно.
+  function resetIdle() { if (doc.idleMs > 0 && doc.config && activeLayer !== "scan") startIdle(); }
   function onIdle() {
     // Privacy first: clear the signer's data from THIS tablet immediately, without waiting for the
     // server. Losing the connection must never leave a client's document on a wall-mounted screen.
@@ -248,7 +269,11 @@
     endDocSession();
     doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {}; doc.picks = {};
     doc.signs = {}; doc.signThumbs = {}; doc.codes = {}; doc.pagePads = {};
-    doc.pad = null; doc.finalInk = ""; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
+    doc.pad = null; doc.finalInk = ""; doc.finalSign = ""; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
+    // Вписанное клиентом стирается вместе со всем остальным: заголовок этого куска обещает не
+    // оставить следа, а значения полей ввода тут забыли, и они лежали в памяти планшета до
+    // следующего документа.
+    doc.inputs = {};
     el.docBody.innerHTML = ""; el.docFooter.innerHTML = "";
     el.docTitle.textContent = ""; el.docProgress.textContent = "";
   }
@@ -259,17 +284,67 @@
   // отмечает прямо сейчас. Сервер уже убрал всё, что решается по тегам, поэтому сюда доходят
   // только условия на чекбоксы и группы. Чекбокс в скрытом блоке считается неотмеченным: так
   // взаимные ссылки между блоками разрешаются сами и не могут зациклиться.
+  // Идёт вычисление видимости этого элемента. Ссылка по кругу (A показывает B, B показывает A)
+  // разрешается в пользу «не видно», иначе вычисление зациклилось бы.
+  var вПути = {};
+  function видноЛи(имя, своё, страница) {
+    if (вПути[имя]) return false;
+    вПути[имя] = true;
+    try { return condHolds(страница) && condHolds(своё); }
+    finally { delete вПути[имя]; }
+  }
+
   function liveValue(key) {
-    if (Object.prototype.hasOwnProperty.call(doc.picks, key)) return doc.picks[key] || "";
-    // Вписанное клиентом значение живёт наравне с отметкой: условие «телефон не пусто» должно
-    // срабатывать, пока он печатает.
-    if (Object.prototype.hasOwnProperty.call(doc.inputs, key)) return doc.inputs[key] || "";
+    // Значение элемента, скрытого условием, считается пустым. Клиент его не видит, планшет его
+    // не отправляет (collectItems, collectGroups, collectInputs шлют только видимое), и сервер
+    // тоже считает его пустым. Раньше здесь бралось сохранённое значение как есть, и цепочка
+    // «пункт A открывает пункт B, B открывает блок C» после снятия A оставляла C на экране: в
+    // запись B не уходил, сервер вырезал C, и в PDF не было текста, под которым человек
+    // расписался. Обещание в пояснении выше при этом стояло с самого начала.
     var found = "";
+    var нашли = false;
+    // Порядок тот же, что на сервере: отметки, потом выбор, потом вписанное. Последнее и
+    // побеждает, если одно имя досталось двум элементам. Раньше порядок был обратный, и хозяин
+    // имени получался разный: на экране одно, в записи другое.
     (doc.config.pages || []).forEach(function (p, pi) {
       (p.checkboxes || []).forEach(function (cb, ci) {
-        if (cb && cb.key === key) found = doc.checks[checkKey(pi, ci)] ? "true" : "false";
+        if (!cb || cb.key !== key) return;
+        нашли = true;
+        found = (видноЛи("c" + pi + "_" + ci, cb.visibleWhen, p.visibleWhen)
+          && doc.checks[checkKey(pi, ci)]) ? "true" : "false";
+      });
+      (p.groups || []).forEach(function (g, gi) {
+        if (!g || g.key !== key) return;
+        нашли = true;
+        found = видноЛи("g" + pi + "_" + gi, g.visibleWhen, p.visibleWhen) ? (doc.picks[key] || "") : "";
+      });
+      (p.inputs || []).forEach(function (inp, ii) {
+        if (!inp || inp.key !== key) return;
+        нашли = true;
+        found = видноЛи("i" + pi + "_" + ii, inp.visibleWhen, p.visibleWhen)
+          ? String(doc.inputs[key] != null ? doc.inputs[key] : (inp.value || "")) : "";
+      });
+      // Имена полей подписи и сканирования тоже живые: сервер объявляет их такими и отдаёт
+      // условие планшету. Значения для них планшет раньше не производил вовсе, и условие
+      // «код отсканирован» не срабатывало ни разу, а обратное держалось всегда.
+      (p.signatures || []).forEach(function (sg, si) {
+        if (!sg || sg.key !== key) return;
+        нашли = true;
+        found = (видноЛи("s" + pi + "_" + si, sg.visibleWhen, p.visibleWhen) && doc.signs[key]) ? "подписано" : "";
+      });
+      (p.scans || []).forEach(function (sc, ni) {
+        if (!sc || sc.key !== key) return;
+        нашли = true;
+        var код = doc.codes[key];
+        found = (видноЛи("n" + pi + "_" + ni, sc.visibleWhen, p.visibleWhen) && код) ? (код.code || "") : "";
       });
     });
+    // Имени в документе нет вовсе: значение могло прийти от присланного по API пункта, которого
+    // в шаблоне не было. Тогда берётся то, что лежит.
+    if (!нашли) {
+      if (Object.prototype.hasOwnProperty.call(doc.picks, key)) return doc.picks[key] || "";
+      if (Object.prototype.hasOwnProperty.call(doc.inputs, key)) return doc.inputs[key] || "";
+    }
     return found;
   }
 
@@ -289,6 +364,21 @@
     return cond.not ? !ok : ok;
   }
 
+  // Дата в том виде, который понимает поле input[type=date], то есть yyyy-MM-dd. Всё, что не
+  // разобралось, отдаётся как есть: поле такое значение отбросит само, и это лучше, чем молча
+  // подставить выдуманную дату.
+  function вДатуПоля(значение) {
+    var v = String(значение == null ? "" : значение).trim();
+    if (!v) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+    var m = v.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})$/);
+    if (m) {
+      var д = ("0" + m[1]).slice(-2), мес = ("0" + m[2]).slice(-2);
+      return m[3] + "-" + мес + "-" + д;
+    }
+    return v;
+  }
+
   // Почему значение не подходит виду поля. Слово в слово как на сервере: расхождение означало
   // бы, что планшет пускает дальше то, что сервер потом отвергнет.
   function badInput(вид, значение) {
@@ -304,9 +394,69 @@
     return "";
   }
 
+  // Число из строки, слово в слово как на сервере (decimal.TryParse по всей строке). parseFloat
+  // читает начало строки и молча отбрасывает хвост: «12 мл» давало 12, «1 500» давало 1, и
+  // планшет открывал блок, который сервер потом выбрасывал из записи и из бумаги.
   function числоИз(текст) {
-    var n = parseFloat(String(текст == null ? "" : текст).trim().replace(",", "."));
+    var v = String(текст == null ? "" : текст).trim().replace(",", ".");
+    if (!/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(v)) return null;
+    var n = parseFloat(v);
     return isFinite(n) ? n : null;
+  }
+
+  // Возраст в полных годах на сегодня, как считает сервер. Пусто, если это не дата.
+  function возрастЛет(текст) {
+    var д = разобратьДату(текст);
+    if (!д) return null;
+    var сейчас = new Date();
+    var лет = сейчас.getFullYear() - д.getFullYear();
+    var м = сейчас.getMonth() - д.getMonth();
+    if (м < 0 || (m0(м) && сейчас.getDate() < д.getDate())) лет--;
+    return лет < 0 ? null : лет;
+    function m0(x) { return x === 0; }
+  }
+
+  // Дата из «01.01.1990», «1990-01-01» или «01/01/1990». Пусто, если разобрать не вышло.
+  function разобратьДату(текст) {
+    var v = String(текст == null ? "" : текст).trim();
+    if (!v) return null;
+    var m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return собрать(+m[1], +m[2], +m[3]);
+    m = v.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})$/);
+    if (m) return собрать(+m[3], +m[2], +m[1]);
+    return null;
+    function собрать(г, мес, д) {
+      if (мес < 1 || мес > 12 || д < 1 || д > 31) return null;
+      var x = new Date(г, мес - 1, д);
+      return (x.getFullYear() === г && x.getMonth() === мес - 1 && x.getDate() === д) ? x : null;
+    }
+  }
+
+  // Дни до годовщины этой даты (день и месяц) в прошлом, этом и следующем году, со знаком:
+  // отрицательное означает, что годовщина прошла столько дней назад. Три года, а не один: так
+  // же считает сервер, иначе окно у края года давало бы на планшете и в записи разный ответ.
+  function дниДоГодовщины(текст) {
+    var д = разобратьДату(текст);
+    if (!д) return null;
+    var сейчас = new Date();
+    var сегодня = new Date(сейчас.getFullYear(), сейчас.getMonth(), сейчас.getDate());
+    var сутки = 24 * 3600 * 1000;
+    var out = [];
+    [сегодня.getFullYear() - 1, сегодня.getFullYear(), сегодня.getFullYear() + 1].forEach(function (год) {
+      var день = д.getDate(), месяц = д.getMonth() + 1;
+      // 29 февраля в невисокосный год празднуют 28-го: иначе такая дата не совпала бы никогда.
+      if (месяц === 2 && день === 29 && !високосный(год)) день = 28;
+      out.push(Math.round((new Date(год, месяц - 1, день) - сегодня) / сутки));
+    });
+    return out;
+    function високосный(г) { return (г % 4 === 0 && г % 100 !== 0) || г % 400 === 0; }
+  }
+
+  // Целое из строки, как int.TryParse на сервере: «5x» не число.
+  function целоеИз(текст) {
+    var v = String(текст == null ? "" : текст).trim();
+    if (!/^[+-]?\d+$/.test(v)) return null;
+    return parseInt(v, 10);
   }
 
   function partValue(cond) {
@@ -333,6 +483,28 @@
       var lim = числоИз(target);
       if (lim === null) return false;
       return cond.op === "numlt" ? n < lim : n >= lim;
+    }
+    // Возраст и годовщина считаются от того, что клиент вписал прямо сейчас. Сервер такие
+    // условия отдаёт планшету, если имя поля живое, а планшет их не знал и сваливался в
+    // сравнение строк: «2020-01-01» сравнивалось с «14». Обязательное поле под таким условием
+    // делало документ непроходимым: на экране его нет, а сервер требует заполнить.
+    if (cond.op === "agelt" || cond.op === "agege") {
+      var лет = возрастЛет(val);
+      var порог = целоеИз(target);
+      if (лет === null || порог === null) return false;
+      return cond.op === "agelt" ? лет < порог : лет >= порог;
+    }
+    if (cond.op === "annivwithin") {
+      var дни = дниДоГодовщины(val);
+      if (!дни) return false;
+      // Окно задаётся как «до/после» или одним числом в обе стороны. Сам день попадает в оба,
+      // поэтому нулевое окно с обеих сторон означает ровно этот день.
+      var части = target.split("/");
+      var до = целоеИз(части[0]);
+      var после = части.length > 1 ? целоеИз(части[1]) : до;
+      if (до === null || до < 0) return false;
+      if (после === null || после < 0) return false;
+      return дни.some(function (d) { return d >= 0 ? d <= до : (-d) <= после; });
     }
     switch (cond.op) {
       case "ne": return val !== target;
@@ -371,7 +543,17 @@
     var uses = false;
     function check(c) {
       condGroups(c).forEach(function (group) {
-        condParts(group).forEach(function (part) { if (part.field === key) uses = true; });
+        condParts(group).forEach(function (part) {
+          // У условия «отмечено не меньше N» поле это перечень имён через запятую, а не одно
+          // имя. Сравнение целой строки с одним именем не совпадало никогда, поэтому отметка
+          // пункта не считалась зависимостью: экран не перерисовывался, и блок, открытый счётом
+          // отметок, на планшете не появлялся, хотя в записи и в бумаге он был.
+          if (part.op === "minchecked") {
+            String(part.field || "").split(",").forEach(function (x) { if (x.trim() === key) uses = true; });
+            return;
+          }
+          if (part.field === key) uses = true;
+        });
       });
     }
     (doc.config.pages || []).forEach(function (p) {
@@ -383,6 +565,10 @@
       // чекбоксом «подписывает представитель», не появлялось бы при его отметке.
       (p.signatures || []).forEach(function (x) { check(x.visibleWhen); });
       (p.scans || []).forEach(function (x) { check(x.visibleWhen); });
+      // И поля ввода: без этого поле, спрятанное за отметкой «есть представитель», не
+      // появлялось при её постановке, а «Далее» уже считало его видимым и пустым. Клиент видел
+      // «Отметьте выделенный пункт», а выделять было нечего: поля на экране не было.
+      (p.inputs || []).forEach(function (x) { check(x.visibleWhen); });
     });
     (doc.config.signBlocks || []).forEach(function (b) { check(b.visibleWhen); });
     (doc.config.signBlocksBelow || []).forEach(function (b) { check(b.visibleWhen); });
@@ -397,11 +583,23 @@
   // такую страницу не присылает, а условие на чекбокс решается здесь, пока клиент отмечает.
   // Раньше такая страница показывалась всё равно, а при отправке её отметки отбрасывались:
   // человек видел страницу, ставил галочки, и они не попадали в запись.
+  // Экран подписи или сканирования существует ради своего поля. Если поле спрятано условием на
+  // то, что клиент отмечает прямо сейчас, показывать нечего: сервер такой экран выбрасывает,
+  // когда условие решается по тегам, а живое условие он оставляет планшету. Без этой проверки
+  // клиент получал шаг с заголовком, пустым телом и кнопкой «Далее».
+  function экранПустой(page) {
+    if (!page) return false;
+    var вид = String(page.kind || "").toLowerCase();
+    if (вид === "signature") return !(page.signatures || []).some(function (x) { return condHolds(x.visibleWhen); });
+    if (вид === "scan") return !(page.scans || []).some(function (x) { return condHolds(x.visibleWhen); });
+    return false;
+  }
+
   function screenVisible(screen) {
     if (!screen) return false;
     if (screen.type !== "page") return true;
     var page = doc.config.pages[screen.pageIndex];
-    return !!page && condHolds(page.visibleWhen);
+    return !!page && condHolds(page.visibleWhen) && !экранПустой(page);
   }
 
   // Ближайший показываемый экран в заданную сторону, начиная со следующего за from.
@@ -454,21 +652,42 @@
       var v = String(doc.inputs[inp.key] != null ? doc.inputs[inp.key] : (inp.value || "")).trim();
       // Пустое обязательное и заполненное неправильно держат кнопку одинаково: и то и другое
       // сервер всё равно не примет.
-      if ((inp.required && !v.length) || badInput((inp.type || "text").toLowerCase(), v))
-        out.push({ kind: "input", key: inp.key || "" });
+      // Пустое обязательное и заполненное неправильно это разные беды, и говорить о них надо
+      // разными словами: «нужно заполнить» над заполненным полем сбивает с толку.
+      var плохо = badInput((inp.type || "text").toLowerCase(), v);
+      if (плохо) out.push({ kind: "input", key: inp.key || "", bad: плохо });
+      else if (inp.required && !v.length) out.push({ kind: "input", key: inp.key || "" });
     });
+    // Правило считается только по тем пунктам, которые клиент действительно видит. Скрытый
+    // условием пункт на планшет не приходит и в запись не уходит, а раньше он считался
+    // отмеченным: планшет пускал дальше, сервер отвергал подпись, и выйти из этого было нельзя.
+    function видимыйПункт(cb) { return cb && cb.key && condHolds(cb.visibleWhen); }
     (page.checkRules || []).forEach(function (rule) {
-      if (!rule || rule.kind !== "minchecked" || !rule.keys) return;
+      if (!rule || !rule.keys) return;
+      if (rule.kind === "exclusive") {
+        // Из взаимоисключающих отмеченным может быть только один. Сервер это проверяет и
+        // отвергает подпись; клиенту надо сказать об этом до того, как он распишется.
+        var отмеченные = [];
+        (page.checkboxes || []).forEach(function (cb, i) {
+          if (!видимыйПункт(cb) || rule.keys.indexOf(cb.key) < 0) return;
+          if (doc.checks[checkKey(pageIndex, i)]) отмеченные.push(i);
+        });
+        if (отмеченные.length > 1)
+          for (var j = 1; j < отмеченные.length; j++)
+            out.push({ kind: "exclusive", key: checkKey(pageIndex, отмеченные[j]) });
+        return;
+      }
+      if (rule.kind !== "minchecked") return;
       var есть = 0;
       (page.checkboxes || []).forEach(function (cb, i) {
-        if (cb && cb.key && rule.keys.indexOf(cb.key) >= 0 && doc.checks[checkKey(pageIndex, i)]) есть++;
+        if (видимыйПункт(cb) && rule.keys.indexOf(cb.key) >= 0 && doc.checks[checkKey(pageIndex, i)]) есть++;
       });
       // Правило показывает на первый неотмеченный пункт из своего перечня: подсветить надо то,
       // что клиенту нажимать, а не абстрактное «правило не выполнено».
       if (есть < (rule.n || 1)) {
         for (var i = 0; i < (page.checkboxes || []).length; i++) {
           var cb = page.checkboxes[i];
-          if (cb && cb.key && rule.keys.indexOf(cb.key) >= 0 && !doc.checks[checkKey(pageIndex, i)]) {
+          if (видимыйПункт(cb) && rule.keys.indexOf(cb.key) >= 0 && !doc.checks[checkKey(pageIndex, i)]) {
             out.push({ kind: "check", key: checkKey(pageIndex, i) });
             break;
           }
@@ -495,7 +714,7 @@
     var missing = missingOn(pageIndex);
     var first = null;
     missing.forEach(function (m) {
-      var attr = m.kind === "check" ? "data-miss-key"
+      var attr = (m.kind === "check" || m.kind === "exclusive") ? "data-miss-key"
         : m.kind === "group" ? "data-miss-group"
         : m.kind === "sign" ? "data-miss-sign"
         : m.kind === "input" ? "data-miss-input" : "data-miss-scan";
@@ -504,9 +723,13 @@
       node.classList.add("miss");
       var note = document.createElement("div");
       note.className = "miss-note";
+      // Про поле ввода раньше говорилось «Нужно отсканировать код»: ветки для него не было, и
+      // оно попадало в общий хвост.
       note.textContent = m.kind === "check" ? "Нужно отметить, чтобы продолжить"
+        : m.kind === "exclusive" ? "Эти пункты нельзя отметить вместе: оставьте один"
         : m.kind === "group" ? "Нужно выбрать один вариант"
         : m.kind === "sign" ? "Нужно расписаться в этом поле"
+        : m.kind === "input" ? (m.bad || "Нужно заполнить это поле")
         : "Нужно отсканировать код";
       node.appendChild(note);
       if (!first) first = node;
@@ -583,19 +806,38 @@
   function watchState() {
     var screen = doc.screens[doc.index];
     var out = { mode: doc.config ? "document" : "slides" };
+    // Сканирование идёт первым: экран камеры закрывает собой и рекламу, и документ, а значит
+    // именно его и видит клиент. Прежде эта проверка стояла ниже ветки рекламы, и когда камеру
+    // открывали на планшете без документа (а это обычный случай), наблюдатель дальше показывал
+    // рекламу: на планшете камера, у оператора слайды.
+    // Размер экрана планшета: ширина и высота окна в точках вёрстки, плотность пикселей и
+    // размер самого экрана. По ним наблюдение строит окно тех же пропорций, а оператор видит,
+    // на чём именно смотрит клиент: на семи дюймах текст переносится не так, как на десяти.
+    // Считается один раз, до всех веток: экран не зависит от того, что на нём сейчас.
+    var экран = {
+      w: Math.round(window.innerWidth || 0),
+      h: Math.round(window.innerHeight || 0),
+      dpr: Math.round((window.devicePixelRatio || 1) * 100) / 100,
+      // window.screen, а не screen: рядом объявлена своя переменная screen с экраном документа,
+      // и без явного window размер брался у неё. Он там не задан, поэтому наблюдение всегда
+      // получало нули и физический размер экрана не показывало ни разу.
+      sw: Math.round((window.screen && window.screen.width) || 0),
+      sh: Math.round((window.screen && window.screen.height) || 0)
+    };
+    out.screen = экран;
+    if (scan && scan.active) {
+      // Про камеру говорим словами: у наблюдателя никакой камеры не открывается и разрешения
+      // не спрашивается, он видит только, что клиент подносит код.
+      out.mode = "scan";
+      out.scanCode = scan.lastCode || "";
+      return out;
+    }
     if (out.mode === "slides") {
       // Реклама тоже показывается наблюдателю: оператору важно видеть, что на экране идёт
       // именно то, что он поставил. Уходит только адрес картинки, сама она у админки уже есть.
       out.slide = slides.images[slides.index] || "";
       out.slideIndex = slides.index + 1;
       out.slideCount = slides.images.length;
-      return out;
-    }
-    if (scan && scan.active) {
-      // Про камеру говорим словами: у наблюдателя никакой камеры не открывается и разрешения
-      // не спрашивается, он видит только, что клиент подносит код.
-      out.mode = "scan";
-      out.scanCode = scan.lastCode || "";
       return out;
     }
     if (!doc.config || !screen) return out;
@@ -606,6 +848,9 @@
     out.checks = doc.checks;
     out.picks = doc.picks;
     out.codes = doc.codes;
+    // Вписанное клиентом: оператор должен видеть не только пустое поле, но и то, что в нём
+    // сейчас набрано. Раньше значения не уходили вовсе, и наблюдение показывало пустоту.
+    out.inputs = doc.inputs || {};
     // Подписи идут картинками только когда они уже готовы: пока клиент ведёт линию, штрихи
     // догоняют отдельным потоком, иначе на каждое движение уходил бы целый PNG.
     var signs = {};
@@ -823,6 +1068,9 @@
   function renderPage(pageIndex) {
     var page = doc.config.pages[pageIndex];
     doc.docPadResize = null;
+    // Пересчёт перьев, поставленных внутри страницы. Список свой у каждой отрисовки: старые
+    // холсты со страницы уже ушли, и трогать их нельзя.
+    var подогнатьПеро = [];
     var body = document.createElement("div");
     // Подпись и сканирование это отдельные экраны: клиент на них занят одним делом, и место
     // под подпись или под камеру занимает столько, сколько нужно, а не полоску среди текста.
@@ -981,6 +1229,10 @@
         видимых.forEach(function (cb) {
           var i = (page.checkboxes || []).indexOf(cb);
           doc.checks[checkKey(pageIndex, i)] = ставим;
+          // Взаимоисключающие пункты нельзя отметить разом: сервер такую подпись не примет, а
+          // клиент об этом узнал бы только в конце, уже расписавшись. Снимаем соседей тут же,
+          // как это делает обычная отметка руками.
+          if (ставим && cb && cb.key) снятьВзаимоисключающие(cb.key);
         });
         watchPush();
         rerender();
@@ -1016,7 +1268,12 @@
       if (inp.placeholder) field.placeholder = inp.placeholder;
       // Значение уже могло прийти из тега или быть введённым до перелистывания страницы.
       var было = doc.inputs[inp.key];
-      field.value = было != null ? было : (inp.value || "");
+      var значение = было != null ? было : (inp.value || "");
+      // Поле вида «дата» принимает только yyyy-MM-dd и молча выбрасывает всё прочее. Внешняя
+      // система шлёт даты как «01.01.1990», и такое значение пропадало: клиент видел пустое
+      // поле, а обязательное ещё и не пускало дальше, пока он не наберёт дату заново.
+      if (вид === "date") значение = вДатуПоля(значение);
+      field.value = значение;
       doc.inputs[inp.key] = field.value;
       var подсказка = document.createElement("div");
       подсказка.className = "page-input-hint";
@@ -1033,10 +1290,26 @@
         проверить();
         watchPush();
         // Перерисовка только если от поля что-то зависит: иначе страница дёргалась бы под
-        // каждым набранным символом и уводила курсор.
-        if (inp.key && dependsOn(inp.key)) rerender(); else updateFooter();
+        // каждым набранным символом и уводила курсор. Но и в этом случае курсор надо вернуть:
+        // страница пересобирается целиком, поле создаётся заново, экранная клавиатура
+        // закрывается, и набрать телефон посимвольно было физически невозможно.
+        if (inp.key && dependsOn(inp.key)) {
+          var место = field.selectionStart, конец = field.selectionEnd, докуда = el.docBody.scrollTop;
+          rerender();
+          var снова = el.docBody.querySelector('[data-miss-input="' + (inp.key || "") + '"] .page-input-field');
+          if (снова) {
+            try { снова.focus({ preventScroll: true }); } catch (e) { снова.focus(); }
+            // Не у всех видов поля есть каретка: у date выбор диапазона выбрасывает исключение.
+            try { if (место != null) снова.setSelectionRange(место, конец); } catch (e) { /* вид поля без каретки */ }
+          }
+          el.docBody.scrollTop = докуда;
+        } else updateFooter();
       });
       field.addEventListener("blur", проверить);
+      // Проверяем сразу при отрисовке, а не только по вводу: значение могло прийти из заказа
+      // негодным (в телефонное поле «уточнить»), и клиент упирался в «Далее» с пустой подсказкой
+      // под полем и надписью «Нужно заполнить это поле» над заполненным полем.
+      проверить();
       return box;
     }
 
@@ -1130,14 +1403,35 @@
       var pad = new SignaturePad(canvas, { minWidth: 1.2, maxWidth: 3.2, penColor: "#111827", throttle: 0, minDistance: 0 });
       attachCoalesced(canvas);
       doc.pagePads[sig.key] = pad;
+      // Поворот планшета или всплывшая системная панель меняют коробку холста, но не его битмап:
+      // нарисованное растягивается, а новая линия идёт со смещением от пальца. На отдельном
+      // экране подписи это учтено, у полей внутри страницы забыли.
+      подогнатьПеро.push(function () {
+        var r2 = wrap.getBoundingClientRect();
+        if (!r2.width || !r2.height) return;
+        var было = null;
+        try { if (!pad.isEmpty()) было = pad.toData(); } catch (e) { было = null; }
+        var k = Math.max(window.devicePixelRatio || 1, 1);
+        canvas.width = Math.round(r2.width * k);
+        canvas.height = Math.round(r2.height * k);
+        canvas.getContext("2d").scale(k, k);
+        pad.clear();
+        if (было && было.length) { try { pad.fromData(было); } catch (e) { /* не восстановилась */ } }
+      });
       var saved = doc.signs[sig.key];
       if (saved) { try { pad.fromDataURL(saved); wrap.classList.add("has-ink"); } catch (e) { /* не восстановилась */ } }
+      var сессияПоля = doc.session;
       pad.addEventListener("endStroke", function () {
+        // Конец росчерка приходит от окна и может прийти уже после смены документа: писать в
+        // состояние следующего клиента нельзя.
+        if (doc.session !== сессияПоля) return;
           doc.signs[sig.key] = pad.isEmpty() ? "" : pad.toDataURL("image/png");
         doc.signThumbs[sig.key] = pad.isEmpty() ? "" : padThumb(canvas);
         watchPush();
         wrap.classList.toggle("has-ink", !pad.isEmpty());
         if (!pad.isEmpty()) clearMiss(wrap.closest(".page-sign"));
+        // От поля подписи может зависеть показ блока: «покажите это, когда клиент расписался».
+        if (sig.key && dependsOn(sig.key)) { rerender(); return; }
         updateFooter();
       });
     }
@@ -1175,6 +1469,8 @@
           doc.codes[sc.key] = { code: code, format: format || "", label: sc.label || "" };
           sync();
           clearMiss(box);
+          // От поля сканирования тоже может зависеть показ: «покажите это, когда код считан».
+          if (sc.key && dependsOn(sc.key)) { rerender(); return; }
           updateFooter();
         } });
       });
@@ -1186,6 +1482,9 @@
 
     el.docBody.innerHTML = "";
     el.docBody.appendChild(body);
+    // Перья внутри страницы теперь пересчитываются вместе с окном, как и итоговое поле подписи.
+    if (подогнатьПеро.length)
+      doc.docPadResize = function () { подогнатьПеро.forEach(function (f) { try { f(); } catch (e) { /* поле уже ушло */ } }); };
     // На последней странице информационного документа дальше идти некуда: следующий экран это
     // прощание. Поэтому кнопка называется «Готово», а не «Далее»: клиент должен понимать, что
     // нажатием он заканчивает, а не переходит куда-то ещё.
@@ -1289,16 +1588,29 @@
     attachCoalesced(canvas);
     // Настройки пера доступны наружу, чтобы их можно было проверить тестом, а не на глаз.
     window.__padForTest = doc.pad;
+    var сессияЭкрана = doc.session;
     doc.pad.addEventListener("beginStroke", function () { hint.style.display = "none"; });
     doc.pad.addEventListener("endStroke", function () {
       updateFooter();
       // Итоговая подпись уходит наблюдателю такой, какая она уже нарисована. Не на каждое
       // движение пера, а по концу штриха: так линия появляется у оператора почти сразу, а
       // канал не забивается сотней картинок в секунду.
+      // Библиотека подписи слушает отпускание на окне, а не на холсте: конец росчерка приходит
+      // и после того, как документ уже сменили и перо обнулили. Без этой проверки страница
+      // падала с ошибкой прямо в руках у клиента.
+      if (!doc.pad || doc.session !== сессияЭкрана) return;
       doc.finalInk = doc.pad.isEmpty() ? "" : padThumb(canvas);
+      // И сама подпись, чтобы вернуть её при возврате на этот экран. Перо создаётся заново на
+      // каждый заход, и без сохранённого оттиска подпись пропадала, стоило клиенту нажать
+      // «Назад» и вернуться: на экране пусто, а у оператора в наблюдении она ещё висит.
+      try { doc.finalSign = doc.pad.isEmpty() ? "" : doc.pad.toDataURL("image/png"); } catch (e) { doc.finalSign = ""; }
       watchPush();
     });
     sizeCanvas();
+    // Возвращаем подпись, если клиент уже расписался и уходил перечитать документ.
+    if (doc.finalSign) {
+      try { doc.pad.fromDataURL(doc.finalSign); hint.style.display = "none"; } catch (e) { /* не восстановилась */ }
+    }
     // Re-measure once the flex layout has settled so the pad fills its final size.
     requestAnimationFrame(sizeCanvas);
     doc.docPadResize = sizeCanvas;
@@ -1533,7 +1845,11 @@
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + (getToken() || "") },
       body: JSON.stringify({ items: collectItems(), groups: collectGroups(),
         signatures: collectSignatures(), scans: collectScans(), inputs: collectInputs(),
-        signature: doc.pad.toDataURL("image/png"), submissionId: doc.submissionId })
+        signature: doc.pad.toDataURL("image/png"), submissionId: doc.submissionId,
+        // Имя показа, под которым мы получили этот документ. Сервер сверит его со своим и
+        // откажет, если на планшет успели послать другой документ: отметки этого клиента иначе
+        // легли бы в снимок следующего.
+        sessionId: doc.serverSession || "" })
     }).then(function (r) {
       if (doc.session !== session) return;          // document was replaced/cleared while sending
       if (r.ok) {
@@ -1575,6 +1891,16 @@
           : (err.status === 409
             ? "Сессия подписания уже завершена. Обратитесь к сотруднику: документ нужно отправить заново."
             : "Планшет потерял доступ. Обратитесь к сотруднику.");
+        // 400 это «чего-то не хватает», и это поправимо: клиент возвращается назад, дозаполняет
+        // и подписывает. Кнопку поэтому возвращаем, иначе она умирала навсегда и выйти из этого
+        // можно было только по таймеру бездействия, а при выключенном таймере вообще никак.
+        // 401, 403 и 409 от повтора не изменятся: там кнопка остаётся выключенной.
+        if (err.status === 400) {
+          doc.submitting = false;
+          var текст = note ? note.textContent : "";
+          updateFooter();
+          if (note) note.textContent = текст;
+        }
         return;
       }
       doc.submitting = false;
@@ -1584,8 +1910,11 @@
   }
 
   window.addEventListener("resize", function () { if (doc.docPadResize) doc.docPadResize(); });
+  // Слушаем на всём документе, а не только на слое документа. Оверлей «Соединение потеряно»
+  // лежит поверх всего и не является потомком этого слоя: клиент тыкал в потемневший экран,
+  // таймер бездействия этого не видел и дотикивал, а по истечении стирал всё заполненное.
   ["pointerdown", "keydown"].forEach(function (ev) {
-    el.document.addEventListener(ev, resetIdle, true);
+    document.addEventListener(ev, resetIdle, true);
   });
 
   // ==================================================================
@@ -1844,7 +2173,15 @@
       // Переподключение внутри той же сессии подписания. Пересоздать документ значило бы
       // сбросить клиента на первую страницу и стереть всё отмеченное из-за моргнувшего Wi-Fi.
       // Сервер прислал бы другое имя сессии, будь это другой показ.
-      if (cmd.sessionId && doc.serverSession === cmd.sessionId && activeLayer === "document") return;
+      // Тот же самый показ: пересоздавать документ нельзя, это сбросило бы клиента на первую
+      // страницу и стёрло всё отмеченное. Слой при этом не проверяем: клиент может быть на
+      // камере, и раньше моргнувший Wi-Fi во время сканирования стирал всю анкету, хотя тот же
+      // обрыв на обычной странице проходил без потерь.
+      if (cmd.sessionId && doc.serverSession === cmd.sessionId && doc.config && doc.screens && doc.screens.length) {
+        // Слой возвращаем только если клиент не на камере: иначе закроем ему сканирование.
+        if (activeLayer !== "scan") { showLayer("document"); renderScreen(); startIdle(); }
+        return;
+      }
       applyDocument(cmd.document, cmd.sessionId);
     }
     else applySlides(cmd.slides);
@@ -1900,7 +2237,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "7.1";
+  var APP_VERSION = "7.3";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {
@@ -1956,9 +2293,21 @@
       }
       applyDocument(config, sessionId);
     });
+    // Планшет отозван. Показывать на нём больше нечего: стираем всё, что было на экране, и сам
+    // токен, чтобы страница не пыталась переподключиться с недействующим доступом до
+    // бесконечности. Дальше это обычный неактивированный планшет: оператор заводит новый код.
+    conn.on("Revoked", function () {
+      // Токен стирается обоими способами сразу: страница хранит его и в localStorage, и в куке
+      // и восстанавливает одно из другого, поэтому чистить надо в одном месте, где это учтено.
+      clearToken();
+      showEnroll("Планшет отвязан от системы. Обратитесь к администратору за новым кодом активации.");
+    });
     conn.on("Identify", function (p) { showIdentify(p && p.code, p && p.name); });
     conn.on("StartScan", startScan);
-    conn.on("StopScan", stopScan);
+    // Не просто гасим камеру, а возвращаем экран: сервер обычно шлёт следом документ или рекламу,
+    // но если второе сообщение не доедет (обрыв ровно между ними), планшет оставался на чёрном
+    // экране «Поднесите код к камере» с мёртвым видео и без единого таймера, до переподключения.
+    conn.on("StopScan", function () { leaveScan(); });
     // За планшетом начали или перестали смотреть. Пока не смотрят, он не рассказывает ничего.
     conn.on("WatchOn", function () { watch.on = true; watchPush(); });
     conn.on("WatchOff", function () { watch.on = false; });

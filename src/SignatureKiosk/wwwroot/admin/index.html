@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v7.1</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v7.3</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -44,7 +44,7 @@
         <div class="panel-head">
           <h2>Слайды (реклама)</h2>
         </div>
-        <p class="hint">Реклама отправится выбранному адресату («Кому»): все / группа / конкретный планшет. Выбор здесь не зависит от вкладки «Документ». Номер на картинке - её порядок.</p>
+        <p class="hint">Реклама отправится выбранному адресату («Кому»): все / группа / конкретный планшет. Выбор здесь не зависит от вкладки «Документ». Номер на картинке - её порядок: показывается только отмеченное, остальное лежит в запасе. У каждой картинки отдельно задаются сроки показа и строка «Где»: в каких группах её показывать и в каких не показывать.</p>
         <div class="toolbar">
           <label class="target-inline">Кому:
             <select id="slidesTarget"></select>
@@ -70,11 +70,17 @@
              документов несколько, и только потом что с этим документом делать. Прежде
              переключатель был выпадающим списком ниже панели кнопок, и о существовании других
              документов не догадывался никто. -->
+        <!-- Шапка документа прилипает к верху: правку делают в блоке где-нибудь на пятой
+             странице, а сохранять и отправлять надо кнопками отсюда. Прокручивать за ними весь
+             документ вверх и обратно значит терять место, на котором работал. Пояснение к
+             заголовку убрано под значок «?»: две строки текста, прочитанные один раз, не должны
+             занимать место в шапке, которая теперь висит на экране всегда. -->
+        <div class="doc-head-sticky" id="docHeadSticky">
         <div id="docTabs" class="doc-tabs" role="tablist" aria-label="Документы"></div>
-        <div class="panel-head">
+        <div class="panel-head doc-head-row">
           <h2 id="docHeading">Документ для подписанта</h2>
+          <span id="docHint" class="hidden">Документ показывается только на один выбранный планшет (вместе с его персональными данными). Реклама (вкладка «Слайды») настраивается отдельно и может идти на все планшеты, группу или один - это независимо.</span>
         </div>
-        <p class="hint" id="docHint">Документ показывается только на один выбранный планшет (вместе с его персональными данными). Реклама (вкладка «Слайды») настраивается отдельно и может идти на все планшеты, группу или один - это независимо.</p>
         <div class="toolbar">
           <label class="target-inline">Планшет:
             <select id="docTarget"></select>
@@ -89,19 +95,22 @@
           <!-- Пометка стоит слева, где есть свободное место: внутри ряда кнопок она раздвигала
                его и «Отправить на планшет» уезжала на вторую строку. -->
           <span id="docDirty" class="dirty-mark hidden">есть несохранённые изменения</span>
-          <!-- Кнопки собраны в три группы разной природы, а не в один ряд из семи. Слева
-               проверить и посмотреть, посередине сохранить, справа работа с планшетом.
-               Сохранение выделено рамкой: это единственное здесь действие, которое меняет
-               документ на сервере. -->
+          <div class="tb-group tb-group-save" role="group" aria-label="Сохранение">
+            <button id="saveDocument" class="btn btn-ghost" data-icon="save" title="Записать документ на сервер">Сохранить</button>
+          </div>
+          <!-- Сохранение ушло наверх, к пометке о несохранённом: это одно дело, и держать их в
+               разных рядах значило заставлять глаз прыгать. Внизу осталось две группы разной
+               природы: слева проверить и посмотреть, справа работа с планшетом. -->
           <div class="toolbar-actions">
+            <div class="tb-group" role="group" aria-label="Правка">
+              <button id="undoDoc" class="btn btn-ghost" data-icon="back" disabled
+                      title="Вернуть документ на шаг назад (Ctrl+Z)">Шаг назад</button>
+            </div>
             <div class="tb-group" role="group" aria-label="Проверка и просмотр">
               <button id="checkDoc" class="btn btn-ghost" data-icon="shield" title="Найти ошибки в документе до того, как он попадёт к клиенту">Проверить</button>
               <button id="previewDoc" class="btn btn-ghost" data-icon="eye" title="Посмотреть, как документ будет выглядеть на планшете, с тестовыми значениями тегов">Предпросмотр</button>
               <button id="pdfLayout" class="btn btn-ghost" data-icon="page" title="Показать листы будущего PDF и расставить на них подписи мышью">PDF</button>
               <button id="apiTest" class="btn btn-ghost" data-icon="send" title="Вставить запрос, как будто он пришёл по API, и выполнить его целиком">API</button>
-            </div>
-            <div class="tb-group tb-group-save" role="group" aria-label="Сохранение">
-              <button id="saveDocument" class="btn btn-ghost" data-icon="save" title="Записать документ на сервер">Сохранить</button>
             </div>
             <div class="tb-group" role="group" aria-label="Планшет">
               <button id="showSlides" class="btn btn-ghost" data-icon="back"
@@ -111,6 +120,11 @@
             </div>
           </div>
         </div>
+        <!-- Выбран планшет, которого нет на связи. Приписка «(не на связи)» внутри закрытого
+             списка легко проходит мимо глаз, а последствие важное: документ с данными клиента
+             ляжет и покажется, когда планшет вернётся, возможно уже при другом человеке. -->
+        </div><!-- /.doc-head-sticky -->
+        <div id="docOffline" class="note-box note-warn hidden"></div>
         <div id="docNoDevices" class="note-box note-warn hidden">
           Планшетов пока нет, поэтому отправить документ некуда. Заведите планшет на вкладке «Планшеты»: там создаётся код активации, который вводится на планшете один раз. Документ можно готовить и без планшета, а также посмотреть в предпросмотре.
         </div>
@@ -125,17 +139,22 @@
           <label class="field">Заголовок документа
             <input id="docTitle" type="text" />
           </label>
+          <!-- Автовозврат относится ко всему документу, поэтому стоит здесь, рядом с его
+               заголовком, а не в самом низу редактора, куда до него надо было доскроливать. -->
+          <label class="field-inline doc-idle" id="idleReturnField">Автовозврат к рекламе, сек
+            <input id="idleReturn" type="number" min="0" max="3600" />
+            <span class="field-hint">Планшет сам вернётся к рекламе, если клиент отошёл. 0 = не возвращать.</span>
+          </label>
           <div id="rtBarHost" class="rt-bar-host"></div>
           <div id="spotlightHost"></div>
           <div id="pagesEditor" class="pages-editor"></div>
           <button id="addPage" class="btn btn-ghost btn-add" data-icon="plus">Добавить страницу</button>
-          <div class="doc-extra">
-            <label class="field">Текст над полем подписи
+          <!-- Текст над полем подписи относится к странице подписи: редактор переносит это поле
+               в её карточку, когда та строится. Здесь оно лежит только потому, что разметка
+               статическая, а карточка собирается кодом. -->
+          <div class="doc-extra hidden" id="docExtra">
+            <label class="field" id="signPromptField">Текст над полем подписи
               <input id="signPrompt" type="text" />
-            </label>
-            <label class="field">Автовозврат к рекламе, сек
-              <input id="idleReturn" type="number" min="0" max="3600" />
-              <span class="field-hint">Планшет сам вернётся к рекламе, если клиент отошёл. 0 = не возвращать.</span>
             </label>
           </div>
         </div>

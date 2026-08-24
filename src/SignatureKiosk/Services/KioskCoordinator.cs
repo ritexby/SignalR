@@ -61,16 +61,28 @@ public class KioskCoordinator
 
     // ---------- Build payloads ----------
 
-    public SlidesPayload BuildSlidesPayload(KioskState state)
+    public SlidesPayload BuildSlidesPayload(KioskState state, string? deviceId = null)
     {
         // Картинка со сроком показа выпадает из списка сама, когда срок не наступил или прошёл.
         // Считается на сервере и по дню, а не по часам: реклама живёт днями, и час начала показа
         // никому не нужен. Планшет получает уже готовый список и ничего про сроки не знает.
         var today = DateTime.Now.Date;
         var images = _storage.GetImages().ToDictionary(i => i.Id, i => i);
+        var device = string.IsNullOrEmpty(deviceId) ? null : _storage.GetDevice(deviceId!);
+        return СобратьСлайды(state, device, images, today);
+    }
+
+    /// <summary>
+    /// Сборка списка для одного планшета из уже прочитанных картинок. Отдельный метод нужен там,
+    /// где планшетов много: при двухстах читать список картинок на каждого значило бы двести
+    /// разборов одного и того же файла подряд.
+    /// </summary>
+    private static SlidesPayload СобратьСлайды(KioskState state, Device? device,
+        IReadOnlyDictionary<string, ImageInfo> images, DateTime today)
+    {
         var urls = new List<string>();
         foreach (var imgId in state.PlaylistImageIds)
-            if (images.TryGetValue(imgId, out var info) && ImageShowsToday(info, today))
+            if (images.TryGetValue(imgId, out var info) && ImageShowsToday(info, today) && ImageShowsOnDevice(info, device))
                 urls.Add("/media/" + info.FileName);
         return new SlidesPayload { Images = urls, IntervalSec = state.IntervalSec };
     }
@@ -91,13 +103,26 @@ public class KioskCoordinator
         {
             var state = states.Devices.TryGetValue(dev.Id, out var s) ? s : states.Default;
             if (state.Mode == "document") continue;
-            var urls = new List<string>();
-            foreach (var imgId in state.PlaylistImageIds)
-                if (images.TryGetValue(imgId, out var info) && ImageShowsToday(info, today))
-                    urls.Add("/media/" + info.FileName);
             await _hub.Clients.Group(DeviceGroup(dev.Id))
-                .SendAsync("ShowSlides", new SlidesPayload { Images = urls, IntervalSec = state.IntervalSec });
+                .SendAsync("ShowSlides", СобратьСлайды(state, dev, images, today));
         }
+    }
+
+    /// <summary>
+    /// Показывается ли картинка на этом планшете, по заданным ей группам. Пустые списки означают
+    /// «везде»: именно так ведут себя все картинки, которым группы не задавали.
+    /// </summary>
+    public static bool ImageShowsOnDevice(ImageInfo info, Device? device)
+    {
+        var только = info.GroupIds ?? new List<string>();
+        var кроме = info.ExceptGroupIds ?? new List<string>();
+        if (только.Count == 0 && кроме.Count == 0) return true;
+        var свои = device?.GroupIds ?? new List<string>();
+        // Запрет сильнее разрешения: планшет, попавший и в «показывать», и в «кроме», картинку не
+        // увидит. Иначе одна и та же настройка значила бы разное в зависимости от порядка чтения.
+        if (кроме.Count > 0 && свои.Any(g => кроме.Contains(g))) return false;
+        if (только.Count == 0) return true;
+        return свои.Any(g => только.Contains(g));
     }
 
     /// <summary>Показывается ли картинка сегодня, по заданным ей срокам.</summary>
@@ -197,7 +222,7 @@ public class KioskCoordinator
                 state.GroupSelections, state.CheckboxStates, state.Texts, state.GroupOptions);
             return new CurrentCommand { Mode = "document", Document = doc, SessionId = state.SessionId };
         }
-        return new CurrentCommand { Mode = "slides", Slides = BuildSlidesPayload(state) };
+        return new CurrentCommand { Mode = "slides", Slides = BuildSlidesPayload(state, deviceId) };
     }
 
     // ---------- State mutation ----------
@@ -287,14 +312,22 @@ public class KioskCoordinator
             return targets.Where(did => !IsShowingDocument(states, did)).ToList();
         });
 
-        var payload = BuildSlidesPayload(new KioskState { PlaylistImageIds = playlist, IntervalSec = intervalSec });
+        // Список у каждого свой: картинке можно задать группы, где её показывать и где не
+        // показывать, поэтому один общий набор на всех больше не годится. Картинки и планшеты
+        // читаются один раз на всех, а не на каждого.
+        var картинки = _storage.GetImages().ToDictionary(i => i.Id, i => i);
+        var сегодня = DateTime.Now.Date;
+        var планшеты = _storage.GetDevices().ToDictionary(d => d.Id, d => d);
+        var набор = new KioskState { PlaylistImageIds = playlist, IntervalSec = intervalSec };
         // Считаем только тех, кто действительно на связи: сохранить настройку и показать её на
         // экране это разные события, и оператору важно знать, случилось ли второе.
         var online = _tracker.OnlineDeviceIds();
         var дошло = 0;
         foreach (var deviceId in recipients)
         {
-            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
+            планшеты.TryGetValue(deviceId, out var планшет);
+            await _hub.Clients.Group(DeviceGroup(deviceId))
+                .SendAsync("ShowSlides", СобратьСлайды(набор, планшет, картинки, сегодня));
             if (online.Contains(deviceId)) дошло++;
         }
         return дошло;
@@ -340,10 +373,15 @@ public class KioskCoordinator
 
         foreach (var kv in images)
         {
+            // Пустой тег и пустое значение это ошибка заказа, а не «ничего не присылали»: все
+            // прочие беды с картинками отвечают отказом с именем тега, и молчать тут значит
+            // отдать «ок» на документ, в котором картинки не окажется.
             var tag = (kv.Key ?? "").Trim();
-            if (tag.Length == 0) continue;
+            if (tag.Length == 0)
+                return "У картинки не задано имя тега: непонятно, куда её ставить.";
             var raw = (kv.Value ?? "").Trim();
-            if (raw.Length == 0) continue;
+            if (raw.Length == 0)
+                return "Картинка «" + tag + "» пришла пустой.";
             if (raw.Length > MaxApiImageChars)
                 return "Картинка «" + tag + "» слишком большая: не больше двух мегабайт в BASE64.";
 
@@ -376,14 +414,28 @@ public class KioskCoordinator
         return null;
     }
 
+    /// <param name="отброшено">
+    /// Что не поместилось в пределы и до клиента не доехало. Внешней системе нельзя показать
+    /// предупреждение, у неё есть только ответ: молчаливая обрезка означала бы «ок» на заказ, из
+    /// которого клиент части не увидел, и обязательного пункта в том числе.
+    /// </param>
     public async Task ShowDocumentAsync(string deviceId, IReadOnlyDictionary<string, string>? fields = null,
         IReadOnlyList<DocCheckbox>? checkboxes = null, IReadOnlyList<GroupSelectionDto>? groups = null,
-        IReadOnlyDictionary<string, string>? images = null, DocumentInfo? документ = null)
+        IReadOnlyDictionary<string, string>? images = null, DocumentInfo? документ = null,
+        List<string>? отброшено = null)
     {
         var fieldMap = new Dictionary<string, string>();
         if (fields is not null)
+        {
+            if (fields.Count > MaxFields)
+                отброшено?.Add("тегов прислано " + fields.Count + ", взято " + MaxFields + ": лишние не подставлены");
             foreach (var kv in fields.Take(MaxFields))
+            {
+                if ((kv.Value?.Length ?? 0) > MaxFieldValueLength)
+                    отброшено?.Add("значение тега «" + kv.Key + "» обрезано до " + MaxFieldValueLength + " знаков");
                 fieldMap[Cut(kv.Key, MaxFieldNameLength)] = Cut(kv.Value, MaxFieldValueLength);
+            }
+        }
 
         // Какой документ показывать, решает вызывающий: он уже проверил код и отказал, если
         // такого документа нет. Здесь остаётся взять его текст.
@@ -425,10 +477,18 @@ public class KioskCoordinator
                 SetText(key, c.Label, c.LabelAppend);
                 continue;
             }
-            if (cbs.Count >= MaxDynamicCheckboxes) continue;
+            if (cbs.Count >= MaxDynamicCheckboxes)
+            {
+                отброшено?.Add("пункт «" + key + "» не показан: пунктов сверх " + MaxDynamicCheckboxes + " не бывает");
+                continue;
+            }
             cbs.Add(new DocCheckbox
             {
                 Key = key,
+                // Условие показа приходило в запросе, принималось кодом 200 и молча терялось:
+                // пункт, присланный скрытым и уже отмеченным, показывался клиенту и попадал в
+                // запись и в бумагу.
+                VisibleWhen = c.VisibleWhen,
                 Label = Cut(c.Label, MaxCheckboxLabelLength),
                 Required = c.Required,
                 Checked = c.Checked
@@ -492,11 +552,32 @@ public class KioskCoordinator
         await NotifyAdminsDevicesAsync();
     }
 
+    /// <summary>
+    /// Планшет отозван. Отзыв должен значить «этот экран больше ничего нашего не показывает»,
+    /// поэтому здесь три действия сразу: стереть данные подписанта, сказать самому планшету, что
+    /// он отвязан, и разорвать его соединение. Одной пометки в списке планшетов не хватало:
+    /// личность в хабе проверяется один раз, на рукопожатии, и уже открытое соединение
+    /// продолжало получать документы следующих клиентов. Ровно от этого отзыв и нужен, когда
+    /// планшет украли или один код используется на двух экранах.
+    /// </summary>
+    public async Task RevokeDeviceAsync(string deviceId)
+    {
+        ClearSignerSession(deviceId);
+        try { await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("Revoked"); }
+        catch { /* планшета может уже не быть на связи: разрыв ниже всё равно нужен */ }
+        foreach (var id in _tracker.ConnectionIds(deviceId))
+        {
+            // Каждое соединение отдельно: один и тот же код мог быть заведён на нескольких
+            // экранах, и закрыть надо все, а не первое попавшееся.
+            try { await _hub.Clients.Client(id).SendAsync("Revoked"); } catch { /* уже отвалилось */ }
+        }
+    }
+
     /// <summary>Return one tablet to advertising and clear its signer data, then push its slides.</summary>
     public async Task ReturnToSlidesAsync(string deviceId)
     {
         ClearSignerSession(deviceId);
-        var payload = BuildSlidesPayload(_storage.ResolveState(deviceId));
+        var payload = BuildSlidesPayload(_storage.ResolveState(deviceId), deviceId);
         await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", payload);
         await NotifyWatchersReloadAsync(deviceId);
     }
@@ -506,8 +587,15 @@ public class KioskCoordinator
     /// command (the tablet is showing its local thank-you screen). This closes the window where a
     /// reconnect right after signing could redisplay the just-signed document with its data.
     /// </summary>
-    public void ClearSignerSession(string deviceId)
+    /// <param name="толькоСессию">
+    /// Стирать только этот показ. Между чтением снимка и очисткой оператор мог послать на тот же
+    /// планшет следующий документ: без сверки стиралась бы уже его сессия, и новый клиент, у
+    /// которого документ на экране, получал бы на подписи «на этом планшете ничего не
+    /// подписывают». Пусто означает «стереть то, что есть», как при возврате к рекламе.
+    /// </param>
+    public void ClearSignerSession(string deviceId, string? толькоСессию = null)
     {
+        var стёрли = false;
         _storage.MutateStates(states =>
         {
             // Always write a per-device slides override (creating it if needed) so this device
@@ -517,6 +605,9 @@ public class KioskCoordinator
                 s = states.Default.Clone();
                 states.Devices[deviceId] = s;
             }
+            if (толькоСессию is not null && !string.Equals(s.SessionId ?? "", толькоСессию, StringComparison.Ordinal))
+                return;   // на планшете уже другой показ: он не наш, и трогать его нельзя
+            стёрли = true;
             s.Mode = "slides";
             s.Fields.Clear();
             s.DynamicCheckboxes.Clear();
@@ -529,8 +620,9 @@ public class KioskCoordinator
             s.DocumentSetUtc = null;
             s.SessionId = null;
         });
-        // Снимок сессии это тоже данные подписанта: уходит вместе с ними.
-        _storage.DeleteDocSession(deviceId);
+        // Снимок сессии это тоже данные подписанта: уходит вместе с ними. Но только если мы
+        // действительно стёрли свой показ, а не наткнулись на чужой.
+        if (стёрли) _storage.DeleteDocSession(deviceId);
     }
 
     /// <summary>
