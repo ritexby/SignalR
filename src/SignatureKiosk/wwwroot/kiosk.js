@@ -175,6 +175,10 @@
   // Signing document flow
   // ==================================================================
   var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null, idleTimer: null, idleMs: 0, thankTimer: null, session: 0 };
+  // Щель для проверок, как и __padForTest рядом: без неё нельзя развести то, что знает
+  // страница, и то, что знает снимок на сервере, а именно на этом расхождении и проверяется,
+  // объясняет ли планшет отказ сервера или выдаёт его за обрыв связи.
+  window.__docForTest = doc;
 
   function isInfoDoc() {
     return !!doc.config && String(doc.config.kind || "").toLowerCase() === "info";
@@ -1541,10 +1545,19 @@
       // временном сбое связи. Если сессия уже закрыта или планшет отвязан, предлагать
       // «попробуйте ещё раз» значит заставлять человека жать кнопку, которая не сработает
       // никогда.
-      var err = new Error("bad status " + r.status);
-      err.status = r.status;
-      err.permanent = r.status === 401 || r.status === 403 || r.status === 409;
-      throw err;
+      // Причину отказа сервер пишет в теле. Без неё человеку нечего сказать, а «попробуйте ещё
+      // раз» при отказе по существу это бесконечная кнопка.
+      return r.text().then(function (t) {
+        var причина = "";
+        try { причина = (JSON.parse(t) || {}).error || ""; } catch (e) { причина = ""; }
+        var err = new Error("bad status " + r.status);
+        err.status = r.status;
+        err.reason = причина;
+        // Повтор помогает только при сбое связи. Отказ по существу (400), закрытая сессия (409)
+        // и потерянный доступ (401, 403) от повтора не изменятся.
+        err.permanent = r.status === 400 || r.status === 401 || r.status === 403 || r.status === 409;
+        throw err;
+      });
     }).catch(function (err) {
       // A failed signature is the worst failure for the client, so it is always reported.
       reportError("Не удалось отправить подпись", err && (err.stack || err.message || String(err)));
@@ -1553,9 +1566,15 @@
       if (err && err.permanent) {
         // Кнопку не возвращаем: нажимать её бессмысленно, а нарисованная подпись остаётся
         // на экране, чтобы сотрудник видел, что человек расписался.
-        if (note) note.textContent = err.status === 409
-          ? "Сессия подписания уже завершена. Обратитесь к сотруднику: документ нужно отправить заново."
-          : "Планшет потерял доступ. Обратитесь к сотруднику.";
+        // Текст сервера показывается только при отказе по существу (400): там он написан для
+        // человека и по-русски, вроде «Не заполнено обязательное: пункт «Я согласен»». У 401,
+        // 403 и 409 в теле лежит служебная пометка для внешней системы, и клиенту от неё нет
+        // никакой пользы: там свои понятные предложения.
+        if (note) note.textContent = (err.status === 400 && err.reason)
+          ? err.reason
+          : (err.status === 409
+            ? "Сессия подписания уже завершена. Обратитесь к сотруднику: документ нужно отправить заново."
+            : "Планшет потерял доступ. Обратитесь к сотруднику.");
         return;
       }
       doc.submitting = false;
@@ -1881,7 +1900,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "7.0";
+  var APP_VERSION = "7.1";
 
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {
@@ -1924,7 +1943,19 @@
       .build();
 
     conn.on("ShowSlides", applySlides);
-    conn.on("ShowDocument", function (config, sessionId) { applyDocument(config, sessionId); });
+    conn.on("ShowDocument", function (config, sessionId) {
+      // Тот же самый показ, а не новый: планшет уже показывает этот документ, и клиент в нём
+      // что-то заполнил. Пересоздать его значило бы стереть заполненное и вернуть человека на
+      // первую страницу. Новый показ всегда приходит с другим именем сессии, так что настоящую
+      // смену документа это не пропустит.
+      if (sessionId && doc.serverSession === sessionId && doc.config && doc.screens && doc.screens.length) {
+        showLayer("document");
+        renderScreen();
+        startIdle();
+        return;
+      }
+      applyDocument(config, sessionId);
+    });
     conn.on("Identify", function (p) { showIdentify(p && p.code, p && p.name); });
     conn.on("StartScan", startScan);
     conn.on("StopScan", stopScan);

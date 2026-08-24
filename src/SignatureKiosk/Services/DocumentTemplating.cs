@@ -593,6 +593,14 @@ public static partial class DocumentTemplating
             IdleReturnSec = doc.IdleReturnSec,
             PdfFontScale = doc.PdfFontScale,
             PdfSignatureScale = doc.PdfSignatureScale,
+            // Колонтитул тоже настройка документа, а не подставляемое значение, но в снимок он
+            // не попадал, а PDF собирается именно из снимка. Из-за этого номер страницы, название
+            // документа, номер записи и штрихкод не печатались никогда: настройка в редакторе
+            // сохранялась, а до бумаги не доходила.
+            PdfPageNumbers = doc.PdfPageNumbers,
+            PdfFooterTitle = doc.PdfFooterTitle,
+            PdfFooterRecordId = doc.PdfFooterRecordId,
+            PdfFooterBarcode = doc.PdfFooterBarcode,
             // Раскладка подписей от подставленных значений не зависит, но донести её до PDF надо:
             // иначе размещённая подпись напечаталась бы ещё раз в потоке текста.
             SignaturePlacements = doc.SignaturePlacements ?? new List<SignaturePlacement>(),
@@ -710,12 +718,19 @@ public static partial class DocumentTemplating
         _ => null
     };
 
+    /// <param name="inputValues">
+    /// Вписанное клиентом. На планшете значение поля живёт в условиях наравне с отметкой: условие
+    /// «телефон не пусто» открывает блок прямо во время набора. Без этих значений блок, который
+    /// человек своими руками открыл, пропадал из записи и из PDF.
+    /// </param>
     public static void ApplyLiveConditions(DocumentConfig doc,
-        IReadOnlyDictionary<string, bool> checkboxStates, IReadOnlyDictionary<string, string> groupSelections)
+        IReadOnlyDictionary<string, bool> checkboxStates, IReadOnlyDictionary<string, string> groupSelections,
+        IReadOnlyDictionary<string, string>? inputValues = null)
     {
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var kv in checkboxStates) values[kv.Key] = kv.Value ? "true" : "false";
         foreach (var kv in groupSelections) values[kv.Key] = kv.Value ?? "";
+        foreach (var kv in inputValues ?? new Dictionary<string, string>()) values[kv.Key] = kv.Value ?? "";
 
         var pages = new List<DocPage>();
         foreach (var p in doc.Pages ?? new List<DocPage>())
@@ -1092,6 +1107,21 @@ public static partial class DocumentTemplating
                string.Join("; ", мешают) + ".";
     }
 
+    /// <summary>
+    /// Имя вида «sign1», «sign2»... первое, которое ещё никем не занято. Нужно там, где оператор
+    /// имя не задал: молча взять «sign1» на каждой странице значило бы, что две разные подписи
+    /// зовутся одинаково, и в записи вторая ложится поверх первой.
+    /// </summary>
+    private static string СвободноеИмя(string основа, HashSet<string> занятые)
+    {
+        for (var i = 1; i < 1000; i++)
+        {
+            var имя = основа + i;
+            if (!занятые.Contains(имя)) return имя;
+        }
+        return основа + Guid.NewGuid().ToString("N")[..6];
+    }
+
     public static void Sanitize(DocumentConfig doc)
     {
         // Вид документа: всё, кроме известного, это обычный подписной.
@@ -1105,6 +1135,23 @@ public static partial class DocumentTemplating
         doc.IdleReturnSec = Math.Clamp(doc.IdleReturnSec, 0, 3600);
 
         doc.Pages = Compact(doc.Pages);
+        // Все имена документа в одном множестве: имя должно означать одно и то же во всём
+        // документе, поэтому и придуманное автоматически не может совпасть с тем, что оператор
+        // задал руками на другой странице.
+        var занятые = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in doc.Pages)
+        {
+            foreach (var c in p.Checkboxes ?? new List<DocCheckbox>())
+                if (c is not null) { var k = CleanKey(c.Key); if (k.Length > 0) занятые.Add(k); }
+            foreach (var g in p.Groups ?? new List<DocGroup>())
+                if (g is not null) { var k = CleanKey(g.Key); if (k.Length > 0) занятые.Add(k); }
+            foreach (var x in p.Signatures ?? new List<DocSignature>())
+                if (x is not null) { var k = CleanKey(x.Key); if (k.Length > 0) занятые.Add(k); }
+            foreach (var x in p.Scans ?? new List<DocScan>())
+                if (x is not null) { var k = CleanKey(x.Key); if (k.Length > 0) занятые.Add(k); }
+            foreach (var x in p.Inputs ?? new List<DocInput>())
+                if (x is not null) { var k = CleanKey(x.Key); if (k.Length > 0) занятые.Add(k); }
+        }
         foreach (var p in doc.Pages)
         {
             CleanCondition(p.VisibleWhen);
@@ -1154,12 +1201,15 @@ public static partial class DocumentTemplating
 
             // Подписи и сканирования внутри страницы. Имя нужно, чтобы отличить их друг от друга
             // в записи подписи и в PDF; если оператор его не задал, оно подставляется по номеру.
+            // Номер сквозной по всему документу и не повторяет уже занятые имена: счёт в пределах
+            // страницы давал «sign1» на каждой, и в записи две подписи сливались в один файл.
             p.Signatures = Compact(p.Signatures);
             for (var i = 0; i < p.Signatures.Count; i++)
             {
                 var sig = p.Signatures[i];
                 sig.Key = CleanKey(sig.Key);
-                if (sig.Key.Length == 0) sig.Key = "sign" + (i + 1);
+                if (sig.Key.Length == 0) sig.Key = СвободноеИмя("sign", занятые);
+                занятые.Add(sig.Key);
                 sig.Label = Clamp(sig.Label);
                 // Размер места под подпись: уже десятой части страницы расписаться негде, а выше
                 // трёхсот точек оно занимает лист целиком и выталкивает текст на новую страницу.
@@ -1177,7 +1227,8 @@ public static partial class DocumentTemplating
             {
                 var sc = p.Scans[i];
                 sc.Key = CleanKey(sc.Key);
-                if (sc.Key.Length == 0) sc.Key = "scan" + (i + 1);
+                if (sc.Key.Length == 0) sc.Key = СвободноеИмя("scan", занятые);
+                занятые.Add(sc.Key);
                 sc.Label = Clamp(sc.Label);
                 sc.VisibleWhen = Normalized(sc.VisibleWhen);
             }
@@ -1481,7 +1532,13 @@ public static partial class DocumentTemplating
         var list = Compact(runs);
         foreach (var r in list) CleanRun(r);
         list = list.Where(r => !string.IsNullOrEmpty(r.Text)).Take(MaxRunsPerLabel).ToList();
-        var оформлено = list.Any(r => r.Bold || r.Italic || !string.IsNullOrEmpty(r.Color) || !string.IsNullOrEmpty(r.Size));
+        // Куски без оформления не хранятся: обычный текст подписи и так лежит в Label, а лишний
+        // список только раздувал бы файл. Оформлением считается всё, что видно глазом, включая
+        // выделение маркером и свой размер в точках: раньше их тут не было, и подпись, где
+        // задано только выделение или только размер, теряла его при каждом сохранении.
+        var оформлено = list.Any(r => r.Bold || r.Italic
+            || !string.IsNullOrEmpty(r.Color) || !string.IsNullOrEmpty(r.Size)
+            || !string.IsNullOrEmpty(r.Mark) || r.SizePt > 0);
         return оформлено ? list : new List<TextRun>();
     }
 

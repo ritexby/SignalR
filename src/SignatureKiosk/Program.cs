@@ -315,8 +315,14 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
             // document is already on this tablet, this is a stale replay from a previous client:
             // refuse it and leave the current signer's session untouched.
             if (signing)
+            {
+                // Сессию не трогаем: на планшете сейчас другой человек и другой документ, и
+                // стереть его из-за чужого запоздавшего повтора значит сорвать ему подписание.
+                // Без этого флага общий finally доходил до ClearSession и делал ровно это.
+                cleared = true;
                 return Results.Json(new { error = "stale submission: another document is open" },
                     statusCode: StatusCodes.Status409Conflict);
+            }
             cleared = true;                       // nothing to clear: the tablet is on slides
             return Results.Ok(new { id = existing.Id, duplicate = true });
         }
@@ -372,18 +378,28 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
         }
         else
         {
-            // Сессия начата до появления снимков: прежний путь, из текущего шаблона. Поля
-            // отбираются по нему же: только те, что документ действительно использует. Внешняя
-            // система вправе прислать и свои служебные поля, но человек их не видел и не
-            // подписывал, поэтому в записи им не место.
-            var template = storage.GetDocument();
-            resolvedDoc = DocumentTemplating.Resolve(template, fields, state.DynamicCheckboxes,
-                finalGroups, finalStates, state.Texts, state.GroupOptions);
-            var used = DocumentTemplating.UsedFields(template);
-            recordFields = fields?.Where(kv => used.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
+            // Снимка нет или он не от этой сессии. Прежде тут собиралась запись из документа по
+            // умолчанию, а он может быть совсем другим: получалась подпись под текстом, которого
+            // человек не видел, и по ней ничего не докажешь. Состояние планшета имени документа
+            // не хранит, восстановить нечего, поэтому отказ, а не догадка. Сессию не трогаем:
+            // оператор пошлёт документ заново, и клиент подпишет то же самое.
+            cleared = true;
+            app.Logger.LogWarning("Sign refused: no session snapshot for {Device} (session {Session})",
+                deviceId, state.SessionId ?? "-");
+            return Results.Json(new { error = "Сессия подписания устарела: отправьте документ на планшет заново." },
+                statusCode: StatusCodes.Status409Conflict);
         }
-        // Блоки, скрытые условием на чекбокс, клиент не видел: их не должно быть и в PDF.
-        DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups);
+        // Вписанные клиентом значения нужны здесь же: на планшете условие «телефон не пусто»
+        // открывает блок прямо во время набора, и в PDF этот блок обязан быть. Раньше значения
+        // собирались ниже, уже после применения условий, и блок из бумаги пропадал.
+        var finalInputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var inp in sub.Inputs ?? new List<SubmittedInput>())
+        {
+            var k = DocumentTemplating.CleanKey(inp?.Key);
+            if (k.Length > 0) finalInputs[k] = (inp!.Value ?? "").Trim();
+        }
+        // Блоки, скрытые условием, клиент не видел: их не должно быть и в PDF.
+        DocumentTemplating.ApplyLiveConditions(resolvedDoc, finalStates, finalGroups, finalInputs);
         if (recordFields is { Count: 0 }) recordFields = null;
 
         // Информационный документ не подписывают: на планшете экрана подписи нет вовсе, и запрос
@@ -405,14 +421,8 @@ app.MapPost("/api/sign", async (SignatureSubmission sub, HttpContext ctx, KioskC
             return Results.BadRequest(new { error = "Не заполнено обязательное: " + missing });
         }
 
-        // Поля ввода и правила отметок: то же самое, что проверяет страница планшета. Значения
+        // Правила отметок и полей ввода: то же самое, что проверяет страница планшета. Значения
         // проверяются по снимку, а не по текущему шаблону: поле могли добавить только что.
-        var finalInputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var inp in sub.Inputs ?? new List<SubmittedInput>())
-        {
-            var k = DocumentTemplating.CleanKey(inp?.Key);
-            if (k.Length > 0) finalInputs[k] = (inp!.Value ?? "").Trim();
-        }
         var broken = DocumentTemplating.BrokenRuleOrInput(resolvedDoc, finalStates, finalInputs);
         if (broken is not null)
         {

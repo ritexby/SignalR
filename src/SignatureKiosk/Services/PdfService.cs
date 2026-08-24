@@ -488,6 +488,13 @@ public class PdfService
     private sealed class Flow
     {
         private const double Margin = 50;
+
+        // Серый на бумаге ведёт себя не так, как на экране: лист копируют, сканируют и подшивают,
+        // и светлая линия после второй копии исчезает вовсе. Поэтому у документа два серых:
+        // один для подписей колонтитула и пояснений, второй для черт и рамок, и оба заметно
+        // темнее того, что раньше стояло по умолчанию.
+        private static readonly XBrush ТусклыйТекст = new XSolidBrush(XColor.FromArgb(89, 89, 89));
+        private static readonly XColor ЛинияЧерты = XColor.FromArgb(128, 128, 128);
         private readonly PdfDocument _doc;
         private XGraphics _gfx = null!;
         private double _y, _pageH, _contentW;
@@ -578,12 +585,12 @@ public class PdfService
                 if (!string.IsNullOrEmpty(title)) слева.Add(title!);
                 if (!string.IsNullOrEmpty(recordId)) слева.Add("Запись " + recordId);
                 if (слева.Count > 0)
-                    g.DrawString(string.Join("     ", слева), Small, XBrushes.Gray, new XPoint(Margin, y));
+                    g.DrawString(string.Join("     ", слева), Small, ТусклыйТекст, new XPoint(Margin, y));
                 if (numbers)
                 {
                     var текст = "Страница " + (i + 1) + " из " + всего;
                     var w = g.MeasureString(текст, Small).Width;
-                    g.DrawString(текст, Small, XBrushes.Gray, new XPoint(Margin + _contentW - w, y));
+                    g.DrawString(текст, Small, ТусклыйТекст, new XPoint(Margin + _contentW - w, y));
                 }
                 if (barcode && !string.IsNullOrEmpty(recordId))
                     DrawCode39(g, recordId!, Margin, y + 4, _contentW / 2, 18);
@@ -605,8 +612,12 @@ public class PdfService
                 "100011000", "001011000", "000001101", "100001100", "001001100", "000011100", "100000011",
                 "001000011", "101000010", "000010011", "100010010", "001010010", "000000111", "100000110",
                 "001000110", "000010110", "110000001", "011000001", "111000000", "010010001", "110010000",
-                "011010000", "010000101", "111000000", "010101000", "010100010", "010001010", "000101010",
-                "010010100"
+                // Дальше идут «-», «.», пробел, «$», «/», «+», «%» и «звёздочка». Прежде на месте
+                // точки стоял узор буквы W, и вся хвостовая часть таблицы сдвигалась на знак, а
+                // звёздочка не помещалась вовсе. Штрихкод рисовался без символов начала и конца,
+                // то есть выглядел штрихкодом, но не читался ни одним сканером.
+                "011010000", "010000101", "110000100", "011000100", "010101000", "010100010", "010001010",
+                "000101010", "010010100"
             };
             var знаки = "*" + new string(text.ToUpperInvariant().Where(c => алфавит.IndexOf(c) >= 0).ToArray()) + "*";
             // Ширина одного модуля: узкая полоса. Широкая втрое, между знаками пробел в один
@@ -889,7 +900,7 @@ public class PdfService
         {
             Ensure(14);
             _y += 6;
-            _gfx.DrawLine(new XPen(XColors.LightGray, 0.75), Margin, _y, Margin + _contentW, _y);
+            _gfx.DrawLine(new XPen(ЛинияЧерты, 0.75), Margin, _y, Margin + _contentW, _y);
             Note("divider", Margin, _y, _contentW, 1);
             _y += 8;
         }
@@ -1169,7 +1180,7 @@ public class PdfService
             }
             else if (!string.IsNullOrEmpty(note))
             {
-                _gfx.DrawString(note, Body, XBrushes.Gray, new XPoint(bx, _y + Body.GetHeight()));
+                _gfx.DrawString(note, Body, ТусклыйТекст, new XPoint(bx, _y + Body.GetHeight()));
             }
             _y += bh + 4;
             _gfx.DrawLine(new XPen(XColors.Gray, 0.75), bx, _y, bx + bw, _y);

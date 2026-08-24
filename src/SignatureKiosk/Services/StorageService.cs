@@ -910,11 +910,17 @@ public class StorageService
             // Подписи, поставленные внутри страниц, лежат отдельными файлами рядом с итоговой.
             // Имя файла берётся из имени поля, приведённого к безопасному виду: запись подписи
             // это то, что придётся открывать через год, и имя должно быть читаемым.
+            // Имя файла не может повториться. Документ мог быть сохранён прежней версией и уже
+            // нести два одинаковых имени поля; тогда вторая картинка ложилась поверх первой, и в
+            // записи две подписи показывали одну и ту же руку. Лучше файл с номером, чем потеря.
+            var занятыеФайлы = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var extra in extraSignatures ?? new List<(string, string, byte[])>())
             {
                 var safe = new string((extra.Key ?? "").Where(c => char.IsLetterOrDigit(c) || c is '-' or '_').ToArray());
                 if (safe.Length == 0) safe = "sign" + (rec.Signatures.Count + 1);
                 var file = "signature-" + safe + ".png";
+                for (var i = 2; занятыеФайлы.Contains(file); i++) file = "signature-" + safe + "-" + i + ".png";
+                занятыеФайлы.Add(file);
                 File.WriteAllBytes(Path.Combine(dir, file), extra.Png);
                 rec.Signatures.Add(new SignedSignature { Key = extra.Key ?? "", Label = extra.Label ?? "", File = file });
             }

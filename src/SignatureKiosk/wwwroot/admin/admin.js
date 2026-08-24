@@ -6,7 +6,7 @@
   // Kept in step with the version badge and with APP_VERSION in kiosk.js. A tablet reports the
   // build of the page it is running, so a WebView still on an older page can be spotted rather
   // than silently ignoring anything added since.
-  var APP_VERSION = "7.0";
+  var APP_VERSION = "7.1";
 
   var state = {
     slidesTarget: "all",   // кому идёт реклама: all / group:{id} / device:{id} / devices
@@ -1903,14 +1903,22 @@
 
   function copyTag(name) { copyText("{{" + name + "}}", "Скопировано: {{" + name + "}}"); }
 
+  // Одна функция на всю админку. Прежде их было две с одним именем: объявленная ниже побеждала
+  // молча, и все сообщения вида «Код рабочего места скопирован» превращались в «Скопировано».
   function copyText(text, done) {
+    var готово = done || "Скопировано";
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () { toast(done); },
+      navigator.clipboard.writeText(text).then(function () { toast(готово); },
         function () { toast("Не удалось скопировать: " + text); });
-    } else {
-      // Старый WebView без Clipboard API: показываем значение, чтобы его можно было выделить.
-      toast(text);
+      return;
     }
+    // Старый WebView без Clipboard API: копируем через временное поле, а если и это не вышло,
+    // показываем значение, чтобы его можно было выделить руками.
+    var ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast(готово); }
+    catch (e) { toast(text); }
+    document.body.removeChild(ta);
   }
 
   // Сворачивание элемента страницы в одну строку. Блок с абзацем текста занимает полтора
@@ -6415,16 +6423,6 @@
     });
   }
 
-  function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () { toast("Скопировано"); }, function () { toast("Не удалось скопировать"); });
-    } else {
-      var ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); toast("Скопировано"); } catch (e) { toast("Не удалось скопировать"); }
-      document.body.removeChild(ta);
-    }
-  }
-
   // ---------------- Small form helpers ----------------
   function labeledInput(labelText, value) {
     var wrap = el("label", "field", labelText); var input = el("input"); input.type = "text"; input.value = value; wrap.appendChild(input); return { wrap: wrap, input: input };
@@ -6732,37 +6730,6 @@
       "width=1200,height=980,menubar=no,toolbar=no,location=no");
     if (!w) { toast("Браузер заблокировал новое окно. Разрешите всплывающие окна для этого адреса", true); return; }
     try { w.focus(); } catch (e) { /* окно уже на переднем плане */ }
-  }
-
-  function openWatch(dev) {
-    if (!dev || !dev.id) return;
-    watch.deviceId = dev.id;
-    watch.name = dev.name || dev.id;
-    watch.doc = null; watch.state = null;
-
-    var root = el("div", "watch");
-    var head = el("div", "watch-head");
-    head.appendChild(el("h3", null, "Экран планшета: " + watch.name));
-    var live = el("span", "watch-live", "наблюдение");
-    head.appendChild(live);
-    root.appendChild(head);
-    root.appendChild(el("p", "sig-meta", "Здесь видно то же, что видит клиент. Окно только для просмотра: изменить отсюда ничего нельзя, на планшет не уходит ничего, и запись не ведётся."));
-
-    var frame = el("div", "watch-frame");
-    watch.node = el("div", "watch-screen");
-    frame.appendChild(watch.node);
-    root.appendChild(frame);
-
-    var actions = el("div", "modal-actions");
-    var close = el("button", "btn btn-ghost", "Закрыть");
-    close.addEventListener("click", closeModal);
-    actions.appendChild(close);
-    root.appendChild(actions);
-
-    openModal(root, true);
-    watchSay("Подключение к планшету…");
-    watchStart();
-    watchAlive();
   }
 
   // Всплывающая подсказка с предложением посмотреть. Не открывает окно сама: оператор мог быть

@@ -155,6 +155,8 @@ public class KioskCoordinator
                 s.DynamicCheckboxes.Clear();
                 s.CheckboxStates.Clear();
                 s.GroupSelections.Clear();
+                s.Texts.Clear();
+                s.GroupOptions.Clear();
                 s.DocumentSetUtc = null;
                 s.SessionId = null;
                 swept.Add(deviceId);
@@ -520,6 +522,10 @@ public class KioskCoordinator
             s.DynamicCheckboxes.Clear();
             s.CheckboxStates.Clear();
             s.GroupSelections.Clear();
+            // Формулировки и варианты, присланные под конкретный заказ, это тоже его данные:
+            // оставлять их лежать в состоянии после подписания незачем.
+            s.Texts.Clear();
+            s.GroupOptions.Clear();
             s.DocumentSetUtc = null;
             s.SessionId = null;
         });
@@ -541,7 +547,9 @@ public class KioskCoordinator
         await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("StopScan");
         var cmd = BuildCurrentCommand(deviceId);
         if (cmd.Mode == "document")
-            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", cmd.Document);
+            // Имя сессии обязательно: по нему планшет понимает, что документ тот же самый, и не
+            // начинает его заново. Без имени возврат с камеры стирал всё, что клиент заполнил.
+            await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowDocument", cmd.Document, cmd.SessionId);
         else
             await _hub.Clients.Group(DeviceGroup(deviceId)).SendAsync("ShowSlides", cmd.Slides);
     }

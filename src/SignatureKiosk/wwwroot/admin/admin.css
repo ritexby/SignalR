@@ -4,19 +4,28 @@
      страница и выглядела так, будто всё съезжает. */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 22px; --s6: 30px;
   --r1: 8px; --r2: 11px; --r3: 16px;
-  --line: #dde3ec;
-  --line-soft: #eef1f6;
+  /* Разделители не обязаны спорить с текстом, но их должно быть видно: прежние #dde3ec и
+     #e5e7eb давали к белому 1.2, то есть край панели угадывался, а не читался. */
+  --line: #c3ccda;
+  --line-soft: #dde3ec;
   --sh1: 0 1px 2px rgba(16,24,40,.05);
   --sh2: 0 2px 8px rgba(16,24,40,.06);
-  --sh3: 0 12px 32px rgba(16,24,40,.10);
-  --accent: #16a34a;
-  --accent-dark: #15803d;
+  /* Зелёный остался зелёным, но взят глубокий: на прежнем #16a34a белые буквы давали контраст
+     3.3, а это ниже порога читаемости. #15803d даёт 4.9. */
+  --accent: #15803d;
+  --accent-dark: #14532d;
+  /* Рамка поля ввода это не украшение, а граница, показывающая, куда можно писать. Общая
+     светлая рамка давала 1.24 к белому, то есть её попросту не было видно. Здесь ровно 3, как
+     и положено границе управляющего элемента. */
+  --field-line: #7f8a99;
   --bg: #f3f4f6;
   --panel: #ffffff;
-  --border: #e5e7eb;
+  --border: #c3ccda;
   --text: #111827;
-  --muted: #6b7280;
-  --ok: #16a34a;
+  /* Приглушённый текст всё-таки читают: на белом #6b7280 давал 4.83, но на любой подложке
+     проваливался ниже порога. #5a6473 держится и на белом, и на серых плашках. */
+  --muted: #5a6473;
+  --ok: #15803d;
   --danger: #dc2626;
 }
 * { box-sizing: border-box; }
@@ -25,20 +34,19 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 .hidden { display: none !important; }
-code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9em; }
+code { background: #e3e8f0; padding: 1px 6px; border-radius: 5px; font-size: .9em; }
 
 /* Buttons */
 .btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid transparent; border-radius: var(--r1); padding: 9px 15px; font-size: .93rem; font-weight: 600; cursor: pointer; white-space: nowrap; line-height: 1.2; transition: background .15s, border-color .15s, transform .05s, box-shadow .15s; }
 .ic { width: 17px; height: 17px; flex: 0 0 auto; }
 .btn-sm .ic { width: 15px; height: 15px; }
 .btn:active { transform: translateY(1px); }
-.btn-primary { background: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(22,163,74,.35); }
+.btn-primary { background: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(21,128,61,.35); }
 .btn-primary:hover { background: var(--accent-dark); }
-.btn-ghost { background: #fff; color: #33415a; border-color: var(--line); box-shadow: var(--sh1); }
-.btn-ghost:hover { background: #f6f8fc; border-color: #c3ccda; }
-.btn-danger { background: #fff; color: var(--danger); border-color: #f3c8c8; box-shadow: var(--sh1); }
-.btn-danger:hover { background: #fef2f2; border-color: #e9a8a8; }
-.btn:disabled { opacity: .55; cursor: not-allowed; }
+.btn-ghost { background: #fff; color: #33415a; border-color: var(--field-line); box-shadow: var(--sh1); }
+.btn-ghost:hover { background: #f6f8fc; border-color: #6f7a8a; }
+.btn-danger { background: #fff; color: var(--danger); border-color: #c07b7b; box-shadow: var(--sh1); }
+.btn-danger:hover { background: #fef2f2; border-color: #a85f5f; }
 .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(22,163,74,.30); }
 
 /* Login */
@@ -46,21 +54,22 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .login-box { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 32px; width: min(360px, 92vw); display: flex; flex-direction: column; gap: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.07); }
 .login-brand { font-weight: 800; letter-spacing: .3px; font-size: 1.05rem; }
 .login-box h1 { margin: 0 0 6px; font-size: 1.3rem; }
-.login-box input { padding: 12px; border: 1px solid var(--border); border-radius: 9px; font-size: 1rem; }
+.login-box input { padding: 12px; border: 1px solid var(--field-line); border-radius: 9px; font-size: 1rem; }
 .login-error { color: var(--danger); font-size: .9rem; min-height: 1em; }
 
 /* Topbar */
 .topbar { display: flex; align-items: center; gap: 18px; background: var(--panel); border-bottom: 1px solid var(--border); padding: 10px 20px; position: sticky; top: 0; z-index: 20; flex-wrap: wrap; }
 .brand { font-weight: 800; letter-spacing: .3px; }
-.brand-accent { color: var(--accent); }
-.version { font-size: .62rem; font-weight: 700; color: var(--muted); background: #eef1f6; padding: 2px 6px; border-radius: 6px; vertical-align: middle; letter-spacing: .04em; }
+.brand-accent { color: var(--accent); }   /* глубокий зелёный: светлый давал 3.3 на белом */
+.version { font-size: .62rem; font-weight: 700; color: #4b5563; background: #eef1f6; padding: 2px 6px; border-radius: 6px; vertical-align: middle; letter-spacing: .04em; }
 /* Вкладок много, и в одну строку рядом с названием они помещаются не на всяком экране.
    Перенос на вторую строку честнее прокрутки: видны сразу все, ничего не надо искать. */
 .tabs { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .tab { border: none; background: transparent; padding: 8px 14px; border-radius: 9px; cursor: pointer; font-weight: 600; color: var(--muted); white-space: nowrap; transition: background .15s, color .15s; }
 .tab:hover { background: #f1f5f9; color: var(--text); }
-.tab.active { background: #e7f7ee; color: var(--accent); }
-.tab.active:hover { background: #e7f7ee; color: var(--accent); }
+/* Прежде активная вкладка была зелёной по светло-зелёному: контраст 2.97, читалось с трудом. */
+.tab.active { background: #bbf7d0; color: #14532d; box-shadow: inset 0 -3px 0 var(--accent); }
+.tab.active:hover { background: #bbf7d0; color: #14532d; }
 #logout { margin-left: auto; }
 
 /* On narrow screens keep the top bar to two tidy rows: brand + logout on the
@@ -72,7 +81,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* Per-panel recipient selector */
 .target-inline { display: flex; align-items: center; gap: 8px; font-size: .92rem; color: var(--muted); font-weight: 600; }
-.target-inline select { padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; font-size: .95rem; color: var(--text); font-weight: 400; background: #fff; }
+.target-inline select { padding: 8px 10px; border: 1px solid var(--field-line); border-radius: 9px; font-size: .95rem; color: var(--text); font-weight: 400; background: #fff; }
 
 /* Content */
 .content { padding: 22px; max-width: 1100px; margin: 0 auto; }
@@ -83,7 +92,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .panel-head h2 { margin: 0; font-size: 1.2rem; }
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .row label { display: flex; align-items: center; gap: 6px; font-size: .92rem; color: var(--muted); }
-.row input[type=number] { width: 80px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+.row input[type=number] { width: 80px; padding: 8px; border: 1px solid var(--field-line); border-radius: 8px; }
 .hint { color: var(--muted); font-size: .9rem; line-height: 1.5; margin: 6px 0 16px; }
 .upload-btn { cursor: pointer; display: inline-flex; }
 
@@ -97,12 +106,12 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .tb-sep { width: 1px; align-self: stretch; margin: 2px var(--s1); background: var(--line); }
 .toolbar .btn { white-space: nowrap; }
 .toolbar .grow { flex: 1 1 220px; min-width: 180px; }
-.toolbar input[type=text], .toolbar input[type=search] { padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px; font-size: .95rem; color: var(--text); background: #fff; }
+.toolbar input[type=text], .toolbar input[type=search] { padding: 9px 12px; border: 1px solid var(--field-line); border-radius: 9px; font-size: .95rem; color: var(--text); background: #fff; }
 .toolbar input:focus, .toolbar select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 
 /* Inline labelled field (e.g. interval) inside a toolbar */
 .field-inline { display: flex; align-items: center; gap: 8px; font-size: .92rem; color: var(--muted); font-weight: 600; }
-.field-inline input[type=number] { width: 84px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; font-size: .95rem; color: var(--text); font-weight: 400; }
+.field-inline input[type=number] { width: 84px; padding: 9px 10px; border: 1px solid var(--field-line); border-radius: 9px; font-size: .95rem; color: var(--text); font-weight: 400; }
 
 /* Image grid */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
@@ -120,26 +129,31 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
    и длинная подпись поля вылезает за колонку, обрезаясь по краю. */
 .field { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; color: var(--muted); font-weight: 600; min-width: 0; }
 .field input, .field textarea, .field select { max-width: 100%; }
+/* Запасная линия для полей, у которых нет своего правила: браузерная рамка бледнее нашей. */
+input, select, textarea { border-color: var(--field-line); }
+/* Выбор цвета браузер рисует своей рамкой, а она почти белая: на белом поле квадратик висел
+   в воздухе. Обводим сами, тогда видно, что это кнопка, а не просто пятно цвета. */
+input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; padding: 2px; background: #fff; height: 30px; width: 42px; cursor: pointer; }
 /* Пояснение под полем: короткая подпись сверху, подробность снизу. Вместе в одну строку они
    не помещаются и обрезаются. */
 .field-hint { font-size: .8rem; font-weight: 500; color: var(--muted); }
-.field input, .field textarea { padding: 10px; border: 1.5px solid #b9c2d0; border-radius: 9px; font-size: .98rem; color: var(--text); font-weight: 400; background: #fff; }
+.field input, .field textarea { padding: 10px; border: 1.5px solid var(--field-line); border-radius: 9px; font-size: .98rem; color: var(--text); font-weight: 400; background: #fff; }
 .field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .pages-editor { display: flex; flex-direction: column; gap: 16px; }
 #pagesEditor { display: flex; flex-direction: column; gap: 24px; }
-.page-card { border: 1.5px solid #d6deea; border-left: 5px solid var(--accent); border-radius: 14px; padding: 0 18px 18px; background: #fff; box-shadow: 0 2px 12px rgba(16,24,40,.06); display: flex; flex-direction: column; gap: 12px; }
+.page-card { border: 1.5px solid var(--line); border-left: 5px solid var(--accent); border-radius: 14px; padding: 0 18px 18px; background: #fff; box-shadow: 0 2px 12px rgba(16,24,40,.06); display: flex; flex-direction: column; gap: 12px; }
 /* Элементы идут подряд, а сводка забирает остаток ширины, поэтому кнопка удаления всегда
    у правого края. При распределении по краям заголовок и кнопки плавали посреди пустоты. */
 .page-card .page-title { display: flex; align-items: center; gap: var(--s3); margin: 0 -18px var(--s1); padding: 11px 16px; background: linear-gradient(90deg, #ecf8f1, #f8fcfa); border-bottom: 1px solid #e2ebe6; border-radius: 13px 13px 0 0; }
 .page-name { color: var(--accent-dark); font-size: 1rem; font-weight: 700; white-space: nowrap; }
-.page-toggle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid var(--line); background: #fff; border-radius: var(--r1); cursor: pointer; color: #475569; flex: 0 0 auto; box-shadow: var(--sh1); }
+.page-toggle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid var(--field-line); background: #fff; border-radius: var(--r1); cursor: pointer; color: #475569; flex: 0 0 auto; box-shadow: var(--sh1); }
 .page-toggle:hover { background: #f6f8fc; color: var(--text); }
 .page-summary { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: .86rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cb-list { display: flex; flex-direction: column; gap: 8px; }
 /* На узком экране строка не помещается целиком: пусть переносится по элементам,
    а не вылезает за край карточки. */
 .cb-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.cb-row input[type=text] { flex: 1 1 220px; min-width: 160px; padding: 9px 10px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; }
+.cb-row input[type=text] { flex: 1 1 220px; min-width: 160px; padding: 9px 10px; border: 1.5px solid var(--field-line); border-radius: 8px; background: #fff; }
 .cb-row input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .cb-row label { display: flex; align-items: center; gap: 5px; font-size: .85rem; color: var(--muted); }
 
@@ -174,17 +188,17 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
    прокрутке. Пятнадцать одинаковых панелей делали карточку блока вдвое выше, а всплывающая
    над полем закрывала собой то, что было выше: кнопку условия, подпись и часть текста. */
 .rt-bar-host { position: sticky; top: var(--topbar-h, 64px); z-index: 15; padding: 6px 0 10px; background: var(--panel); }
-.rt-float { box-shadow: var(--sh2); border-color: #cbd5e1; background: #fff; }
+.rt-float { box-shadow: var(--sh2); border-color: var(--line); background: #fff; }
 /* Пока поле не выбрано, панель на месте, но не работает: ничего не прыгает, и сразу видно,
    что оформлять пока нечего. */
 .rt-idle { opacity: .6; }
 .rt-hint { font-size: .82rem; color: var(--muted); margin-left: auto; padding-right: 4px; white-space: nowrap; }
-.rt-btn { min-width: 30px; height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text); font-weight: 700; cursor: pointer; font-size: .85rem; }
+.rt-btn { min-width: 30px; height: 28px; padding: 0 8px; border: 1px solid var(--field-line); border-radius: 6px; background: #fff; color: var(--text); font-weight: 700; cursor: pointer; font-size: .85rem; }
 .rt-btn:hover { border-color: var(--accent); }
-.rt-swatch { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(0,0,0,.2); border-radius: 4px; cursor: pointer; }
+.rt-swatch { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(0,0,0,.45); border-radius: 4px; cursor: pointer; }
 .rt-swatch:hover { transform: scale(1.12); }
-.rt-tag { height: 28px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text); font-size: .82rem; margin-left: auto; }
-.rt-editor { min-height: 64px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); line-height: 1.55; outline: none; }
+.rt-tag { height: 28px; border: 1px solid var(--field-line); border-radius: 6px; background: #fff; color: var(--text); font-size: .82rem; margin-left: auto; }
+.rt-editor { min-height: 64px; padding: 10px 12px; border: 1px solid var(--field-line); border-radius: 8px; background: #fff; color: var(--text); line-height: 1.55; outline: none; }
 .rt-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(22,163,74,.12); }
 /* Absolute, not relative: a size span can end up inside another one while editing, and with em
    the sizes multiplied, so pressing "A" inside a huge heading changed nothing on screen. In rem
@@ -199,7 +213,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 /* Уровни вложенности различаются цветом левой полосы: страница зелёная, блок синий,
    чекбокс янтарный, зависимые чекбоксы фиолетовые. Иначе на длинной странице всё
    сливается и непонятно, что к чему относится. */
-.block-card { border: 1.5px solid #c7d7ee; border-left: 5px solid #2563eb; border-radius: 10px; padding: 14px; background: #fbfdff; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
+.block-card { border: 1.5px solid #b3c8e8; border-left: 5px solid #2563eb; border-radius: 10px; padding: 14px; background: #fbfdff; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
 .cond-box { display: flex; flex-direction: column; gap: 6px; }
 .cond-mode { padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); max-width: 260px; }
 .cond-fields { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
@@ -217,7 +231,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .cond-row.cond-extra.cond-or { border-top: 1px dashed #c7cbf5; padding-top: 8px; margin-top: 2px; }
 /* Пометка «не» на строке условия. Выключенная выглядит как обычная бледная кнопка, включённая
    заметно окрашена: она переворачивает смысл всей строки, и не заметить её нельзя. */
-.cond-row .cond-not { padding: 5px 10px; font-weight: 700; border: 1.5px solid #b9c2d0; border-radius: 8px;
+.cond-row .cond-not { padding: 5px 10px; font-weight: 700; border: 1.5px solid var(--field-line); border-radius: 8px;
   background: #fff; color: #8a94a6; cursor: pointer; line-height: 1.1; }
 .cond-row .cond-not.on { background: #fee2e2; border-color: #dc2626; color: #b91c1c; }
 .cond-row .cond-not:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(220,38,38,.18); }
@@ -225,7 +239,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .cond-adds { display: flex; flex-wrap: wrap; gap: 6px; align-self: flex-start; }
 .cond-add { align-self: flex-start; }
 .cond-add-or { align-self: flex-start; color: #6366f1; }
-.cond-row input, .cond-row select { padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; color: var(--text); }
+.cond-row input, .cond-row select { padding: 8px 9px; border: 1.5px solid var(--field-line); border-radius: 8px; background: #fff; color: var(--text); }
 .cond-row input:focus, .cond-row select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .cond-field { min-width: 170px; }
 .cond-field-other { min-width: 150px; }
@@ -240,10 +254,10 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 /* Block mode toggle + image blocks */
 .block-mode { display: flex; align-items: center; gap: var(--s2); }
 /* Настоящий переключатель: две части одного элемента, а не две отдельные кнопки. */
-.block-mode .seg { display: inline-flex; background: #eef1f6; border: 1px solid var(--line); border-radius: var(--r1); padding: 2px; gap: 2px; }
+.block-mode .seg { display: inline-flex; background: #eef1f6; border: 1px solid var(--field-line); border-radius: var(--r1); padding: 2px; gap: 2px; }
 .block-mode .seg .btn { border: none; box-shadow: none; background: transparent; color: #475569; padding: 5px 13px; border-radius: 7px; font-size: .86rem; }
 .block-mode .seg .btn:hover { background: #e3e8f0; }
-.sub-label { font-size: .74rem; text-transform: uppercase; letter-spacing: .05em; color: #8b95a5; font-weight: 700; margin-top: var(--s1); }
+.sub-label { font-size: .74rem; text-transform: uppercase; letter-spacing: .05em; color: #5a6473; font-weight: 700; margin-top: var(--s1); }
 .block-mode .seg .btn.mode-on { background: var(--accent); color: #fff; box-shadow: 0 1px 2px rgba(22,163,74,.3); }
 .block-image { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .block-image-preview { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
@@ -305,7 +319,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .alert-badge { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--danger); color: #fff; font-size: .72rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
 .alert-settings { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border); }
 .alert-settings h3 { margin: 0 0 10px; font-size: 1rem; }
-.alert-settings .field input[type=number] { width: 110px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px; }
+.alert-settings .field input[type=number] { width: 110px; padding: 9px 12px; border: 1.5px solid var(--field-line); border-radius: 9px; }
 .log-item.acked { opacity: .62; }
 
 /* ---------- Operational logs ---------- */
@@ -335,13 +349,13 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .doc-extra { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
 
 /* Placeholder help + detected tags */
-.note-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px; padding: 12px 14px; margin: 0 0 16px; font-size: .9rem; color: #14532d; display: flex; flex-direction: column; gap: 8px; }
-.note-box code { background: #dcfce7; color: #14532d; }
+.note-box { background: #f0fdf4; border: 1px solid #86d9a2; border-radius: 12px; padding: 12px 14px; margin: 0 0 16px; font-size: .9rem; color: #14532d; display: flex; flex-direction: column; gap: 8px; }
+.note-box code { background: #c9f2d6; color: #14532d; }
 .placeholders { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .ph-label { flex-basis: 100%; }
 .ph-label { color: var(--muted); font-weight: 600; margin-right: 2px; }
 .ph-empty { color: var(--muted); }
-.ph-tag { background: #eef2f7; border: 1px solid #dbe3ec; color: #475569; border-radius: 6px; padding: 2px 7px; font-size: .82rem; cursor: pointer; transition: background .12s, border-color .12s, color .12s; }
+.ph-tag { background: #eef2f7; border: 1px solid var(--field-line); color: #475569; border-radius: 6px; padding: 2px 7px; font-size: .82rem; cursor: pointer; transition: background .12s, border-color .12s, color .12s; }
 .ph-tag:hover { border-color: var(--accent); color: var(--accent); }
 /* Тег, который уже стоит в документе: видно с одного взгляда, что из списка задействовано. */
 .ph-used { background: #dcfce7; border-color: #86efac; color: #15803d; font-weight: 600; }
@@ -357,10 +371,12 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .dev-sep { color: #cbd5e1; }
 
 /* Пояснение, почему действие сейчас невозможно. Не ошибка, а подсказка, что сделать раньше. */
-.note-warn { border-color: #fcd9a4; background: #fffaf0; color: #8a5a13; }
-.btn:disabled { opacity: .5; cursor: not-allowed; }
+.note-warn { border-color: #dfae5e; background: #fffaf0; color: #7a4f10; }
+/* Недоступная кнопка должна оставаться читаемой: непонятно, чего именно нельзя, если надпись
+   на ней растворилась. Приглушаем, но не стираем. */
+.btn:disabled { opacity: .6; cursor: not-allowed; }
 .btn:disabled:hover { background: inherit; }
-.dyn-anchor { margin-top: 4px; padding: 8px 10px; background: #f0fdf4; border: 1px dashed #bbf7d0; border-radius: 8px; }
+.dyn-anchor { margin-top: 4px; padding: 8px 10px; background: #f0fdf4; border: 1px dashed #86d9a2; border-radius: 8px; }
 
 /* Signatures */
 .sig-list { display: flex; flex-direction: column; gap: 10px; }
@@ -373,8 +389,8 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* Filter bar (devices) */
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 16px; }
-.filter-search { flex: 1; min-width: 180px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px; font-size: .95rem; }
-.filter-select { padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; font-size: .92rem; background: #fff; color: var(--text); }
+.filter-search { flex: 1; min-width: 180px; padding: 8px 12px; border: 1px solid var(--field-line); border-radius: 9px; font-size: .95rem; }
+.filter-select { padding: 8px 10px; border: 1px solid var(--field-line); border-radius: 9px; font-size: .92rem; background: #fff; color: var(--text); }
 .filter-search:focus, .filter-select:focus { outline: none; border-color: var(--accent); }
 .filter-count { color: var(--muted); font-size: .86rem; margin-left: auto; }
 
@@ -409,7 +425,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; font-size: .74rem; font-weight: 600; }
 .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .chip-ok { background: #e7f7ee; color: var(--accent); }
-.chip-muted { background: #eef1f6; color: #6b7280; }
+.chip-muted { background: #eef1f6; color: #4b5563; }
 .chip-danger { background: #fee2e2; color: var(--danger); }
 
 .dev-item { align-items: flex-start; flex-wrap: wrap; }
@@ -419,7 +435,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .dev-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 /* Обратимое действие не должно выглядеть так же, как необратимое: блокировку можно снять,
    удаление нет. Одинаково красные, они читались как одинаково опасные. */
-.btn-warn { background: #fff; color: #b45309; border-color: #fcd9a4; }
+.btn-warn { background: #fff; color: #92400e; border-color: #c08a2e; }
 .btn-warn:hover { background: #fffaf0; border-color: #f59e0b; color: #92400e; }
 .dev-item.revoked { opacity: .65; }
 .dot { margin-top: 6px; }
@@ -439,7 +455,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 .check-group { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 8px 0; }
 .check-inline { display: flex; align-items: center; gap: 6px; font-weight: 400; color: var(--text); font-size: .95rem; }
-.field select { padding: 10px; border: 1px solid var(--border); border-radius: 9px; font-size: .98rem; color: var(--text); background: #fff; }
+.field select { padding: 10px; border: 1.5px solid var(--field-line); border-radius: 9px; font-size: .98rem; color: var(--text); background: #fff; }
 
 .enroll-code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 2.4rem; font-weight: 800; letter-spacing: .1em; text-align: center; background: #e7f7ee; color: var(--accent); border-radius: 12px; padding: 18px; margin: 6px 0; }
 .enroll-result { text-align: center; }
@@ -450,7 +466,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 
 /* ---- API docs ---- */
 .api-docs { display: flex; flex-direction: column; gap: 14px; }
-.api-intro { border: 1px solid #bbf7d0; border-radius: 12px; padding: 14px 16px 16px; background: #f0fdf4; }
+.api-intro { border: 1px solid #86d9a2; border-radius: 12px; padding: 14px 16px 16px; background: #f0fdf4; }
 .api-intro h3 { margin: 12px 0 4px; font-size: .95rem; color: #14532d; }
 .api-intro h3:first-child { margin-top: 0; }
 .api-intro .api-desc { margin-top: 2px; }
@@ -458,9 +474,9 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .api-ep { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; background: #fff; }
 .api-ep-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .api-method { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 700; font-size: .78rem; padding: 3px 9px; border-radius: 6px; letter-spacing: .04em; }
-.api-get { background: #e7f7ee; color: var(--accent); }
-.api-post { background: #eef2ff; color: #4338ca; }
-.api-put { background: #fff7ed; color: #c2410c; }
+.api-get { background: #d3f0e0; color: var(--accent-dark); }
+.api-post { background: #dde4ff; color: #4338ca; }
+.api-put { background: #ffe9d1; color: #9a3412; }
 .api-path { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .95rem; color: var(--text); word-break: break-all; }
 .api-desc { color: var(--muted); font-size: .9rem; margin: 8px 0 0; }
 .api-code { margin: 10px 0 0; background: #0f172a; color: #e2e8f0; border-radius: 9px; padding: 12px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .82rem; line-height: 1.5; white-space: pre; overflow-x: auto; }
@@ -489,7 +505,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 /* Ширины хватает и на 24-часовой вид, и на 12-часовой с AM/PM: браузер показывает время по
    своим настройкам, а в узком поле «21:00» превращалось в «09:00» и читалось как утро. */
 .sch-rule input[type=time] { width: 148px; font-variant-numeric: tabular-nums; }
-.sch-rule input, .sch-rule select { padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px;
+.sch-rule input, .sch-rule select { padding: 8px 9px; border: 1.5px solid var(--field-line); border-radius: 8px;
   background: #fff; color: var(--text); font-size: .95rem; }
 .sch-rule input:focus, .sch-rule select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
 .sch-action { min-width: 210px; }
@@ -498,7 +514,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .sch-value { width: 92px; }
 .sch-days { display: flex; gap: 3px; }
 /* День недели переключается нажатием: семь галочек с подписями заняли бы всю строку. */
-.sch-day { width: 32px; height: 32px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff;
+.sch-day { width: 32px; height: 32px; border: 1.5px solid var(--field-line); border-radius: 8px; background: #fff;
   color: var(--muted); font-size: .8rem; font-weight: 700; cursor: pointer; padding: 0; }
 .sch-day.on { background: #eef2ff; border-color: #6366f1; color: #4338ca; }
 .sch-flags { display: flex; align-items: center; gap: 6px; font-size: .86rem; color: var(--muted); font-weight: 600; }
@@ -518,7 +534,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .pv-setup-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
 .pv-setup-send { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px;
   padding-top: 12px; border-top: 1px solid var(--line); }
-.pv-setup-send .sch-target { min-width: 180px; padding: 8px 9px; border: 1.5px solid #b9c2d0; border-radius: 8px; background: #fff; }
+.pv-setup-send .sch-target { min-width: 180px; padding: 8px 9px; border: 1.5px solid var(--field-line); border-radius: 8px; background: #fff; }
 .modal .pv-setup-send .btn { width: auto; margin-top: 0; }
 .sch-dev-all { border-style: dashed; font-weight: 600; color: var(--muted); }
 .sch-dev-all:hover { border-color: var(--accent); color: var(--accent); }
@@ -556,12 +572,12 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 }
 
 /* ---- Именованные чекбоксы и группы вариантов ---- */
-.cb-item { border: 1.5px solid #f0d9a8; border-left: 5px solid #d97706; border-radius: 10px; padding: 12px; background: #fffdf7; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
+.cb-item { border: 1.5px solid #e8c377; border-left: 5px solid #d97706; border-radius: 10px; padding: 12px; background: #fffdf7; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
 .cb-list { display: flex; flex-direction: column; gap: 10px; }
 .cb-key { max-width: 170px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem; }
 /* Поле подписи и сканирование внутри страницы: свои цвета, чтобы отличались от текста и
    пунктов с одного взгляда, как это уже сделано для чекбоксов и зависимых чекбоксов. */
-.sign-item { border: 1.5px solid #c7d2fe; border-left: 5px solid #4f46e5; border-radius: 10px;
+.sign-item { border: 1.5px solid #a5b4fc; border-left: 5px solid #4f46e5; border-radius: 10px;
   padding: 12px; background: #fbfbff; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
 .scan-item { border: 1.5px solid #a7e3c6; border-left: 5px solid #0d9488; border-radius: 10px;
   padding: 12px; background: #f7fdfb; box-shadow: 0 1px 4px rgba(16,24,40,.05); }
@@ -573,7 +589,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .group-card > .btn { align-self: flex-start; }
 /* Подписи разделов внутри страницы: сразу видно, где кончаются блоки и начинаются чекбоксы. */
 .section-label { display: flex; align-items: center; gap: 7px; font-size: .76rem; text-transform: uppercase; letter-spacing: .06em; color: #64748b; font-weight: 700; margin-top: var(--s3); padding-bottom: var(--s1); border-bottom: 1px solid var(--line-soft); }
-.section-label .ic { width: 15px; height: 15px; color: #94a3b8; }
+.section-label .ic { width: 15px; height: 15px; color: var(--muted); }
 .pv-group-title { font-weight: 700; margin: 14px 0 6px; }
 
 /* ---- Оглавление документа ---- */
@@ -584,17 +600,17 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .toc-list { display: flex; flex-direction: column; gap: 3px; }
 /* Пункт оглавления это кнопка и должен выглядеть кнопкой без наведения: рамка, фон, номер
    в кружке. Раньше он читался как обычный текст, и никто не догадывался, что по нему жмут. */
-.toc-item { display: flex; align-items: center; gap: var(--s2); width: 100%; text-align: left; padding: 7px 9px; border: 1px solid var(--line-soft); background: #fbfcfe; border-radius: var(--r1); cursor: pointer; font-size: .87rem; color: var(--text); font-weight: 500; transition: background .12s, border-color .12s; }
+.toc-item { display: flex; align-items: center; gap: var(--s2); width: 100%; text-align: left; padding: 7px 9px; border: 1px solid var(--line); background: #fbfcfe; border-radius: var(--r1); cursor: pointer; font-size: .87rem; color: var(--text); font-weight: 500; transition: background .12s, border-color .12s; }
 .toc-item:hover { background: #eef6ff; border-color: #bcd6f5; }
 .toc-item:active { transform: translateY(1px); }
-.toc-num { flex: 0 0 auto; width: 21px; height: 21px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: #e7f7ee; color: var(--accent-dark); font-size: .74rem; font-weight: 700; }
+.toc-num { flex: 0 0 auto; width: 21px; height: 21px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: #d3f0e0; color: var(--accent-dark); font-size: .74rem; font-weight: 700; }
 .toc-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toc-mark { width: 14px; height: 14px; color: #6366f1; flex: 0 0 auto; }
 .toc-item.folded { background: #f4f6f9; color: var(--muted); }
-.toc-item.folded .toc-num { background: #e6eaf0; color: #64748b; }
+.toc-item.folded .toc-num { background: #d8dee7; color: #4b5563; }
 .toc-fixed { display: flex; align-items: center; gap: var(--s2); padding: 7px 9px; font-size: .87rem; color: var(--muted); border: 1px dashed var(--line); border-radius: var(--r1); }
 .toc-fixed .ic { width: 15px; height: 15px; }
-.toc-actions { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line-soft); padding-top: var(--s3); }
+.toc-actions { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: var(--s3); }
 .toc-actions .btn { justify-content: flex-start; }
 /* Узкому экрану колонка не по карману: оглавление уходит, редактор занимает всю ширину. */
 @media (max-width: 1000px) {
@@ -611,7 +627,9 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .page-body { display: flex; flex-direction: column; gap: 12px; }
 
 /* ---- Перетаскивание ---- */
-.drag-handle { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; cursor: grab; color: #a3aec0; user-select: none; border-radius: var(--r1); flex: 0 0 auto; }
+/* Ручка перетаскивания это приглашение взяться, а не украшение: на зелёной шапке страницы
+   линия цвета рамки давала 2.2, и ручку было видно только тому, кто знает, что она там. */
+.drag-handle { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; cursor: grab; color: var(--muted); user-select: none; border-radius: var(--r1); flex: 0 0 auto; }
 .drag-handle:hover { color: var(--text); background: #eef2f7; }
 .drag-handle .ic { width: 17px; height: 17px; }
 .drag-handle:active { cursor: grabbing; }
@@ -621,7 +639,7 @@ code { background: #eef1f6; padding: 1px 6px; border-radius: 5px; font-size: .9e
 .dragging { opacity: .45; pointer-events: none; }
 
 /* ---- Условие в свёрнутом виде ---- */
-.cond-badge { align-self: flex-start; border: 1px dashed #b9c2d0; background: #fff; color: var(--muted); border-radius: 999px; padding: 5px 12px; font-size: .84rem; cursor: pointer; font-weight: 600; }
+.cond-badge { align-self: flex-start; border: 1px dashed var(--field-line); background: #fff; color: var(--muted); border-radius: 999px; padding: 5px 12px; font-size: .84rem; cursor: pointer; font-weight: 600; }
 .cond-badge:hover { border-color: var(--accent); color: var(--accent); }
 .cond-badge.set { border-style: solid; border-color: #6366f1; background: #eef2ff; color: #4338ca; }
 
@@ -649,7 +667,7 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 .insert-bar.open::before { display: none; }
 .insert-chip {
   position: relative; display: inline-flex; align-items: center; gap: 7px;
-  border: 1.5px dashed #94a3b8; background: var(--panel, #fff); color: #475569;
+  border: 1.5px dashed var(--field-line); background: var(--panel, #fff); color: #475569;
   border-radius: 999px; padding: 7px 16px; font-size: .92rem; font-weight: 600; cursor: pointer;
   transition: color .12s, border-color .12s, background .12s, box-shadow .12s;
 }
@@ -690,7 +708,7 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 /* Место подписи, оставленное в потоке текста: оператор его не двигает, но видит. */
 .pdf-flow { position: absolute; border: 1px dashed #9aa1ad; background: rgba(154, 161, 173, .08);
   display: flex; align-items: flex-end; justify-content: flex-start; }
-.pdf-flow b { font-size: 10px; font-weight: 500; color: #6b7280; padding: 2px 4px; background: #fff; }
+.pdf-flow b { font-size: 10px; font-weight: 500; color: #33415a; padding: 2px 4px; background: #fff; border: 1px solid var(--line); border-radius: 4px; }
 /* Прямоугольник, который оператор перетаскивает мышью. */
 .pdf-place { position: absolute; border: 2px solid var(--accent); background: rgba(37, 99, 235, .10);
   cursor: grab; touch-action: none; border-radius: 3px; }
@@ -742,10 +760,10 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 .watch { display: flex; flex-direction: column; gap: 10px; }
 .watch-head { display: flex; align-items: center; gap: 10px; }
 .watch-head h3 { margin: 0; }
-.watch-live { font-size: .78rem; color: #fff; background: #16a34a; border-radius: 999px; padding: 2px 10px; }
+.watch-live { font-size: .78rem; color: #fff; background: var(--accent); border-radius: 999px; padding: 2px 10px; }
 .watch-live::before { content: "●"; margin-right: 5px; animation: watch-pulse 1.6s infinite; }
 @keyframes watch-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-.watch-frame { background: #f1f3f6; border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+.watch-frame { background: #f1f3f6; border: 1px solid #b8c2d1; border-radius: 12px; padding: 14px;
   max-height: calc(100vh - 260px); overflow: auto; }
 .watch-screen { background: #fff; border-radius: 12px; padding: 18px 20px; min-height: 260px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, .08); }
@@ -754,7 +772,7 @@ body.dragging-now { user-select: none; cursor: grabbing; }
   border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 12px; }
 .watch-title { font-weight: 600; color: var(--fg, #1a1c22); }
 .watch-check { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; }
-.watch-box { flex: 0 0 auto; width: 22px; height: 22px; border: 2px solid var(--line); border-radius: 6px;
+.watch-box { flex: 0 0 auto; width: 22px; height: 22px; border: 2px solid var(--field-line); border-radius: 6px;
   display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; }
 .watch-check.on .watch-box { background: var(--accent); border-color: var(--accent); }
 .watch-check.miss .watch-box { border-color: var(--danger, #dc2626); }
@@ -770,8 +788,11 @@ body.dragging-now { user-select: none; cursor: grabbing; }
 .toast-watch { position: fixed; right: 20px; bottom: 20px; z-index: 60; display: flex; align-items: center;
   gap: 10px; background: #1a1c22; color: #fff; border-radius: 12px; padding: 10px 12px 10px 16px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, .28); max-width: min(460px, 92vw); }
-.toast-watch .btn { color: #fff; border-color: rgba(255, 255, 255, .35); }
-.toast-watch .btn:hover { background: rgba(255, 255, 255, .12); }
+/* Кнопки внутри тёмной всплывашки. Призрачная кнопка красится белым по белому полотну, и на
+   тёмной подложке от неё оставался белый прямоугольник без единой видимой буквы: полотно надо
+   убрать целиком, а не только перекрасить надпись. */
+.toast-watch .btn { background: transparent; color: #fff; border-color: rgba(255, 255, 255, .55); box-shadow: none; }
+.toast-watch .btn:hover { background: rgba(255, 255, 255, .16); border-color: #fff; color: #fff; }
 
 /* Однострочное поле с оформлением: то же, что редактор абзаца, но в строку элемента. */
 .rt-editor.rt-inline { flex: 1 1 auto; min-height: 0; padding: 8px 10px; line-height: 1.4;
@@ -834,18 +855,18 @@ body.watch-solo .content { padding-top: 12px; }
 
 /* Панель оформления блока: плашка, рамка, отступ, межстрочный, список в одну строку. */
 .block-style { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0; }
-.block-style input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid #b9c2d0; border-radius: 6px; }
+.block-style input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--field-line); border-radius: 6px; }
 
 /* Редактор таблицы: ячейки сеткой, ширины столбцов сверху. */
 .block-table { margin: 8px 0; }
 .table-grid { display: grid; gap: 4px; align-items: center; margin: 8px 0; overflow-x: auto; }
-.table-cell, .table-width { padding: 6px 8px; border: 1px solid #b9c2d0; border-radius: 6px; min-width: 80px; }
+.table-cell, .table-width { padding: 6px 8px; border: 1px solid var(--field-line); border-radius: 6px; min-width: 80px; }
 .table-cell-head { background: #f1f5f9; font-weight: 700; }
 .table-width { background: #fbfdff; color: #64748b; }
 .table-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* Правила отметок у страницы. */
-.rules-panel { margin: 10px 0; padding: 10px; border: 1px dashed #cbd5e1; border-radius: 8px; }
+.rules-panel { margin: 10px 0; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; }
 .rules-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .rule-row { display: flex; align-items: center; gap: 8px; }
 .rule-text { flex: 1; }
@@ -853,9 +874,9 @@ body.watch-solo .content { padding-top: 12px; }
 .rule-picks { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; max-height: 320px; overflow-y: auto; }
 
 /* Маркер в панели оформления текста: кружок с обводкой, чтобы светлый цвет был виден на белом. */
-.rt-swatch-mark { border: 1px solid #b9c2d0; border-radius: 4px; }
+.rt-swatch-mark { border: 1px solid var(--field-line); border-radius: 4px; }
 /* Свой размер шрифта в точках. */
-.rt-pt input { width: 52px; padding: 3px 5px; border: 1px solid #b9c2d0; border-radius: 6px; }
+.rt-pt input { width: 52px; padding: 3px 5px; border: 1px solid var(--field-line); border-radius: 6px; }
 /* Пометка «по часам сервера» вместо списка тегов у условий по моменту показа. */
 .cond-clock-note { color: #6366f1; font-weight: 600; }
 /* Настройки колонтитула в окне раскладки PDF. */
@@ -891,51 +912,57 @@ body.watch-solo .content { padding-top: 12px; }
 /* Признак «сохранять в PDF». Снятый должен быть заметен: по нему видно, чего не окажется в
    подписанной бумаге. Недоступный переключатель бледнеет, но остаётся на месте с объяснением. */
 .pdf-flag { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 13px; }
-.pdf-flag input:not(:checked) + * , .pdf-flag:has(input:not(:checked)) { color: #b45309; font-weight: 600; }
+.pdf-flag input:not(:checked) + * , .pdf-flag:has(input:not(:checked)) { color: #92400e; font-weight: 600; }
 .pdf-flag input:disabled { cursor: not-allowed; }
-.pdf-flag:has(input:disabled) { color: #8a94a6; }
+.pdf-flag:has(input:disabled) { color: #6e7787; }
 
 
 /* ---- Закладки документов ----
    Ряд закладок, как листы в книге. Активная сливается с полотном ниже, остальные отступают:
    так видно, где ты находишься, без единого слова. Ряд не переносится на вторую строку, а
    прокручивается вбок: перенос дёргал бы всю вёрстку при каждом добавлении документа. */
+/* Полоса закладок это серая подложка, а не пустое место: полотно панели белое, и закладки на
+   нём попросту растворялись. Активная закладка белая и вырезает нижнюю границу полосы, как
+   вкладка в браузере: по этому разрыву глаз и понимает, какая из них открыта. */
 .doc-tabs { display: flex; align-items: flex-end; gap: 4px; overflow-x: auto; overflow-y: hidden;
-  border-bottom: 2px solid var(--border, #e5e7eb); padding: 0 4px; margin: 0 0 14px; scrollbar-width: thin; }
+  background: #e9edf3; border: 1px solid var(--line, #c3ccda);
+  border-radius: var(--r2, 11px) var(--r2, 11px) 0 0;
+  padding: 7px 7px 0; margin: 0 0 16px; scrollbar-width: thin; }
 .doc-tab { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; max-width: 320px;
-  padding: 9px 12px; border: 1px solid transparent; border-bottom: none;
-  border-radius: 10px 10px 0 0; background: transparent; color: var(--muted, #6b7280);
-  font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: -2px; }
-.doc-tab:hover { background: #f3f4f6; color: var(--text, #111827); }
-.doc-tab.on { background: #fff; color: var(--text, #111827); border-color: var(--border, #e5e7eb);
-  border-bottom: 2px solid #fff; cursor: default; }
+  padding: 9px 13px; border: 1px solid transparent; border-bottom: none;
+  border-radius: var(--r1, 8px) var(--r1, 8px) 0 0; background: transparent; color: #4b5563;
+  font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: -1px; }
+.doc-tab:hover { background: #e2e6ec; color: var(--text, #111827); }
+.doc-tab.on { background: var(--panel, #fff); color: var(--text, #111827);
+  border-color: var(--line, #c3ccda); border-bottom: 1px solid var(--panel, #fff);
+  box-shadow: 0 -2px 6px rgba(16,24,40,.05); cursor: default; }
 .doc-tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .doc-tab svg { width: 15px; height: 15px; flex: 0 0 auto; }
-.doc-tab-mark { color: #16a34a; }
-.doc-tab-kind { color: #6b7280; }
+.doc-tab-mark { color: var(--accent); }
+.doc-tab-kind { color: var(--muted); }
 .doc-tab.on .doc-tab-kind { color: #4f46e5; }
 /* Точка несохранённого: та же условность, что в редакторах кода. */
-.doc-tab-dot { color: #b45309; font-size: 18px; line-height: 1; margin-left: -2px; }
-.doc-tab-menu { padding: 0 2px; color: #9ca3af; font-size: 16px; line-height: 1; }
+.doc-tab-dot { color: #92400e; font-size: 18px; line-height: 1; margin-left: -2px; }
+.doc-tab-menu { padding: 0 2px; color: #5a6473; font-size: 16px; line-height: 1; }
 .doc-tab:hover .doc-tab-menu, .doc-tab.on .doc-tab-menu { color: var(--text, #111827); }
-.doc-tab-add { color: #16a34a; font-weight: 700; }
-.doc-tab-add:hover { background: #ecfdf5; color: #15803d; }
-.doc-tabs-hint { flex: 0 0 auto; align-self: center; margin-left: 10px; padding-bottom: 6px;
-  font-size: 12px; color: #9ca3af; }
+.doc-tab-add { color: var(--accent-dark, #15803d); font-weight: 700; }
+.doc-tab-add:hover { background: #d1fae5; color: #14532d; }
+.doc-tabs-hint { flex: 0 0 auto; align-self: center; margin-left: 10px; padding-bottom: 8px;
+  font-size: 12px; color: #4b5563; }
 
 /* Меню закладки. Ставится поверх страницы по координатам самой закладки. */
 .doc-menu { position: absolute; z-index: 60; min-width: 260px; display: flex; flex-direction: column;
   align-items: stretch; gap: 2px; padding: 8px; background: #fff; border: 1px solid var(--border, #e5e7eb);
   border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.16); }
 .doc-menu .btn { justify-content: flex-start; }
-.doc-menu-head { padding: 4px 8px 8px; font-size: 12px; color: #9ca3af;
+.doc-menu-head { padding: 4px 8px 8px; font-size: 12px; color: #5a6473;
   border-bottom: 1px solid var(--border, #e5e7eb); margin-bottom: 4px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.doc-menu-note { padding: 6px 8px; font-size: 12px; color: #9ca3af; }
+.doc-menu-note { padding: 6px 8px; font-size: 12px; color: #5a6473; }
 
 /* Свёрнутая справка о тегах: раскрывается по нажатию и не занимает четверть экрана всегда. */
 .tags-box > summary { cursor: pointer; font-weight: 600; }
-.tags-box > summary::marker { color: #16a34a; }
+.tags-box > summary::marker { color: var(--accent); }
 .tags-box[open] > summary { margin-bottom: 8px; }
 
 /* Кнопки панели документа собраны в группы разной природы. Зазор между группами больше, чем
@@ -948,5 +975,5 @@ body.watch-solo .content { padding-top: 12px; }
 /* Завершающие экраны в оглавлении: это не страницы, и выглядеть как страницы они не должны. */
 .toc-fixed-list { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line, #e5e7eb); }
 .toc-fixed-title { padding: 0 8px 6px; font-size: 11px; text-transform: uppercase;
-  letter-spacing: .04em; color: #9ca3af; }
-.toc-fixed-note { padding: 4px 8px 0; font-size: 11px; color: #9ca3af; }
+  letter-spacing: .04em; color: #5a6473; }
+.toc-fixed-note { padding: 4px 8px 0; font-size: 11px; color: #5a6473; }
