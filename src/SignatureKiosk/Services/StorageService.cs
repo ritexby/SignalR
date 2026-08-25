@@ -118,8 +118,57 @@ public class StorageService
         }
     }
 
-    public bool UpdateDevice(string id, string? name, List<string>? groupIds, string? workstationId, bool touchWorkstation)
+    // Разумные пределы для размера экрана. Числа приходят от страницы планшета, а её можно
+    // открыть в чём угодно, вплоть до окна в один пиксель: заведомо бессмысленное значение
+    // лучше не запоминать вовсе, чем показать оператору как размер его железа.
+    private const int ScreenSideMin = 1;
+    private const int ScreenSideMax = 10000;
+
+    /// <summary>
+    /// Планшет сообщил размер своего экрана. Записывается и рассылается только настоящее
+    /// изменение: поворот планшета иначе означал бы запись файла на каждое промежуточное
+    /// состояние разметки. Отказ отличается от «уже знаю» намеренно: по отказу планшет поймёт,
+    /// что сведения не приняты, и не будет считать их доставленными.
+    /// </summary>
+    public DeviceScreenUpdate SetDeviceScreen(string id, int width, int height, double pixelRatio)
     {
+        if (width < ScreenSideMin || width > ScreenSideMax) return DeviceScreenUpdate.Rejected;
+        if (height < ScreenSideMin || height > ScreenSideMax) return DeviceScreenUpdate.Rejected;
+        // Плотность округляется до сотых: дальше идут только погрешности вычисления масштаба, а
+        // из-за них планшет сообщал бы «изменение» на ровном месте и заставлял все открытые
+        // админки перечитывать список планшетов.
+        var ratio = double.IsNaN(pixelRatio) || double.IsInfinity(pixelRatio) || pixelRatio <= 0 || pixelRatio > 20
+            ? 1d
+            : Math.Round(pixelRatio, 2, MidpointRounding.AwayFromZero);
+        lock (_lock)
+        {
+            var list = ReadOr(DevicesPath, () => new List<Device>());
+            var dev = list.FirstOrDefault(d => d.Id == id);
+            if (dev == null) return DeviceScreenUpdate.Rejected;
+            // Отозванный планшет не рассказывает о себе ничего. Отзыв закрывает вход по токену,
+            // но соединение, открытое до отзыва, живёт до своего разрыва, и без этой проверки
+            // отозванный планшет продолжал бы обновлять свою карточку в админке.
+            if (dev.Status != "active") return DeviceScreenUpdate.Rejected;
+            if (dev.ScreenWidth == width && dev.ScreenHeight == height && dev.ScreenPixelRatio == ratio)
+                return DeviceScreenUpdate.Unchanged;
+            dev.ScreenWidth = width;
+            dev.ScreenHeight = height;
+            dev.ScreenPixelRatio = ratio;
+            Write(DevicesPath, list);
+            return DeviceScreenUpdate.Changed;
+        }
+    }
+
+    /// <param name="местоСменилось">
+    /// Планшет действительно уехал с одного рабочего места на другое или был снят с места. Это
+    /// не то же самое, что «место было в теле запроса»: запрос мог назвать то самое место, где
+    /// планшет и так стоит. Вызывающий по этому признаку уводит экран планшета на рекламу, а
+    /// зря уведённый экран это оборванное подписание у живого человека.
+    /// </param>
+    public bool UpdateDevice(string id, string? name, List<string>? groupIds, string? workstationId,
+                             bool touchWorkstation, out bool местоСменилось)
+    {
+        местоСменилось = false;
         lock (_lock)
         {
             var list = ReadOr(DevicesPath, () => new List<Device>());
@@ -127,7 +176,12 @@ public class StorageService
             if (dev == null) return false;
             if (!string.IsNullOrWhiteSpace(name)) dev.Name = name!.Trim();
             if (groupIds != null) dev.GroupIds = groupIds;
-            if (touchWorkstation) dev.WorkstationId = string.IsNullOrWhiteSpace(workstationId) ? null : workstationId;
+            if (touchWorkstation)
+            {
+                var новое = string.IsNullOrWhiteSpace(workstationId) ? null : workstationId;
+                местоСменилось = !string.Equals(dev.WorkstationId, новое, StringComparison.Ordinal);
+                dev.WorkstationId = новое;
+            }
             Write(DevicesPath, list);
             return true;
         }
@@ -178,8 +232,17 @@ public class StorageService
     /// «device or workstation not found», не зная, что чинить: несуществующий номер планшета или
     /// код рабочего места, которого ещё не завели.
     /// </remarks>
-    public РезультатПривязки AssignWorkstationByExternalId(string deviceId, string? externalId)
+    public РезультатПривязки AssignWorkstationByExternalId(string deviceId, string? externalId) =>
+        AssignWorkstationByExternalId(deviceId, externalId, out _);
+
+    /// <param name="местоСменилось">
+    /// Планшет действительно уехал с места или был снят с него. Повторная привязка к тому же
+    /// месту сменой не считается: по этому признаку вызывающий уводит экран на рекламу, а зря
+    /// уведённый экран это оборванное подписание у живого человека.
+    /// </param>
+    public РезультатПривязки AssignWorkstationByExternalId(string deviceId, string? externalId, out bool местоСменилось)
     {
+        местоСменилось = false;
         lock (_lock)
         {
             // Планшет проверяется первым: он адресат запроса, и если его нет, всё остальное уже
@@ -200,6 +263,7 @@ public class StorageService
                 if (ws == null) return РезультатПривязки.НетМеста;
                 wsId = ws.Id;
             }
+            местоСменилось = !string.Equals(dev.WorkstationId, wsId, StringComparison.Ordinal);
             dev.WorkstationId = wsId;
             Write(DevicesPath, list);
             return РезультатПривязки.Готово;
@@ -274,53 +338,120 @@ public class StorageService
         lock (_lock) return ReadOr(WorkstationsPath, () => new List<Workstation>());
     }
 
-    public Workstation AddWorkstation(string? externalId, string? name, string? location)
+    /// <summary>
+    /// Занят ли код рабочего места кем-то, кроме названной записи. Сравнение то же, что и везде,
+    /// где код места читается: без учёта регистра и окружающих пробелов.
+    /// </summary>
+    private static Workstation? КодЗанят(List<Workstation> список, string код, string? кромеId) =>
+        список.FirstOrDefault(w => !string.Equals(w.Id, кромеId, StringComparison.Ordinal)
+            && string.Equals((w.ExternalId ?? "").Trim(), код, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Завести рабочее место. Второй возвращаемый это причина отказа или null.
+    /// </summary>
+    /// <remarks>
+    /// Проверка на повтор кода стоит здесь, в хранилище, а не в обработчике: раньше она была
+    /// только на внешнем пути POST /api/ext/workstations, а админский путь, которым место и
+    /// заводит оператор, пропускал повтор молча.
+    ///
+    /// Чем это кончалось, замерено: два места с кодом «3244», планшет привязан ко второму, на
+    /// связи, карточка в порядке. Заказ по коду «3244» отвечает 404 «на этом месте нет
+    /// планшета», потому что отбор берёт первое совпадение и до второго не доходит. Оператор
+    /// идёт искать поломку в планшете и в сети, а поломка в списке мест. Второй исход хуже:
+    /// два живых планшета в разных кабинетах с одним кодом, и документ молча уходит к тому,
+    /// кто в списке раньше, то есть к чужому человеку.
+    ///
+    /// Для кода документа такая проверка есть и отказ произносится вслух. Код места, который на
+    /// карточке планшета так и подписан «код для API», стоял без неё.
+    /// </remarks>
+    public (Workstation? Место, string? Ошибка) AddWorkstation(string? externalId, string? name, string? location)
     {
         lock (_lock)
         {
             var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
+            var код = (externalId ?? "").Trim();
+            if (код.Length > 0)
+            {
+                var чужое = КодЗанят(list, код, null);
+                if (чужое is not null)
+                    return (null, "Код «" + код + "» уже занят рабочим местом «" + чужое.Name + "». " +
+                                  "Код рабочего места это адрес, по которому внешняя система шлёт документ, " +
+                                  "и он должен быть один на всю систему. Регистр и пробелы по краям не " +
+                                  "считаются: «" + код + "» и «" + код.ToUpperInvariant() + "» это один код.");
+            }
             var w = new Workstation
             {
                 Id = "ws-" + ShortId(),
-                ExternalId = (externalId ?? "").Trim(),
+                ExternalId = код,
                 Name = string.IsNullOrWhiteSpace(name) ? "Рабочее место" : name!.Trim(),
                 Location = (location ?? "").Trim()
             };
             list.Add(w);
             Write(WorkstationsPath, list);
-            return w;
+            return (w, null);
         }
     }
 
-    public bool UpdateWorkstation(string id, string? externalId, string? name, string? location)
+    /// <summary>Чем кончилась правка рабочего места.</summary>
+    public enum РезультатПравкиМеста { Готово, НетМеста, КодЗанят }
+
+    /// <summary>
+    /// Изменить рабочее место. Отдельный случай КодЗанят: раньше правка могла вписать записи чужой
+    /// код, и работавший адрес умирал на месте. Замер: место «КАБ-77» с живым планшетом показывает
+    /// документ; PUT вписывает «КАБ-77» другой, пустой записи; сразу после этого заказ по «КАБ-77»
+    /// отвечает 404, а планшет возвращается на рекламу. Ни одного предупреждения по дороге.
+    /// </summary>
+    public РезультатПравкиМеста UpdateWorkstation(string id, string? externalId, string? name,
+                                                  string? location, out string? ошибка)
     {
+        ошибка = null;
         lock (_lock)
         {
             var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
             var w = list.FirstOrDefault(x => x.Id == id);
-            if (w == null) return false;
-            if (externalId != null) w.ExternalId = externalId.Trim();
+            if (w == null) return РезультатПравкиМеста.НетМеста;
+            if (externalId != null)
+            {
+                var код = externalId.Trim();
+                if (код.Length > 0)
+                {
+                    var чужое = КодЗанят(list, код, id);
+                    if (чужое is not null)
+                    {
+                        ошибка = "Код «" + код + "» уже занят рабочим местом «" + чужое.Name + "». " +
+                                 "Код рабочего места это адрес, по которому внешняя система шлёт документ, " +
+                                 "и он должен быть один на всю систему.";
+                        return РезультатПравкиМеста.КодЗанят;
+                    }
+                }
+                w.ExternalId = код;
+            }
             if (!string.IsNullOrWhiteSpace(name)) w.Name = name.Trim();
             if (location != null) w.Location = location.Trim();
             Write(WorkstationsPath, list);
-            return true;
+            return РезультатПравкиМеста.Готово;
         }
     }
 
-    public bool DeleteWorkstation(string id)
+    /// <summary>
+    /// Удалить рабочее место. Возвращается список планшетов, которые этим с места сняты, или
+    /// null, если места с таким номером нет. Список нужен вызывающему: у снятого планшета на
+    /// экране может стоять открытый документ с данными клиента, и его надо увести на рекламу.
+    /// </summary>
+    public List<string>? DeleteWorkstation(string id)
     {
         lock (_lock)
         {
             var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
             var w = list.FirstOrDefault(x => x.Id == id);
-            if (w == null) return false;
+            if (w == null) return null;
             list.Remove(w);
             Write(WorkstationsPath, list);
             var devs = ReadOr(DevicesPath, () => new List<Device>());
-            bool changed = false;
-            foreach (var d in devs) if (d.WorkstationId == id) { d.WorkstationId = null; changed = true; }
-            if (changed) Write(DevicesPath, devs);
-            return true;
+            var снятые = new List<string>();
+            foreach (var d in devs) if (d.WorkstationId == id) { d.WorkstationId = null; снятые.Add(d.Id); }
+            if (снятые.Count > 0) Write(DevicesPath, devs);
+            return снятые;
         }
     }
 
@@ -610,30 +741,105 @@ public class StorageService
     }
 
     /// <summary>
+    /// Как зовётся документ. Имя одно, и это его заголовок: заголовок оператор видит в редакторе
+    /// и правит, значит он и есть имя. Отдельное «название» остаётся только документу без
+    /// заголовка, а если пусто и оно, имя это код документа: безымянных документов не бывает.
+    /// </summary>
+    private static string ИмяДляСписка(string? title, string? запасное, string? code)
+    {
+        var t = (title ?? "").Trim();
+        if (t.Length > 0) return t;
+        var з = (запасное ?? "").Trim();
+        if (з.Length > 0) return з;
+        return (code ?? "").Trim();
+    }
+
+    /// <summary>
+    /// Заголовок из файла документа, дёшево. Сверка имён идёт на каждое чтение списка, и читать
+    /// ради неё все тексты нельзя: при пятидесяти документах это пятьдесят разборов JSON на
+    /// каждый показ документа. Метка времени и размер это один вопрос файловой системе, а разбор
+    /// случается только у файла, который с прошлого раза менялся. Сам текст берётся из общего
+    /// кэша, поэтому лишнего чтения с диска сверка не добавляет.
+    /// null означает «не знаю»: файла нет или он не разбирается. Повреждённый файл здесь не
+    /// подменяется и не уносится в карантин: сверка пассивна и чужого имени документу не даёт.
+    /// </summary>
+    private readonly Dictionary<string, (DateTime Stamp, long Length, string? Title)> _docTitle = new(StringComparer.Ordinal);
+
+    private sealed class ТолькоЗаголовок { public string? Title { get; set; } }
+
+    private string? ЗаголовокФайла(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists) { _docTitle.Remove(path); return null; }
+        if (_docTitle.TryGetValue(path, out var было)
+            && было.Stamp == info.LastWriteTimeUtc && было.Length == info.Length)
+            return было.Title;
+        string? текст;
+        try { текст = ReadText(path); } catch { текст = null; }
+        if (текст is null) { _docTitle.Remove(path); return null; }
+        string? title = null;
+        try { title = JsonSerializer.Deserialize<ТолькоЗаголовок>(текст, Json)?.Title; }
+        catch { title = null; }
+        info.Refresh();
+        _docTitle[path] = (info.LastWriteTimeUtc, info.Length, title);
+        return title;
+    }
+
+    /// <summary>
+    /// Свести имена в списке с заголовками документов. Возвращает true, если что-то изменилось и
+    /// список надо записать. Это же чинит данные, слежавшиеся до правила «имя это заголовок»:
+    /// они выравниваются при первом чтении списка и больше не расходятся.
+    /// Документ, чей файл пропал или не разбирается, не трогается вовсе: на «не знаю» честный
+    /// ответ это «не знаю», а не подмена имени. Пустой заголовок имя тоже не затирает.
+    /// </summary>
+    private bool СвестиИмена(List<DocumentInfo> список)
+    {
+        var изменилось = false;
+        foreach (var info in список)
+        {
+            var path = info.IsDefault ? DocumentPath : DocFilePath(info.Id);
+            if (path is null) continue;
+            var title = ЗаголовокФайла(path);
+            if (title is null) continue;
+            var имя = ИмяДляСписка(title, info.Name, info.Code);
+            if (имя.Length == 0 || имя == info.Name) continue;
+            info.Name = имя;
+            изменилось = true;
+        }
+        return изменилось;
+    }
+
+    /// <summary>
     /// Список документов. Библиотеки может не быть вовсе: так выглядит установка, обновлённая с
     /// прежней версии. Тогда она заводится из единственного document.json, и он же становится
     /// документом по умолчанию. Ничего не теряется и не переезжает: файл остаётся на месте.
     /// </summary>
     public List<DocumentInfo> GetDocuments()
     {
-        lock (_lock)
-        {
-            var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
-            if (lib.Documents.Count > 0) return lib.Documents;
+        lock (_lock) return ЧитатьСписокNoLock();
+    }
 
+    private List<DocumentInfo> ЧитатьСписокNoLock()
+    {
+        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+        if (lib.Documents.Count == 0)
+        {
             var первый = new DocumentInfo
             {
                 Id = "main",
                 Code = "main",
-                Name = ReadOr(DocumentPath, DefaultDocument).Title,
+                Name = ИмяДляСписка(ReadOr(DocumentPath, DefaultDocument).Title, "Документ", "main"),
                 IsDefault = true,
                 UpdatedUtc = DateTime.UtcNow
             };
-            if (string.IsNullOrWhiteSpace(первый.Name)) первый.Name = "Документ";
             lib.Documents.Add(первый);
             Write(LibraryPath, lib);
             return lib.Documents;
         }
+        // Записываем только когда действительно что-то разошлось: иначе каждое чтение списка,
+        // а оно случается на каждый показ документа, превращалось бы в запись файла.
+        if (СвестиИмена(lib.Documents)) Write(LibraryPath, lib);
+        return lib.Documents;
     }
 
     public DocumentInfo? GetDocumentInfo(string? id)
@@ -662,13 +868,28 @@ public class StorageService
     /// </summary>
     public DocumentConfig GetDocument(string? id = null)
     {
-        lock (_lock)
-        {
-            var info = id is null ? null : GetDocumentInfoNoLock(id);
-            if (id is null || info is null || info.IsDefault) return ReadOr(DocumentPath, DefaultDocument);
-            var path = DocFilePath(info.Id);
-            return path is null ? DefaultDocument() : ReadOr(path, DefaultDocument);
-        }
+        lock (_lock) return GetDocumentNoLock(id);
+    }
+
+    /// <summary>
+    /// Чем отвечать, когда файла документа нет или он не читается. Текст образцовый, а имя своё:
+    /// иначе документ, открытый после потери файла, зовётся чужим заголовком при своём имени в
+    /// списке, и вкладка переименовывается при переходе на неё. Как зовётся документ, не зависит
+    /// от того, цел ли его текст.
+    /// </summary>
+    private static DocumentConfig ОбразецДля(DocumentInfo? info)
+    {
+        var doc = DefaultDocument();
+        var имя = ИмяДляСписка(null, info?.Name, info?.Code);
+        if (имя.Length > 0) doc.Title = имя;
+        return doc;
+    }
+
+    /// <summary>Запись о документе по умолчанию, не заводя библиотеку, если её ещё нет.</summary>
+    private DocumentInfo? DefaultInfoNoLock()
+    {
+        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+        return lib.Documents.FirstOrDefault(d => d.IsDefault) ?? lib.Documents.FirstOrDefault();
     }
 
     /// <summary>
@@ -680,7 +901,7 @@ public class StorageService
     {
         lock (_lock)
         {
-            if (string.IsNullOrWhiteSpace(id)) { doc = ReadOr(DocumentPath, DefaultDocument); return true; }
+            if (string.IsNullOrWhiteSpace(id)) { doc = GetDocumentNoLock(null); return true; }
             var info = GetDocumentInfoNoLock(id!);
             if (info is null) { doc = DefaultDocument(); return false; }
             doc = GetDocumentNoLock(info.Id);
@@ -705,14 +926,8 @@ public class StorageService
         {
             var info = id is null ? null : GetDocumentInfoNoLock(id);
             if (id is not null && info is null) return false;
-            if (id is null || info is null || info.IsDefault) { Write(DocumentPath, doc); }
-            else
-            {
-                var path = DocFilePath(info.Id);
-                if (path is null) return false;   // имя не годится для файла: писать некуда
-                Directory.CreateDirectory(DocumentsDir);
-                Write(path, doc);
-            }
+            // false здесь означает, что имя документа не годится для файла: писать некуда.
+            if (!ЗаписатьТекстNoLock(info, doc)) return false;
             TouchDocument(info?.Id ?? DefaultIdNoLock(), doc.Title, doc.Kind);
             return true;
         }
@@ -739,7 +954,8 @@ public class StorageService
         info.UpdatedUtc = DateTime.UtcNow;
         info.Kind = kind;
         // Пустой заголовок имя не затирает: документ без заголовка остался бы безымянным.
-        if (!string.IsNullOrWhiteSpace(title)) info.Name = title!.Trim();
+        // Тогда именем остаётся прежнее название, а если нет и его, код документа.
+        info.Name = ИмяДляСписка(title, info.Name, info.Code);
         Write(LibraryPath, lib);
     }
 
@@ -757,14 +973,6 @@ public class StorageService
             if (список.Any(d => string.Equals(d.Code, чистыйКод, StringComparison.OrdinalIgnoreCase)))
                 return (null, "Код «" + чистыйКод + "» уже занят другим документом.");
 
-            var info = new DocumentInfo
-            {
-                Id = Guid.NewGuid().ToString("N")[..12],
-                Code = чистыйКод,
-                Name = string.IsNullOrWhiteSpace(name) ? чистыйКод : name!.Trim(),
-                IsDefault = false,
-                UpdatedUtc = DateTime.UtcNow
-            };
             // Копия делается с уже сохранённого документа. А новый начинается чистым: одна пустая
             // страница и заголовок, который оператор только что ввёл. Прежде новый заводился
             // копией образцового согласия, и человек, нажавший «Новый документ», получал чужой
@@ -773,13 +981,43 @@ public class StorageService
             // копию документа X» отдавало копию совсем другого, и оператор об этом не узнавал.
             if (!string.IsNullOrWhiteSpace(copyOfId) && GetDocumentInfoNoLock(copyOfId!) is null)
                 return (null, "Документ, с которого делается копия, не найден.");
-            var текст = string.IsNullOrWhiteSpace(copyOfId)
-                ? new DocumentConfig
+            var заданное = (name ?? "").Trim();
+            var копия = !string.IsNullOrWhiteSpace(copyOfId);
+            var текст = копия
+                ? GetDocumentNoLock(copyOfId!)
+                : new DocumentConfig
                 {
-                    Title = info.Name,
                     Pages = new List<DocPage> { new() { HeadingRuns = new List<TextRun> { new() { Text = "Страница 1" } } } }
-                }
-                : GetDocumentNoLock(copyOfId!);
+                };
+            // Заголовок нового документа задаётся здесь и один раз: имя в списке потом снимается
+            // с него, а не живёт второй строкой. У копии, если оператор своего имени не дал,
+            // заголовок делается из исходного и не остаётся его тёзкой: две одинаковые строки в
+            // списке это и есть та путаница, из-за которой всё чинится третий раз.
+            if (копия && заданное.Length == 0)
+            {
+                var исходный = GetDocumentInfoNoLock(copyOfId!);
+                var основа = ИмяДляСписка(текст.Title, исходный?.Name, исходный?.Code);
+                текст.Title = СвободноеИмяКопии(основа.Length > 0 ? основа : чистыйКод, список);
+            }
+            else
+            {
+                текст.Title = ИмяДляСписка(заданное, null, чистыйКод);
+            }
+
+            var info = new DocumentInfo
+            {
+                Id = Guid.NewGuid().ToString("N")[..12],
+                Code = чистыйКод,
+                Name = ИмяДляСписка(текст.Title, заданное, чистыйКод),
+                IsDefault = false,
+                // Вид берётся из самого текста, а не остаётся пустым. Копия информационного
+                // документа заводилась записью без вида, то есть подписной, и на её закладке
+                // стояло перо, а в редакторе рядом было написано «Этот документ не подписывают».
+                // Закладка спорила с редактором на одном экране, пока оператор не сохранял
+                // документ: вид в запись клал только TouchDocument, то есть первое сохранение.
+                Kind = текст.Kind,
+                UpdatedUtc = DateTime.UtcNow
+            };
             var path = DocFilePath(info.Id);
             if (path is null) return (null, "Не удалось создать документ.");
             Directory.CreateDirectory(DocumentsDir);
@@ -793,30 +1031,49 @@ public class StorageService
         }
     }
 
-    private List<DocumentInfo> GetDocumentsNoLock()
+    private List<DocumentInfo> GetDocumentsNoLock() => ЧитатьСписокNoLock();
+
+    /// <summary>
+    /// Имя для копии: «исходный (копия)», а при занятости с числом. Занятость смотрится по
+    /// именам всего списка, потому что тёзки видны именно в нём.
+    /// </summary>
+    private static string СвободноеИмяКопии(string основа, List<DocumentInfo> список)
     {
-        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
-        if (lib.Documents.Count > 0) return lib.Documents;
-        var первый = new DocumentInfo
-        {
-            Id = "main", Code = "main",
-            Name = ReadOr(DocumentPath, DefaultDocument).Title, IsDefault = true, UpdatedUtc = DateTime.UtcNow
-        };
-        if (string.IsNullOrWhiteSpace(первый.Name)) первый.Name = "Документ";
-        lib.Documents.Add(первый);
-        Write(LibraryPath, lib);
-        return lib.Documents;
+        bool занято(string имя) =>
+            список.Any(d => string.Equals((d.Name ?? "").Trim(), имя, StringComparison.OrdinalIgnoreCase));
+        var кандидат = основа + " (копия)";
+        for (var n = 2; занято(кандидат) && n <= MaxDocuments + 1; n++)
+            кандидат = основа + " (копия " + n + ")";
+        return кандидат;
     }
 
-    private DocumentConfig GetDocumentNoLock(string id)
+    private DocumentConfig GetDocumentNoLock(string? id)
     {
-        var info = GetDocumentInfoNoLock(id);
-        if (info is null || info.IsDefault) return ReadOr(DocumentPath, DefaultDocument);
+        var info = id is null ? DefaultInfoNoLock() : GetDocumentInfoNoLock(id);
+        if (info is null || info.IsDefault) return ReadOr(DocumentPath, () => ОбразецДля(info));
         var path = DocFilePath(info.Id);
-        return path is null ? DefaultDocument() : ReadOr(path, DefaultDocument);
+        return path is null ? ОбразецДля(info) : ReadOr(path, () => ОбразецДля(info));
     }
 
-    /// <summary>Переименовать документ или сменить его код.</summary>
+    /// <summary>Куда лечь тексту документа: по умолчанию в document.json, остальным своим файлом.</summary>
+    private bool ЗаписатьТекстNoLock(DocumentInfo? info, DocumentConfig doc)
+    {
+        if (info is null || info.IsDefault) { Write(DocumentPath, doc); return true; }
+        var path = DocFilePath(info.Id);
+        if (path is null) return false;
+        Directory.CreateDirectory(DocumentsDir);
+        Write(path, doc);
+        return true;
+    }
+
+    /// <summary>
+    /// Переименовать документ или сменить его код. Имя документа это его заголовок, поэтому
+    /// переименование правит заголовок в самом документе, а не заводит второе имя рядом: имя,
+    /// живущее только в списке, и было тем расхождением, из-за которого закладка переименовывалась
+    /// при переходе на неё. Документу без заголовка заголовок не выдумывается: у него имя и есть
+    /// отдельное название. Документ, чей файл пропал или не разбирается, текстом не трогается:
+    /// иначе на месте потерянного оказался бы образец с новым именем.
+    /// </summary>
     public string? UpdateDocumentMeta(string id, string? code, string? name)
     {
         lock (_lock)
@@ -832,7 +1089,19 @@ public class StorageService
                     return "Код «" + чистый + "» уже занят другим документом.";
                 info.Code = чистый;
             }
-            if (!string.IsNullOrWhiteSpace(name)) info.Name = name!.Trim();
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                var имя = name!.Trim();
+                var путь = info.IsDefault ? DocumentPath : DocFilePath(info.Id);
+                var былЗаголовок = путь is null ? null : ЗаголовокФайла(путь);
+                if (!string.IsNullOrWhiteSpace(былЗаголовок) && былЗаголовок!.Trim() != имя)
+                {
+                    var текст = GetDocumentNoLock(info.Id);
+                    текст.Title = имя;
+                    ЗаписатьТекстNoLock(info, текст);
+                }
+                info.Name = ИмяДляСписка(имя, info.Name, info.Code);
+            }
             info.UpdatedUtc = DateTime.UtcNow;
             var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
             lib.Documents = список;
@@ -868,7 +1137,10 @@ public class StorageService
             }
             Write(DocumentPath, текстНового);
             var путьНового = DocFilePath(новый.Id);
-            if (путьНового is not null && File.Exists(путьНового)) { _text.Remove(путьНового); File.Delete(путьНового); }
+            if (путьНового is not null && File.Exists(путьНового))
+            {
+                _text.Remove(путьНового); _docTitle.Remove(путьНового); File.Delete(путьНового);
+            }
             новый.IsDefault = true;
 
             var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
@@ -891,7 +1163,7 @@ public class StorageService
                        "Сначала назначьте по умолчанию другой.";
             if (список.Count <= 1) return "Последний документ удалить нельзя.";
             var path = DocFilePath(info.Id);
-            if (path is not null && File.Exists(path)) { _text.Remove(path); File.Delete(path); }
+            if (path is not null && File.Exists(path)) { _text.Remove(path); _docTitle.Remove(path); File.Delete(path); }
             список.Remove(info);
             var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
             lib.Documents = список;
@@ -1575,6 +1847,10 @@ public class StorageService
         // записанное, а не то, что было до записи.
         var info = new FileInfo(path);
         _text[path] = (text, info.LastWriteTimeUtc, info.Length);
+        // Разобранный заголовок к записанному тексту отношения уже не имеет. Метка времени файла
+        // идёт с точностью файловой системы, и две записи подряд могут в неё не разойтись:
+        // тогда сверка имён взяла бы заголовок, которого в файле давно нет.
+        _docTitle.Remove(path);
     }
 
     private static DocumentConfig DefaultDocument() => new()

@@ -609,7 +609,10 @@ public static partial class DocumentTemplating
                     .Where(r => r is not null && r.Keys is { Count: > 0 })
                     .Select(r => new CheckRule { Kind = r.Kind, Keys = new List<string>(r.Keys), N = r.N })
                     .ToList(),
-                ShowCheckAll = p.ShowCheckAll
+                ShowCheckAll = p.ShowCheckAll,
+                // Признак едет на планшет вместе со страницей: по нему планшет решает, показывать
+                // ли клиенту управление размером текста. На отбор страниц и на бумагу он не влияет.
+                BigText = p.BigText
             };
             // Экран подписи или сканирования без своего поля показывать нечего: поле могло не
             // подойти по условию, и тогда экран уходит вместе с ним, а не встаёт пустым.
@@ -662,6 +665,15 @@ public static partial class DocumentTemplating
                 pages.Add(new DocPage { Checkboxes = injected });
             }
         }
+
+        // Управление размером текста включает признак у страницы, но включает он его на весь
+        // показ. Страница, у которой стоит признак, могла не подойти по условию и уехать целиком:
+        // тогда признак переносится на первую из оставшихся. Иначе клиент, которому не показали
+        // ровно ту страницу, оставался бы без возможности читать крупнее, а оператор не имел бы
+        // никакого способа догадаться, почему у одного клиента значок есть, а у другого нет.
+        if ((doc.Pages ?? new List<DocPage>()).Any(p => p is { BigText: true })
+            && pages.Count > 0 && !pages.Any(p => p.BigText))
+            pages[0].BigText = true;
 
         return new DocumentConfig
         {

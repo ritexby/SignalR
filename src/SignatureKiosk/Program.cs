@@ -31,7 +31,14 @@ builder.Services.AddSignalR(o =>
 // request is rejected before any handler runs, the document never appears, and the caller has
 // nothing to go on. Values arrive as strings either way: that is what a template substitutes.
 builder.Services.ConfigureHttpJsonOptions(o =>
-    o.SerializerOptions.Converters.Add(new LenientStringDictionaryConverter()));
+{
+    o.SerializerOptions.Converters.Add(new LenientStringDictionaryConverter());
+    // И то же самое для отдельного строкового поля. Коды рабочих мест у владельца выглядят как
+    // числа (1232, 3244, 54545), интегратор кладёт их в JSON числом, и до этой уступки весь
+    // запрос отвергался платформой ещё до обработчика: 400 с пустым телом, без Content-Type и
+    // без следа в журналах. Разобраться в таком ответе снаружи нечем.
+    o.SerializerOptions.Converters.Add(new LenientStringConverter());
+});
 // Ключи защиты данных ASP.NET. Без явной настройки платформа держит их только в памяти и
 // пишет об этом три предупреждения при каждом запуске. Складываем их в каталог данных рядом с
 // остальным состоянием: он и так принадлежит служебному пользователю и закрыт от посторонних.
@@ -678,6 +685,14 @@ admin.MapGet("/devices", (KioskHealthCache healthCache) =>
                 // Which build of the kiosk page this tablet is actually running. Blank on an old
                 // page that does not report it yet, which is itself the answer.
                 appVersion = isOnline && appVersions.TryGetValue(d.Id, out var v) ? v : null,
+                // Размер экрана планшета, каким его сообщила его собственная страница. Отдаётся
+                // и для отключённого планшета: окно наблюдения открывается по этим числам ещё до
+                // первого кадра, а карточка рассказывает, какое железо стоит на рабочем месте.
+                // Пусто у планшета на старой странице, которая размер не сообщает; пусто это
+                // «неизвестно», и его нельзя путать с нулём.
+                d.ScreenWidth,
+                d.ScreenHeight,
+                d.ScreenPixelRatio,
                 // Что сейчас на экране: реклама или документ. Оператору это нужно, чтобы знать,
                 // за чем есть смысл смотреть, особенно когда документ отправила внешняя система,
                 // а не он сам.
@@ -696,8 +711,20 @@ admin.MapPost("/devices/enroll", (CreateEnrollmentDto dto) =>
 
 admin.MapPut("/devices/{id}", async (string id, DeviceUpdateDto dto, KioskCoordinator coord) =>
 {
-    if (!storage.UpdateDevice(id, dto?.Name, dto?.GroupIds, dto?.WorkstationId, touchWorkstation: true))
+    // Рабочее место трогается, только если поле прислали. Раньше оно трогалось всегда, и запрос
+    // «смени имя», в котором места нет вовсе, снимал планшет с места. Замер до починки: планшет
+    // на месте «1232», тело {"name":"Ресепшн 2"}, ответ 200 {"ok":true}, после чего место стало
+    // null, а показ документа по workstationExternalId «1232» ответил 404 «no tablet is assigned
+    // to this workstation». Имя и группы по этому правилу жили с самого начала, место было
+    // единственным исключением.
+    var поле = dto?.WorkstationId ?? default;
+    var местоПрислали = поле.ValueKind != System.Text.Json.JsonValueKind.Undefined;
+    // Строка это номер места, пустая строка и присланный null это осознанное «снять с места».
+    var местоИзТела = поле.ValueKind == System.Text.Json.JsonValueKind.String ? поле.GetString() : null;
+    if (!storage.UpdateDevice(id, dto?.Name, dto?.GroupIds, местоИзТела, touchWorkstation: местоПрислали,
+                              out var местоСменилось))
         return Results.NotFound();
+    if (местоСменилось) await УвестиСМеста(coord, id);
     await coord.NotifyAdminsDevicesAsync();
     return Results.Ok(new { ok = true });
 });
@@ -758,6 +785,41 @@ admin.MapPost("/devices/{id}/identify", async (string id, KioskCoordinator coord
 });
 
 // ---- Groups ----
+// Номер версии страницы планшета. Живёт он ровно в одном месте: в самой странице, которую этот
+// сервер и отдаёт планшетам. Админка сверяет с ним то, что сообщают планшеты по связи, и раньше
+// держала рядом свою копию номера. Копии разошлись на первом же выпуске, и админка написала
+// «старая версия страницы» на карточке каждого исправного планшета в парке.
+//
+// Файл читается один раз за жизнь службы: на работающей службе он не меняется, а меняется он
+// только при выкате, после которого служба перезапускается. Не прочитали, значит версия
+// неизвестна, и тогда админка не обвиняет никого: недоказанное обвинение хуже молчания, после
+// него идут снимать со стены исправный планшет.
+string? версияСтраницы = null;
+bool версияПрочитана = false;
+string? ВерсияСтраницыПланшета()
+{
+    if (версияПрочитана) return версияСтраницы;
+    версияПрочитана = true;
+    try
+    {
+        var корень = app.Environment.WebRootPath;
+        if (string.IsNullOrEmpty(корень)) return null;
+        var путь = Path.Combine(корень, "kiosk.js");
+        if (!File.Exists(путь)) return null;
+        var найдено = System.Text.RegularExpressions.Regex.Match(
+            File.ReadAllText(путь), "APP_VERSION\\s*=\\s*\"([^\"]*)\"");
+        if (найдено.Success && найдено.Groups[1].Value.Length > 0) версияСтраницы = найдено.Groups[1].Value;
+    }
+    catch
+    {
+        // Версия осталась неизвестной. Это не повод валить запрос: без неё админка просто
+        // перестаёт судить о версиях, а всё остальное работает.
+    }
+    return версияСтраницы;
+}
+
+admin.MapGet("/page-version", () => Results.Ok(new { version = ВерсияСтраницыПланшета() }));
+
 admin.MapGet("/groups", () => Results.Ok(storage.GetGroups()));
 admin.MapPost("/groups", (GroupDto dto) => Results.Ok(storage.AddGroup(dto?.Name ?? "")));
 admin.MapPut("/groups/{id}", (string id, GroupDto dto) =>
@@ -775,11 +837,27 @@ admin.MapDelete("/groups/{id}", (string id, KioskCoordinator coord) =>
 // ---- Workstations ----
 admin.MapGet("/workstations", () => Results.Ok(storage.GetWorkstations()));
 admin.MapPost("/workstations", (WorkstationDto dto) =>
-    Results.Ok(storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location)));
+{
+    var (место, ошибка) = storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location);
+    return ошибка is not null ? Results.BadRequest(new { error = ошибка }) : Results.Ok(место);
+});
 admin.MapPut("/workstations/{id}", (string id, WorkstationDto dto) =>
-    storage.UpdateWorkstation(id, dto?.ExternalId, dto?.Name, dto?.Location) ? Results.Ok(new { ok = true }) : Results.NotFound());
-admin.MapDelete("/workstations/{id}", (string id) =>
-    storage.DeleteWorkstation(id) ? Results.Ok(new { ok = true }) : Results.NotFound());
+    storage.UpdateWorkstation(id, dto?.ExternalId, dto?.Name, dto?.Location, out var ошибка) switch
+    {
+        StorageService.РезультатПравкиМеста.Готово => Results.Ok(new { ok = true }),
+        StorageService.РезультатПравкиМеста.НетМеста => Results.NotFound(),
+        _ => Results.BadRequest(new { error = ошибка })
+    });
+admin.MapDelete("/workstations/{id}", async (string id, KioskCoordinator coord) =>
+{
+    var снятые = storage.DeleteWorkstation(id);
+    if (снятые is null) return Results.NotFound();
+    // Планшеты, стоявшие на удалённом месте, уводятся на рекламу: на их экранах мог остаться
+    // документ с данными клиента, а места, для которого он заказан, больше нет.
+    await УвестиСМеста(coord, снятые.ToArray());
+    await coord.NotifyAdminsDevicesAsync();
+    return Results.Ok(new { ok = true });
+});
 
 // ---- API keys (external integration) ----
 admin.MapGet("/apikeys", () =>
@@ -1439,6 +1517,10 @@ admin.MapPost("/document/import", (DocumentBackup? backup, string? code, string?
     // Версия 1 это файл без картинок, версия 2 с картинками. Обе читаются.
     if (backup.Version is < 1 or > 2)
         return Results.BadRequest(new { error = "Версия файла шаблона не поддерживается." });
+    // Название, заданное при импорте, это и есть имя документа, а имя документа это его заголовок.
+    // Прежде оно уходило только в список, и когда в файле был свой заголовок, заданное название
+    // молча не действовало: в списке одно, в открытом документе другое.
+    if (!string.IsNullOrWhiteSpace(title)) doc.Title = title!.Trim();
     // Условие, которое при разборе изменилось бы само, это отказ и здесь: принять чужой файл и
     // молча сохранить его с другим смыслом хуже, чем отказать и назвать причину. Правило то же,
     // что при сохранении из редактора.
@@ -1480,7 +1562,9 @@ admin.MapPost("/document/import", (DocumentBackup? backup, string? code, string?
     var n = 2;
     while (storage.FindByCode(свободный) is not null) свободный = желаемый + "-" + n++;
 
-    var (info, error) = storage.AddDocument(свободный, string.IsNullOrWhiteSpace(title) ? doc.Title : title, null);
+    // Имя берётся из заголовка, который уже сведён с заданным при импорте названием. Пустой
+    // заголовок оставляет документу именем его код: выдумывать заголовок за оператора нельзя.
+    var (info, error) = storage.AddDocument(свободный, doc.Title, null);
     if (error is not null) return Results.BadRequest(new { error });
     if (!storage.SaveDocument(info!.Id, doc))
         return Results.NotFound(new { error = "Документ не найден: " + info!.Id });
@@ -1720,7 +1804,11 @@ ext.MapPost("/workstations", (WorkstationDto dto) =>
         var было = storage.GetWorkstations().FirstOrDefault(w => ЭтоМесто(w, код));
         if (было is not null) return Results.Ok(было);
     }
-    return Results.Ok(storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location));
+    // Отказ «код занят» сюда не доходит: повтор уже отдан строкой выше как готовое место. Но
+    // если он всё же случится (двое завели один код одновременно), внешняя система услышит
+    // причину словами, а не получит запись, которой нет.
+    var (место, ошибка) = storage.AddWorkstation(dto?.ExternalId, dto?.Name, dto?.Location);
+    return ошибка is not null ? Results.BadRequest(new { error = ошибка }) : Results.Ok(место);
 });
 
 ext.MapPost("/enrollments", (ExtEnrollmentDto dto) =>
@@ -1741,11 +1829,33 @@ ext.MapPost("/enrollments", (ExtEnrollmentDto dto) =>
     return Results.Ok(new { code = e.Code, expiresUtc = e.ExpiresUtc });
 });
 
+// Планшет уводят с рабочего места: перевели в другой кабинет, сняли с места, удалили само место.
+// Его экран обязан вернуться к рекламе, а данные подписанта стереться.
+//
+// Замер до починки: планшет на месте «201» показывает документ с фамилией клиента; PUT переводит
+// его на место «202», ответ 200; через три секунды и после перезагрузки страницы планшета на
+// экране тот же документ, хотя карточка уже называет другой кабинет. То же на отвязке и на
+// удалении места. То есть данные клиента уезжали на экране в другой кабинет, к другому человеку,
+// а внешняя система и оператор видели «ок».
+//
+// Уводится только тот планшет, у которого место ДЕЙСТВИТЕЛЬНО сменилось. Повторная привязка к
+// тому же месту экран не трогает: зря погашенный экран это оборванное подписание у живого
+// человека, и это не лучше первой беды.
+async Task УвестиСМеста(KioskCoordinator coord, params string[] планшеты)
+{
+    foreach (var id in планшеты)
+    {
+        // Отозванный и удалённый отсеиваются внутри: на их экранах нет ни документа, ни рекламы.
+        try { await coord.ReturnToSlidesAsync(id); }
+        catch { /* планшет не на связи: состояние на сервере уже переписано на рекламу */ }
+    }
+}
+
 // Привязать планшет к рабочему месту по коду места. Пустой код здесь не принимается: раньше
 // такой запрос молча отвязывал планшет от места и отвечал «ок», а внешняя система, забывшая
 // подставить код в шаблон запроса, узнавала об этом только тогда, когда документ переставал
 // находить планшет в кабинете. Отвязка это отдельное, названное вслух действие: DELETE.
-ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto) =>
+ext.MapPut("/devices/{id}/workstation", async (string id, ExtWorkstationAssignDto dto, KioskCoordinator coord) =>
 {
     var код = (dto?.ExternalId ?? "").Trim();
     if (код.Length == 0)
@@ -1754,12 +1864,18 @@ ext.MapPut("/devices/{id}/workstation", (string id, ExtWorkstationAssignDto dto)
             error = "Не задан externalId рабочего места. Чтобы отвязать планшет от места, вызовите " +
                     "DELETE /api/ext/devices/" + id + "/workstation."
         });
-    return ПривязкаОтвет(storage.AssignWorkstationByExternalId(id, код), id, код);
+    var итог = storage.AssignWorkstationByExternalId(id, код, out var сменилось);
+    if (сменилось) await УвестиСМеста(coord, id);
+    return ПривязкаОтвет(итог, id, код);
 });
 
 // Отвязать планшет от рабочего места. Отдельный вызов, а не пустое поле в запросе выше.
-ext.MapDelete("/devices/{id}/workstation", (string id) =>
-    ПривязкаОтвет(storage.AssignWorkstationByExternalId(id, null), id, null));
+ext.MapDelete("/devices/{id}/workstation", async (string id, KioskCoordinator coord) =>
+{
+    var итог = storage.AssignWorkstationByExternalId(id, null, out var сменилось);
+    if (сменилось) await УвестиСМеста(coord, id);
+    return ПривязкаОтвет(итог, id, null);
+});
 
 // Ответ на привязку и отвязку: у каждой причины отказа свой текст, чтобы интегратору было что
 // чинить. Раньше на оба случая шло одно «device or workstation not found».

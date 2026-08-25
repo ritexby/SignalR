@@ -83,6 +83,39 @@ public class Device
     public string? ControlIp { get; set; }
     public int? ControlPort { get; set; }                     // overrides the fleet-wide port
     public string Status { get; set; } = "active";            // "active" | "revoked"
+
+    // Размер экрана планшета, каким его сообщила его собственная страница. Нужен окну
+    // наблюдения: оно показывает уменьшенный экран планшета один в один, и без настоящих
+    // размеров рисовало бы рамку наугад. Нужен и оператору в карточке: по нему видно, какое
+    // железо стоит на рабочем месте.
+    //
+    // Помнится последнее известное, а не только для планшета на связи: окно наблюдения должно
+    // открыться правильной формы ещё до первого кадра, а карточка отключённого планшета всё
+    // равно рассказывает, что это за железо.
+    //
+    // Пусто, а не ноль, у планшета, который размер не сообщал: страница старая и метода не
+    // знает. Пустое поле честно говорит «неизвестно», а ноль соврал бы про экран нулевой
+    // ширины, и окно наблюдения свернулось бы в точку.
+
+    /// <summary>Ширина области просмотра в точках разметки (не в пикселях матрицы).</summary>
+    public int? ScreenWidth { get; set; }
+    /// <summary>Высота области просмотра в тех же точках.</summary>
+    public int? ScreenHeight { get; set; }
+    /// <summary>Плотность пикселей планшета (devicePixelRatio). Оператору она нужна словами,
+    /// чтобы разбирать жалобы «текст мелкий»: в расчёте размеров не участвует.</summary>
+    public double? ScreenPixelRatio { get; set; }
+}
+
+/// <summary>Что сервер сделал с размером экрана, о котором доложил планшет.</summary>
+public enum DeviceScreenUpdate
+{
+    /// <summary>Не принято: планшета нет или он отозван. Планшету отвечают отказом, чтобы он не
+    /// считал сведения доставленными и повторил их, когда снова будет иметь на это право.</summary>
+    Rejected,
+    /// <summary>Принято, но сервер это уже знал: писать на диск и будить админки не о чем.</summary>
+    Unchanged,
+    /// <summary>Принято и запомнено заново.</summary>
+    Changed
 }
 
 public class DeviceGroup
@@ -468,6 +501,15 @@ public class DocPage
     /// <summary>Кнопка «отметить всё» над пунктами страницы: для длинных списков согласий.</summary>
     public bool ShowCheckAll { get; set; }
     public bool IncludeDynamic { get; set; } = false; // anchor: API-supplied checkboxes render here
+
+    /// <summary>
+    /// Управление размером текста на планшете: клиент сам делает буквы крупнее, если плохо видит.
+    /// Признак стоит у страницы, но действует на весь показ: хватает одной отмеченной страницы,
+    /// чтобы управление появилось. Иначе оператор, поставивший отметку не на той странице,
+    /// получил бы документ, где ничего не происходит, и не понял бы почему.
+    /// На бумагу не влияет: размер шрифта в PDF задаёт оператор, и выбор клиента его не трогает.
+    /// </summary>
+    public bool BigText { get; set; }
 }
 
 /// <summary>
@@ -991,14 +1033,37 @@ public class DocSession
 
 public record LoginDto(string? Password);
 /// <summary>DeviceIds задаёт произвольный набор планшетов, когда Target = devices.</summary>
-public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec, List<string>? DeviceIds = null);
+/// <summary>
+/// Сохранение рекламного плейлиста. IntervalSec именно int?, а не int: у ненулевого int
+/// отсутствие поля в теле разбирается в 0, выражение «dto?.IntervalSec ?? 8» на нуле не
+/// срабатывает, и дальше 0 приводится к нижней границе. Значит запрос без этого поля давал не
+/// обещанные восемь секунд, а одну, и реклама мелькала раз в секунду. Замер: PUT
+/// /api/admin/playlist телом {"target":"all","imageIds":[...]} ответил 200, а GET следом вернул
+/// intervalSec 1.
+/// </summary>
+public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int? IntervalSec, List<string>? DeviceIds = null);
 public record TargetDto(string? Target);
 public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<ApiCheckboxDto>? Checkboxes, List<GroupSelectionDto>? Groups,
     Dictionary<string, string>? Images = null, string? DocumentCode = null);
 
 public record EnrollRequest(string? Code);
 public record CreateEnrollmentDto(string? Name, string? WorkstationId, List<string>? GroupIds, int? TtlMinutes);
-public record DeviceUpdateDto(string? Name, List<string>? GroupIds, string? WorkstationId);
+/// <summary>
+/// Правка карточки планшета. Все три поля необязательны и означают одно и то же: «прислали,
+/// значит меняем». Чего в теле нет, того запрос не касается.
+///
+/// Рабочее место объявлено JsonElement, а не строкой, ровно затем, чтобы отличить «поля нет» от
+/// «поле прислали пустым». Раньше отличить было нельзя, и переименование планшета телом
+/// {"name":"..."} молча снимало его с рабочего места: система адресуется по коду места, и после
+/// такого переименования внешняя система получала «на этом месте нет планшета», хотя планшет
+/// висел на стене и был на связи.
+///
+/// Тип именно JsonElement, а не JsonElement?: обёртка над ним схлопывает «поля нет» и
+/// «прислали null» в одно и то же, а без обёртки это разные состояния, Undefined и Null.
+/// Пустая строка и null означают осознанное «снять с места»; пустую строку присылает админка,
+/// когда оператор выбрал «нет места».
+/// </summary>
+public record DeviceUpdateDto(string? Name, List<string>? GroupIds, System.Text.Json.JsonElement WorkstationId);
 public record GroupDto(string? Name);
 /// <summary>Сроки показа картинки в рекламе. Пустая дата снимает ограничение с этой стороны.</summary>
 public record ImageDatesDto(string? ShowFrom, string? ShowTo);

@@ -215,7 +215,7 @@ public class PdfService
                 if (block.Table is not null)
                 {
                     w.ClearWrap();
-                    w.Table(block.Table, block.Bg, block.BorderColor, block.Pad);
+                    w.Table(block.Table, block.Bg, block.BorderColor, block.Pad, block.LineHeight);
                     continue;
                 }
                 if (block.List is "bullet" or "number" && block.Runs is { Count: > 0 })
@@ -525,8 +525,9 @@ public class PdfService
             if (брак)
             {
                 // Полтора интервала тут ни к чему: под надписью не место под росчерк, а обычный
-                // абзац, и раньше эта строка печаталась таким же обычным Line.
-                w.Rich(надпись, isHeading: true, align: null, lineHeightPct: 115);
+                // абзац, и раньше эта строка печаталась таким же обычным Line. Мерка тоже как у
+                // Line: доля высоты шрифта, а не кегля, иначе строка встала бы не туда, где была.
+                w.Rich(надпись, isHeading: true, align: null, доляВысотыШрифта: 1.15);
                 w.Gap(3);
                 w.Paragraph("Изображение подписи не удалось встроить в PDF. Оригинал подписи сохранён в записи и доступен в админке.", w.Body);
             }
@@ -699,10 +700,14 @@ public class PdfService
         public double PageHeight => _pageH;
         public int PageCount => _pageIndex + 1;
 
+        /// <param name="page">Лист, на котором нарисовано. Минус один означает текущий. Явный
+        /// номер нужен коробке блока: её кусок может относиться к листу, уже законченному к тому
+        /// времени, когда высота куска стала известна.</param>
         private void Note(string kind, double x, double y, double w, double h,
-            string text = "", double size = 0, bool bold = false, bool italic = false, string color = "")
+            string text = "", double size = 0, bool bold = false, bool italic = false, string color = "",
+            int page = -1)
         {
-            Capture?.Add(new PdfLayoutItem(_pageIndex, kind, x, y, w, h, text, size, bold, italic, color));
+            Capture?.Add(new PdfLayoutItem(page < 0 ? _pageIndex : page, kind, x, y, w, h, text, size, bold, italic, color));
         }
 
         public readonly XFont H1;
@@ -723,6 +728,12 @@ public class PdfService
         /// стояла: по этому месту оператор мышью расставляет подписи на листах.
         /// </summary>
         private const double МежстрочныйНадписи = 1.5;
+
+        /// <summary>
+        /// Межстрочный абзаца, которому оператор своего не задал. Ровно тот же, что на планшете
+        /// (--doc-line: 1.45), и той же меркой: доля кегля, а не высоты шрифта.
+        /// </summary>
+        private const double ОбычныйМежстрочный = 1.45;
 
         /// <summary>
         /// Во сколько раз шрифт в PDF мельче, чем на планшете. Экран и бумага это разные
@@ -746,6 +757,15 @@ public class PdfService
 
         private void NewPage()
         {
+            // Блок с плашкой мог не поместиться на лист. Коробка через разрыв не рисуется одним
+            // прямоугольником, поэтому здесь закрывается её кусок на уходящем листе, а на новом
+            // она продолжится от верхнего поля. Раньше Boxed в этом случае выходил не нарисовав
+            // ничего, и у разорванного блока плашка пропадала на всех листах разом.
+            if (_boxTop is not null)
+            {
+                _boxParts.Add((_pageIndex, _boxTop.Value, _pageH - Margin));
+                _boxTop = Margin;
+            }
             // Release the finished page's graphics before starting the next, so at most one
             // XGraphics is live at a time during generation.
             _gfx?.Dispose();
@@ -916,6 +936,13 @@ public class PdfService
         /// <summary>Правая граница строки на текущей высоте.</summary>
         private double LineRight => Margin + _contentW - (FloatActive && _floatRight ? _floatWidth : 0) - _boxPad;
 
+        /// <summary>С какого y рисовать коробку блока на текущем листе. null означает, что
+        /// коробка сейчас не строится. Блока внутри блока не бывает, поэтому хватает одного
+        /// слоя без стопки.</summary>
+        private double? _boxTop;
+        /// <summary>Куски коробки по листам: содержимое блока могло не поместиться на один.</summary>
+        private readonly List<(int Page, double Top, double Bottom)> _boxParts = new();
+
         private void ClearFloat() { _floatWidth = 0; _floatBottom = 0; }
 
         private void Ensure(double h)
@@ -1019,6 +1046,12 @@ public class PdfService
         /// Размер куска текста. Свой размер в точках, если он задан, иначе ступень. Точки те же,
         /// что в редакторе: на бумаге получается ровно то, что оператор задал, с поправкой на
         /// общий масштаб документа.
+        /// Масштаб шрифта документа (50..100 %) применяется и к своему размеру куска, и это
+        /// осознанный выбор, а не недосмотр. Иначе при 50 % весь документ мельчает, а кусок в
+        /// сорок пунктов остаётся сорока пунктами и рвёт вёрстку: масштаб затем и задан, чтобы
+        /// документ уложился в меньшее число листов, а кусок, не слушающийся его, эту работу
+        /// сводит на нет. Планшет считает так же: свой размер куска там тоже умножается на
+        /// общий множитель, и экран с бумагой не расходятся.
         /// </summary>
         private double RunSize(TextRun run, bool heading) =>
             run.SizePt > 0 ? _scale * Math.Clamp(run.SizePt, 8, 40) : SizePt(run.Size, heading);
@@ -1045,14 +1078,30 @@ public class PdfService
 
         /// <summary>Render a list of styled runs with word-wrap and pagination. Italic is simulated with
         /// a shear, since no proportional italic face is embedded, so this stays a single-font document.</summary>
-        public void Rich(List<TextRun> runs, bool isHeading, string? align = null, int lineHeightPct = 0)
+        /// <param name="lineHeightPct">Межстрочный интервал блока в процентах, как его задал
+        /// оператор. Это доля КЕГЛЯ, ровно как unitless line-height на планшете.</param>
+        /// <param name="доляВысотыШрифта">Межстрочный долей высоты шрифта. Не то же самое, что
+        /// проценты: этой меркой считалось место под надписью над полем подписи, и она обязана
+        /// остаться прежней, иначе расставленные оператором подписи съедут по листу.</param>
+        public void Rich(List<TextRun> runs, bool isHeading, string? align = null, int lineHeightPct = 0,
+            double доляВысотыШрифта = 0)
         {
             // Межстрочный интервал блока в процентах. На планшете он применяется, в бумаге его
             // не передавали вовсе, и абзац с интервалом 200 % на экране был просторным, а на
             // листе обычным.
             // По умолчанию тот же интервал, что на планшете (--doc-line: 1.45). Раньше здесь стояло
             // 1.2, и один и тот же абзац на экране был просторнее, чем на бумаге.
-            var межстрочный = lineHeightPct > 0 ? Math.Clamp(lineHeightPct, 100, 250) / 100.0 : 1.45;
+            // Считается он от кегля, а не от высоты шрифта: unitless line-height в браузере это
+            // доля кегля, и 250 % при кегле 11 пт обязаны дать 27.5 пт и на экране, и на бумаге.
+            // Через высоту шрифта выходило 32 пт, то есть 2.91 кегля вместо 2.5, а обычный абзац
+            // шёл на 17 % просторнее экрана. Два основания в одной формуле держать нельзя ещё и
+            // потому, что тогда «250 %» оказывалось меньше полутора обычных шагов.
+            var доляКегля = lineHeightPct > 0 ? Math.Clamp(lineHeightPct, 100, 250) / 100.0
+                : доляВысотыШрифта > 0 ? 0 : ОбычныйМежстрочный;
+            // Шаг строки: кегль самого крупного куска на строке на долю, либо высота его шрифта
+            // на долю там, где место считалось по высоте.
+            double Шаг(double кегль, double высотаШрифта) =>
+                доляКегля > 0 ? кегль * доляКегля : высотаШрифта * доляВысотыШрифта;
             // Заголовок в самом низу листа отрывается от того, что он озаглавливает. Если под ним
             // не осталось места хотя бы на три строки текста, он уезжает на следующую страницу
             // вместе со своим разделом.
@@ -1061,22 +1110,35 @@ public class PdfService
                 // Резерв считается по тем самым числам, какими заголовок и текст будут напечатаны.
                 // Высота строки заголовка это высота его собственного шрифта: он рисуется
                 // четырнадцатью пунктами, а не размером H2 (тринадцать), и своим размером куска
-                // может быть куда крупнее. Межстрочный тоже настоящий, а не 1,15 и 1,2.
-                double высотаЗаголовка = 0;
+                // может быть куда крупнее. Межстрочный тоже настоящий, а не 1,15 и 1,2, и берётся
+                // тем же Шагом, каким строка потом и ляжет на лист.
+                double высотаЗаголовка = 0, кегльЗаголовка = 0;
                 foreach (var r in runs)
-                    if (r is not null) высотаЗаголовка = Math.Max(высотаЗаголовка, FontFor(RunSize(r, true), true).GetHeight());
-                if (высотаЗаголовка <= 0) высотаЗаголовка = FontFor(SizePt(null, true), true).GetHeight();
+                    if (r is not null)
+                    {
+                        var шрифт = FontFor(RunSize(r, true), true);
+                        высотаЗаголовка = Math.Max(высотаЗаголовка, шрифт.GetHeight());
+                        кегльЗаголовка = Math.Max(кегльЗаголовка, шрифт.Size);
+                    }
+                if (высотаЗаголовка <= 0)
+                {
+                    var шрифт = FontFor(SizePt(null, true), true);
+                    высотаЗаголовка = шрифт.GetHeight();
+                    кегльЗаголовка = шрифт.Size;
+                }
                 // Три точки это отбивка, которая в потоке всегда идёт сразу за заголовком: два
                 // пункта у заголовка страницы и три у заголовка группы. Без неё резерв оказался бы
                 // на волос меньше нужного, и обещание «хотя бы три строки» опять не выполнялось бы.
-                var нужно = высотаЗаголовка * межстрочный + 3 + Body.GetHeight() * 1.45 * 3;
+                var нужно = Шаг(кегльЗаголовка, высотаЗаголовка) + 3 + Body.Size * ОбычныйМежстрочный * 3;
                 if (_y > Margin && _y + нужно > _pageH - Margin) { ClearFloat(); NewPage(); }
             }
             // gap: перед словом стоит пробел. По этим пробелам растягивается строка при
             // выравнивании по обоим краям, поэтому куски разорванного слова, склеенные без
             // пробела, растягиванием не разъезжаются.
             var pending = new List<(string text, XFont font, XBrush brush, bool italic, double x, double w, bool gap, XBrush? mark)>();
-            double x = LineLeft, lineH = 0;
+            // lineH: высота шрифта самого высокого куска строки. lineSize: его же кегль. Шаг
+            // считается по кеглю, а место под буквы по высоте, поэтому нужны оба числа.
+            double x = LineLeft, lineH = 0, lineSize = 0;
             var mode = (align ?? "").Trim().ToLowerInvariant();
 
             // lastLine: последняя строка абзаца. По обоим краям она не растягивается, иначе
@@ -1084,7 +1146,7 @@ public class PdfService
             void Flush(bool lastLine)
             {
                 if (pending.Count == 0) return;
-                double h = lineH * межстрочный;
+                double h = Шаг(lineSize, lineH);
                 Ensure(h);
                 // Строка могла уехать на новую страницу изнутри обтекания: картинка осталась на
                 // прошлой, и её отступ здесь уже ничего не обтекает. Слова собраны со старым
@@ -1093,7 +1155,13 @@ public class PdfService
                 if (сдвигВлево > 0)
                     for (var i = 0; i < pending.Count; i++)
                         pending[i] = pending[i] with { x = pending[i].x - сдвигВлево };
-                double baseline = _y + lineH;
+                // Место сверх обычного шага делится поровну над строкой и под ней, как половинный
+                // интерлиньяж в браузере. Иначе разреженный блок весь съезжал бы к своей первой
+                // строке: буквы жались бы к верху высокой строки, а пустота копилась под ними.
+                // Считается только заданный оператором интервал: обычный абзац и надписи, место
+                // под которые считалось отдельно, обязаны лечь ровно туда же, где лежали.
+                double лишнее = lineHeightPct > 0 ? h - lineSize * ОбычныйМежстрочный : 0;
+                double baseline = _y + lineH + (лишнее > 0 ? лишнее / 2 : 0);
                 var last = pending[^1];
                 var left = pending[0].x;
                 double lineW = last.x + last.w - left;
@@ -1122,8 +1190,14 @@ public class PdfService
                     // Полоса чуть шире слова и захватывает пробел перед ним: иначе выделенная
                     // фраза выглядит как набор отдельных прямоугольников.
                     var слева = t.gap ? мx - _gfx.MeasureString(" ", t.font).Width : мx;
-                    _gfx.DrawRectangle(t.mark, слева, baseline - t.font.GetHeight() * 0.85,
+                    var полоса = new XRect(слева, baseline - t.font.GetHeight() * 0.85,
                         (мx - слева) + t.w, t.font.GetHeight() * 1.05);
+                    _gfx.DrawRectangle(t.mark, полоса);
+                    // Маркер идёт в раскладку своим видом: раскладка это опись всего, что легло
+                    // на лист, и несообщённое для всякого её читателя просто не существует.
+                    var цветМаркера = ColorName(t.mark);
+                    Note("mark", полоса.X, полоса.Y, полоса.Width, полоса.Height,
+                        цветМаркера, color: цветМаркера);
                 }
                 foreach (var t in pending)
                 {
@@ -1131,7 +1205,7 @@ public class PdfService
                     DrawWord(t.text, t.font, t.brush, t.italic, t.x + shift + stretch * passed, baseline);
                 }
                 _y += h;
-                pending.Clear(); x = LineLeft; lineH = 0;
+                pending.Clear(); x = LineLeft; lineH = 0; lineSize = 0;
             }
 
             // Пробел, увиденный в тексте, но ещё не поставленный: он остаётся от конца куска, от
@@ -1182,6 +1256,7 @@ public class PdfService
                             pending.Add((word, font, brush, run.Italic, x, ww, sp > 0, mark));
                             x += ww;
                             lineH = Math.Max(lineH, font.GetHeight());
+                            lineSize = Math.Max(lineSize, font.Size);
                             first = false;
                         }
                     }
@@ -1241,16 +1316,11 @@ public class PdfService
             return всего;
         }
 
-        /// <summary>Цвет кисти в виде #rrggbb, чтобы предпросмотр совпадал с PDF по цвету тоже.</summary>
-        private static string ColorName(XBrush brush)
-        {
-            if (brush is XSolidBrush sb)
-            {
-                var c = sb.Color;
-                return "#" + c.R.ToString("x2") + c.G.ToString("x2") + c.B.ToString("x2");
-            }
-            return "#000000";
-        }
+        /// <summary>Цвет в виде #rrggbb, чтобы предпросмотр совпадал с PDF по цвету тоже.</summary>
+        private static string HexOf(XColor c) => "#" + c.R.ToString("x2") + c.G.ToString("x2") + c.B.ToString("x2");
+
+        /// <summary>Цвет кисти в виде #rrggbb.</summary>
+        private static string ColorName(XBrush brush) => brush is XSolidBrush sb ? HexOf(sb.Color) : "#000000";
 
         private void DrawWord(string text, XFont font, XBrush brush, bool italic, double x, double baseline)
         {
@@ -1290,44 +1360,65 @@ public class PdfService
         /// </summary>
         public void Boxed(DocBlock b, Action content)
         {
-            var есть = !string.IsNullOrEmpty(b.Bg) || !string.IsNullOrEmpty(b.BorderColor);
-            if (!есть) { content(); return; }
             var pad = Math.Clamp(b.Pad, 0, 40);
+            var есть = !string.IsNullOrEmpty(b.Bg) || !string.IsNullOrEmpty(b.BorderColor);
             var сверху = _y;
-            var страница = _pageIndex;
+            _boxParts.Clear();
+            // Коробка отслеживается с самого начала: содержимое может уйти на следующий лист, и
+            // тогда на каждом листе ей достанется свой кусок. Раньше в этом случае Boxed выходил
+            // не нарисовав ничего, и у длинного блока плашка пропадала целиком.
+            if (есть) _boxTop = сверху;
             _y += pad;
             var былОтступ = _boxPad;
+            // Отступ действует и без плашки, и без рамки: на планшете padding сдвигает текст сам
+            // по себе. Прежде отсюда шёл ранний выход, и голый отступ до бумаги не доезжал вовсе.
             _boxPad = былОтступ + pad;
             try { content(); }
             finally { _boxPad = былОтступ; }
             _y += pad;
-            // Содержимое перешло на новую страницу: рисовать коробку через разрыв нечем, и
-            // честнее не рисовать её вовсе, чем обвести половину.
-            if (_pageIndex != страница) return;
-            var h = _y - сверху;
-            if (h <= 0) return;
-            // Отступ входит и в горизонталь: на экране он со всех сторон, а тут коробка всегда
-            // шла от одного и того же места, и слева отступа не было вовсе.
-            var rect = new XRect(Margin - 4, сверху - 2, _contentW + 8, h + 4);
-            // Рамка рисуется сразу: она поверх, и текущий холст страницы для этого и открыт.
-            if (!string.IsNullOrEmpty(b.BorderColor))
-                _gfx.DrawRectangle(new XPen(ColorOf(b.BorderColor), 0.75), rect);
-            // Фон должен лечь ПОД текст, а текст уже напечатан. Открыть второй холст этой же
-            // страницы прямо сейчас нельзя: PDFsharp держит один холст на страницу, и попытка
-            // роняла сборку PDF целиком. Поэтому плашки копятся и рисуются в самом конце, когда
-            // поток закончен и холст отпущен.
-            if (!string.IsNullOrEmpty(b.Bg))
+            if (!есть) return;
+            _boxParts.Add((_pageIndex, _boxTop ?? сверху, _y));
+            _boxTop = null;
+            // Огрызок в несколько точек на прошлом листе не рисуется: от блока там не осталось
+            // ничего, кроме его же отступа. Порог применяется только к разорванному блоку:
+            // неразорванный рисуется при любой ненулевой высоте, как рисовался всегда.
+            var куски = _boxParts.Count == 1
+                ? _boxParts.Where(ч => ч.Bottom - ч.Top > 0).ToList()
+                : _boxParts.Where(ч => ч.Bottom - ч.Top >= 8).ToList();
+            _boxParts.Clear();
+            for (var i = 0; i < куски.Count; i++)
             {
-                _boxes.Add((страница, rect, b.Bg!));
-                Note("box", rect.X, rect.Y, rect.Width, rect.Height, b.Bg!);
+                var (страница, верх, низ) = куски[i];
+                // Отступ входит и в горизонталь: на экране он со всех сторон, а тут коробка всегда
+                // шла от одного и того же места, и слева отступа не было вовсе.
+                var rect = new XRect(Margin - 4, верх - 2, _contentW + 8, низ - верх + 4);
+                // И плашка, и рамка кладутся отложенно. Фон обязан лечь ПОД уже напечатанный
+                // текст, а открыть второй холст этой же страницы прямо сейчас нельзя: PDFsharp
+                // держит один холст на страницу, и попытка роняла сборку PDF целиком. Рамка идёт
+                // тем же путём, потому что её кусок может относиться к уже законченному листу,
+                // холста которого больше нет.
+                // На разрыве рамка не замыкается: блок, разрезанный между листами, это один блок,
+                // а две замкнутые коробки читались бы как два. Так же ведёт себя и браузер
+                // (box-decoration-break: slice).
+                _boxes.Add((страница, rect, b.Bg, b.BorderColor, i == 0, i == куски.Count - 1));
+                // Цвет коробки кладётся и в поле цвета, и в поле текста. Другого содержимого у
+                // неё нет, а читающий раскладку одинаково законно ищет цвет и там, и там: у слова
+                // цвет лежит в поле цвета, а текст это единственное, что у элемента вообще есть.
+                if (!string.IsNullOrEmpty(b.Bg))
+                    Note("box", rect.X, rect.Y, rect.Width, rect.Height, b.Bg!, color: b.Bg!, page: страница);
+                // Рамка сообщается в раскладку наравне с плашкой: раскладка обязана описывать
+                // лист целиком, иначе читающий её видит документ без половины оформления.
+                if (!string.IsNullOrEmpty(b.BorderColor))
+                    Note("border", rect.X, rect.Y, rect.Width, rect.Height, b.BorderColor!, color: b.BorderColor!, page: страница);
             }
         }
 
-        /// <summary>Отложенные плашки: страница, место и цвет.</summary>
-        private readonly List<(int Page, XRect Rect, string Color)> _boxes = new();
+        /// <summary>Отложенные коробки: страница, место, цвет плашки, цвет рамки и надо ли
+        /// замыкать рамку сверху и снизу (на разрыве между листами она остаётся открытой).</summary>
+        private readonly List<(int Page, XRect Rect, string? Bg, string? Border, bool Top, bool Bottom)> _boxes = new();
 
         /// <summary>
-        /// Нарисовать накопленные плашки под уже готовым текстом. Prepend кладёт рисование в
+        /// Нарисовать накопленные коробки под уже готовым текстом. Prepend кладёт рисование в
         /// начало содержимого страницы, поэтому буквы остаются видны поверх фона.
         /// </summary>
         public void FlushBoxes()
@@ -1339,7 +1430,19 @@ public class PdfService
             {
                 if (группа.Key < 0 || группа.Key >= _doc.PageCount) continue;
                 using var g = XGraphics.FromPdfPage(_doc.Pages[группа.Key], XGraphicsPdfPageOptions.Prepend);
-                foreach (var b in группа) g.DrawRectangle(new XSolidBrush(ColorOf(b.Color)), b.Rect);
+                foreach (var b in группа)
+                {
+                    if (!string.IsNullOrEmpty(b.Bg)) g.DrawRectangle(new XSolidBrush(ColorOf(b.Bg)), b.Rect);
+                    if (string.IsNullOrEmpty(b.Border)) continue;
+                    var перо = new XPen(ColorOf(b.Border), 0.75);
+                    if (b.Top && b.Bottom) { g.DrawRectangle(перо, b.Rect); continue; }
+                    double x1 = b.Rect.X, x2 = b.Rect.X + b.Rect.Width;
+                    double y1 = b.Rect.Y, y2 = b.Rect.Y + b.Rect.Height;
+                    g.DrawLine(перо, x1, y1, x1, y2);
+                    g.DrawLine(перо, x2, y1, x2, y2);
+                    if (b.Top) g.DrawLine(перо, x1, y1, x2, y1);
+                    if (b.Bottom) g.DrawLine(перо, x1, y2, x2, y2);
+                }
             }
             _boxes.Clear();
         }
@@ -1396,7 +1499,9 @@ public class PdfService
         /// строки это высота самой длинной ячейки. Строка, не влезающая на лист, уезжает на
         /// следующий целиком, а не рвётся пополам.
         /// </summary>
-        public void Table(DocTable t, string? bg, string? border, int pad)
+        /// <param name="lineHeightPct">Межстрочный интервал блока: он относится и к строкам
+        /// внутри ячейки. На планшете таблица его слушается, а на бумаге не слушалась вовсе.</param>
+        public void Table(DocTable t, string? bg, string? border, int pad, int lineHeightPct = 0)
         {
             var rows = t.Rows ?? new List<List<string>>();
             if (rows.Count == 0) return;
@@ -1416,6 +1521,11 @@ public class PdfService
             var сетка = XColor.FromArgb(0x97, 0xa2, 0xb2);
             var рамка = string.IsNullOrEmpty(border) ? сетка : ColorOf(border);
             var верхТаблицы = _y;
+            // Шаг строки в ячейке. Заданный оператором интервал это доля кегля, как unitless
+            // line-height на планшете; незаданный это прежние 1.15 высоты шрифта, до последнего
+            // знака. Прежде высота строки таблицы была одна и та же при любом интервале.
+            var доля = lineHeightPct > 0 ? Math.Clamp(lineHeightPct, 100, 250) / 100.0 : 0;
+            double Шаг(XFont f) => доля > 0 ? f.Size * доля : f.GetHeight() * 1.15;
 
             for (var ri = 0; ri < rows.Count; ri++)
             {
@@ -1431,7 +1541,7 @@ public class PdfService
                     var текст = ci < row.Count ? row[ci] ?? "" : "";
                     var строки = WrapInto(текст, font, widths[ci] - 2 * отступ);
                     разбито.Add(строки);
-                    h = Math.Max(h, строки.Count * font.GetHeight() * 1.15);
+                    h = Math.Max(h, строки.Count * Шаг(font));
                 }
                 h += 2 * отступ;
                 Ensure(h);
@@ -1441,14 +1551,25 @@ public class PdfService
                 {
                     var rect = new XRect(x, _y, widths[ci], h);
                     var заливка = шапка ? "#f1f5f9" : bg;
+                    // Заливка и сетка ячейки сообщаются в раскладку теми же видами, что плашка и
+                    // рамка блока: читающий раскладку разбирает их одним и тем же кодом, и таблица
+                    // не оказывается исключением из общего правила.
                     if (!string.IsNullOrEmpty(заливка))
+                    {
+                        var цвет = HexOf(ColorOf(заливка));
                         _gfx.DrawRectangle(new XSolidBrush(ColorOf(заливка)), rect);
+                        Note("box", rect.X, rect.Y, rect.Width, rect.Height, цвет, color: цвет);
+                    }
                     _gfx.DrawRectangle(new XPen(сетка, 0.6), rect);
-                    var ty = _y + отступ;
+                    Note("border", rect.X, rect.Y, rect.Width, rect.Height, HexOf(сетка), color: HexOf(сетка));
+                    // Лишнее место от заданного межстрочного делится над строкой и под ней, как и
+                    // в обычном абзаце: иначе текст ячейки прижимался бы к её верху.
+                    var шаг = Шаг(font);
+                    var ty = _y + отступ + Math.Max(0, шаг - font.GetHeight() * 1.15) / 2;
                     foreach (var строка in разбито[ci])
                     {
                         _gfx.DrawString(строка, font, XBrushes.Black, new XPoint(x + отступ, ty + font.GetHeight()));
-                        ty += font.GetHeight() * 1.15;
+                        ty += шаг;
                     }
                     Note("cell", rect.X, rect.Y, rect.Width, rect.Height,
                         string.Join(" ", разбито[ci]), font.Size, шапка);
@@ -1459,7 +1580,10 @@ public class PdfService
             // Внешний прямоугольник цветом рамки блока: на экране рамка обводит таблицу целиком,
             // а не каждую ячейку.
             if (!string.IsNullOrEmpty(border))
+            {
                 _gfx.DrawRectangle(new XPen(рамка, 1.0), Margin, верхТаблицы, _contentW, _y - верхТаблицы);
+                Note("border", Margin, верхТаблицы, _contentW, _y - верхТаблицы, border!, color: border!);
+            }
             _y += 8;
         }
 
@@ -1569,7 +1693,9 @@ public class PdfService
             // листам, иначе расписываться пришлось бы неизвестно подо чем.
             Ensure(head + bh + 12);
             if (надпись.Count > 0)
-                Rich(надпись, isHeading: true, align: mode, lineHeightPct: (int)(МежстрочныйНадписи * 100));
+                // Той же меркой, какой сосчитан head: долей высоты шрифта. Проценты означают долю
+                // кегля, и надпись встала бы не там, где под неё отмерено место.
+                Rich(надпись, isHeading: true, align: mode, доляВысотыШрифта: МежстрочныйНадписи);
             Note("sign", bx, _y, bw, bh, key);
             if (img is not null)
             {
