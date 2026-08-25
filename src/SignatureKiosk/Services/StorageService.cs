@@ -610,30 +610,105 @@ public class StorageService
     }
 
     /// <summary>
+    /// Как зовётся документ. Имя одно, и это его заголовок: заголовок оператор видит в редакторе
+    /// и правит, значит он и есть имя. Отдельное «название» остаётся только документу без
+    /// заголовка, а если пусто и оно, имя это код документа: безымянных документов не бывает.
+    /// </summary>
+    private static string ИмяДляСписка(string? title, string? запасное, string? code)
+    {
+        var t = (title ?? "").Trim();
+        if (t.Length > 0) return t;
+        var з = (запасное ?? "").Trim();
+        if (з.Length > 0) return з;
+        return (code ?? "").Trim();
+    }
+
+    /// <summary>
+    /// Заголовок из файла документа, дёшево. Сверка имён идёт на каждое чтение списка, и читать
+    /// ради неё все тексты нельзя: при пятидесяти документах это пятьдесят разборов JSON на
+    /// каждый показ документа. Метка времени и размер это один вопрос файловой системе, а разбор
+    /// случается только у файла, который с прошлого раза менялся. Сам текст берётся из общего
+    /// кэша, поэтому лишнего чтения с диска сверка не добавляет.
+    /// null означает «не знаю»: файла нет или он не разбирается. Повреждённый файл здесь не
+    /// подменяется и не уносится в карантин: сверка пассивна и чужого имени документу не даёт.
+    /// </summary>
+    private readonly Dictionary<string, (DateTime Stamp, long Length, string? Title)> _docTitle = new(StringComparer.Ordinal);
+
+    private sealed class ТолькоЗаголовок { public string? Title { get; set; } }
+
+    private string? ЗаголовокФайла(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists) { _docTitle.Remove(path); return null; }
+        if (_docTitle.TryGetValue(path, out var было)
+            && было.Stamp == info.LastWriteTimeUtc && было.Length == info.Length)
+            return было.Title;
+        string? текст;
+        try { текст = ReadText(path); } catch { текст = null; }
+        if (текст is null) { _docTitle.Remove(path); return null; }
+        string? title = null;
+        try { title = JsonSerializer.Deserialize<ТолькоЗаголовок>(текст, Json)?.Title; }
+        catch { title = null; }
+        info.Refresh();
+        _docTitle[path] = (info.LastWriteTimeUtc, info.Length, title);
+        return title;
+    }
+
+    /// <summary>
+    /// Свести имена в списке с заголовками документов. Возвращает true, если что-то изменилось и
+    /// список надо записать. Это же чинит данные, слежавшиеся до правила «имя это заголовок»:
+    /// они выравниваются при первом чтении списка и больше не расходятся.
+    /// Документ, чей файл пропал или не разбирается, не трогается вовсе: на «не знаю» честный
+    /// ответ это «не знаю», а не подмена имени. Пустой заголовок имя тоже не затирает.
+    /// </summary>
+    private bool СвестиИмена(List<DocumentInfo> список)
+    {
+        var изменилось = false;
+        foreach (var info in список)
+        {
+            var path = info.IsDefault ? DocumentPath : DocFilePath(info.Id);
+            if (path is null) continue;
+            var title = ЗаголовокФайла(path);
+            if (title is null) continue;
+            var имя = ИмяДляСписка(title, info.Name, info.Code);
+            if (имя.Length == 0 || имя == info.Name) continue;
+            info.Name = имя;
+            изменилось = true;
+        }
+        return изменилось;
+    }
+
+    /// <summary>
     /// Список документов. Библиотеки может не быть вовсе: так выглядит установка, обновлённая с
     /// прежней версии. Тогда она заводится из единственного document.json, и он же становится
     /// документом по умолчанию. Ничего не теряется и не переезжает: файл остаётся на месте.
     /// </summary>
     public List<DocumentInfo> GetDocuments()
     {
-        lock (_lock)
-        {
-            var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
-            if (lib.Documents.Count > 0) return lib.Documents;
+        lock (_lock) return ЧитатьСписокNoLock();
+    }
 
+    private List<DocumentInfo> ЧитатьСписокNoLock()
+    {
+        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+        if (lib.Documents.Count == 0)
+        {
             var первый = new DocumentInfo
             {
                 Id = "main",
                 Code = "main",
-                Name = ReadOr(DocumentPath, DefaultDocument).Title,
+                Name = ИмяДляСписка(ReadOr(DocumentPath, DefaultDocument).Title, "Документ", "main"),
                 IsDefault = true,
                 UpdatedUtc = DateTime.UtcNow
             };
-            if (string.IsNullOrWhiteSpace(первый.Name)) первый.Name = "Документ";
             lib.Documents.Add(первый);
             Write(LibraryPath, lib);
             return lib.Documents;
         }
+        // Записываем только когда действительно что-то разошлось: иначе каждое чтение списка,
+        // а оно случается на каждый показ документа, превращалось бы в запись файла.
+        if (СвестиИмена(lib.Documents)) Write(LibraryPath, lib);
+        return lib.Documents;
     }
 
     public DocumentInfo? GetDocumentInfo(string? id)
@@ -662,13 +737,28 @@ public class StorageService
     /// </summary>
     public DocumentConfig GetDocument(string? id = null)
     {
-        lock (_lock)
-        {
-            var info = id is null ? null : GetDocumentInfoNoLock(id);
-            if (id is null || info is null || info.IsDefault) return ReadOr(DocumentPath, DefaultDocument);
-            var path = DocFilePath(info.Id);
-            return path is null ? DefaultDocument() : ReadOr(path, DefaultDocument);
-        }
+        lock (_lock) return GetDocumentNoLock(id);
+    }
+
+    /// <summary>
+    /// Чем отвечать, когда файла документа нет или он не читается. Текст образцовый, а имя своё:
+    /// иначе документ, открытый после потери файла, зовётся чужим заголовком при своём имени в
+    /// списке, и вкладка переименовывается при переходе на неё. Как зовётся документ, не зависит
+    /// от того, цел ли его текст.
+    /// </summary>
+    private static DocumentConfig ОбразецДля(DocumentInfo? info)
+    {
+        var doc = DefaultDocument();
+        var имя = ИмяДляСписка(null, info?.Name, info?.Code);
+        if (имя.Length > 0) doc.Title = имя;
+        return doc;
+    }
+
+    /// <summary>Запись о документе по умолчанию, не заводя библиотеку, если её ещё нет.</summary>
+    private DocumentInfo? DefaultInfoNoLock()
+    {
+        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
+        return lib.Documents.FirstOrDefault(d => d.IsDefault) ?? lib.Documents.FirstOrDefault();
     }
 
     /// <summary>
@@ -680,7 +770,7 @@ public class StorageService
     {
         lock (_lock)
         {
-            if (string.IsNullOrWhiteSpace(id)) { doc = ReadOr(DocumentPath, DefaultDocument); return true; }
+            if (string.IsNullOrWhiteSpace(id)) { doc = GetDocumentNoLock(null); return true; }
             var info = GetDocumentInfoNoLock(id!);
             if (info is null) { doc = DefaultDocument(); return false; }
             doc = GetDocumentNoLock(info.Id);
@@ -705,14 +795,8 @@ public class StorageService
         {
             var info = id is null ? null : GetDocumentInfoNoLock(id);
             if (id is not null && info is null) return false;
-            if (id is null || info is null || info.IsDefault) { Write(DocumentPath, doc); }
-            else
-            {
-                var path = DocFilePath(info.Id);
-                if (path is null) return false;   // имя не годится для файла: писать некуда
-                Directory.CreateDirectory(DocumentsDir);
-                Write(path, doc);
-            }
+            // false здесь означает, что имя документа не годится для файла: писать некуда.
+            if (!ЗаписатьТекстNoLock(info, doc)) return false;
             TouchDocument(info?.Id ?? DefaultIdNoLock(), doc.Title, doc.Kind);
             return true;
         }
@@ -739,7 +823,8 @@ public class StorageService
         info.UpdatedUtc = DateTime.UtcNow;
         info.Kind = kind;
         // Пустой заголовок имя не затирает: документ без заголовка остался бы безымянным.
-        if (!string.IsNullOrWhiteSpace(title)) info.Name = title!.Trim();
+        // Тогда именем остаётся прежнее название, а если нет и его, код документа.
+        info.Name = ИмяДляСписка(title, info.Name, info.Code);
         Write(LibraryPath, lib);
     }
 
@@ -757,14 +842,6 @@ public class StorageService
             if (список.Any(d => string.Equals(d.Code, чистыйКод, StringComparison.OrdinalIgnoreCase)))
                 return (null, "Код «" + чистыйКод + "» уже занят другим документом.");
 
-            var info = new DocumentInfo
-            {
-                Id = Guid.NewGuid().ToString("N")[..12],
-                Code = чистыйКод,
-                Name = string.IsNullOrWhiteSpace(name) ? чистыйКод : name!.Trim(),
-                IsDefault = false,
-                UpdatedUtc = DateTime.UtcNow
-            };
             // Копия делается с уже сохранённого документа. А новый начинается чистым: одна пустая
             // страница и заголовок, который оператор только что ввёл. Прежде новый заводился
             // копией образцового согласия, и человек, нажавший «Новый документ», получал чужой
@@ -773,13 +850,37 @@ public class StorageService
             // копию документа X» отдавало копию совсем другого, и оператор об этом не узнавал.
             if (!string.IsNullOrWhiteSpace(copyOfId) && GetDocumentInfoNoLock(copyOfId!) is null)
                 return (null, "Документ, с которого делается копия, не найден.");
-            var текст = string.IsNullOrWhiteSpace(copyOfId)
-                ? new DocumentConfig
+            var заданное = (name ?? "").Trim();
+            var копия = !string.IsNullOrWhiteSpace(copyOfId);
+            var текст = копия
+                ? GetDocumentNoLock(copyOfId!)
+                : new DocumentConfig
                 {
-                    Title = info.Name,
                     Pages = new List<DocPage> { new() { HeadingRuns = new List<TextRun> { new() { Text = "Страница 1" } } } }
-                }
-                : GetDocumentNoLock(copyOfId!);
+                };
+            // Заголовок нового документа задаётся здесь и один раз: имя в списке потом снимается
+            // с него, а не живёт второй строкой. У копии, если оператор своего имени не дал,
+            // заголовок делается из исходного и не остаётся его тёзкой: две одинаковые строки в
+            // списке это и есть та путаница, из-за которой всё чинится третий раз.
+            if (копия && заданное.Length == 0)
+            {
+                var исходный = GetDocumentInfoNoLock(copyOfId!);
+                var основа = ИмяДляСписка(текст.Title, исходный?.Name, исходный?.Code);
+                текст.Title = СвободноеИмяКопии(основа.Length > 0 ? основа : чистыйКод, список);
+            }
+            else
+            {
+                текст.Title = ИмяДляСписка(заданное, null, чистыйКод);
+            }
+
+            var info = new DocumentInfo
+            {
+                Id = Guid.NewGuid().ToString("N")[..12],
+                Code = чистыйКод,
+                Name = ИмяДляСписка(текст.Title, заданное, чистыйКод),
+                IsDefault = false,
+                UpdatedUtc = DateTime.UtcNow
+            };
             var path = DocFilePath(info.Id);
             if (path is null) return (null, "Не удалось создать документ.");
             Directory.CreateDirectory(DocumentsDir);
@@ -793,30 +894,49 @@ public class StorageService
         }
     }
 
-    private List<DocumentInfo> GetDocumentsNoLock()
+    private List<DocumentInfo> GetDocumentsNoLock() => ЧитатьСписокNoLock();
+
+    /// <summary>
+    /// Имя для копии: «исходный (копия)», а при занятости с числом. Занятость смотрится по
+    /// именам всего списка, потому что тёзки видны именно в нём.
+    /// </summary>
+    private static string СвободноеИмяКопии(string основа, List<DocumentInfo> список)
     {
-        var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
-        if (lib.Documents.Count > 0) return lib.Documents;
-        var первый = new DocumentInfo
-        {
-            Id = "main", Code = "main",
-            Name = ReadOr(DocumentPath, DefaultDocument).Title, IsDefault = true, UpdatedUtc = DateTime.UtcNow
-        };
-        if (string.IsNullOrWhiteSpace(первый.Name)) первый.Name = "Документ";
-        lib.Documents.Add(первый);
-        Write(LibraryPath, lib);
-        return lib.Documents;
+        bool занято(string имя) =>
+            список.Any(d => string.Equals((d.Name ?? "").Trim(), имя, StringComparison.OrdinalIgnoreCase));
+        var кандидат = основа + " (копия)";
+        for (var n = 2; занято(кандидат) && n <= MaxDocuments + 1; n++)
+            кандидат = основа + " (копия " + n + ")";
+        return кандидат;
     }
 
-    private DocumentConfig GetDocumentNoLock(string id)
+    private DocumentConfig GetDocumentNoLock(string? id)
     {
-        var info = GetDocumentInfoNoLock(id);
-        if (info is null || info.IsDefault) return ReadOr(DocumentPath, DefaultDocument);
+        var info = id is null ? DefaultInfoNoLock() : GetDocumentInfoNoLock(id);
+        if (info is null || info.IsDefault) return ReadOr(DocumentPath, () => ОбразецДля(info));
         var path = DocFilePath(info.Id);
-        return path is null ? DefaultDocument() : ReadOr(path, DefaultDocument);
+        return path is null ? ОбразецДля(info) : ReadOr(path, () => ОбразецДля(info));
     }
 
-    /// <summary>Переименовать документ или сменить его код.</summary>
+    /// <summary>Куда лечь тексту документа: по умолчанию в document.json, остальным своим файлом.</summary>
+    private bool ЗаписатьТекстNoLock(DocumentInfo? info, DocumentConfig doc)
+    {
+        if (info is null || info.IsDefault) { Write(DocumentPath, doc); return true; }
+        var path = DocFilePath(info.Id);
+        if (path is null) return false;
+        Directory.CreateDirectory(DocumentsDir);
+        Write(path, doc);
+        return true;
+    }
+
+    /// <summary>
+    /// Переименовать документ или сменить его код. Имя документа это его заголовок, поэтому
+    /// переименование правит заголовок в самом документе, а не заводит второе имя рядом: имя,
+    /// живущее только в списке, и было тем расхождением, из-за которого закладка переименовывалась
+    /// при переходе на неё. Документу без заголовка заголовок не выдумывается: у него имя и есть
+    /// отдельное название. Документ, чей файл пропал или не разбирается, текстом не трогается:
+    /// иначе на месте потерянного оказался бы образец с новым именем.
+    /// </summary>
     public string? UpdateDocumentMeta(string id, string? code, string? name)
     {
         lock (_lock)
@@ -832,7 +952,19 @@ public class StorageService
                     return "Код «" + чистый + "» уже занят другим документом.";
                 info.Code = чистый;
             }
-            if (!string.IsNullOrWhiteSpace(name)) info.Name = name!.Trim();
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                var имя = name!.Trim();
+                var путь = info.IsDefault ? DocumentPath : DocFilePath(info.Id);
+                var былЗаголовок = путь is null ? null : ЗаголовокФайла(путь);
+                if (!string.IsNullOrWhiteSpace(былЗаголовок) && былЗаголовок!.Trim() != имя)
+                {
+                    var текст = GetDocumentNoLock(info.Id);
+                    текст.Title = имя;
+                    ЗаписатьТекстNoLock(info, текст);
+                }
+                info.Name = ИмяДляСписка(имя, info.Name, info.Code);
+            }
             info.UpdatedUtc = DateTime.UtcNow;
             var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
             lib.Documents = список;
@@ -868,7 +1000,10 @@ public class StorageService
             }
             Write(DocumentPath, текстНового);
             var путьНового = DocFilePath(новый.Id);
-            if (путьНового is not null && File.Exists(путьНового)) { _text.Remove(путьНового); File.Delete(путьНового); }
+            if (путьНового is not null && File.Exists(путьНового))
+            {
+                _text.Remove(путьНового); _docTitle.Remove(путьНового); File.Delete(путьНового);
+            }
             новый.IsDefault = true;
 
             var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
@@ -891,7 +1026,7 @@ public class StorageService
                        "Сначала назначьте по умолчанию другой.";
             if (список.Count <= 1) return "Последний документ удалить нельзя.";
             var path = DocFilePath(info.Id);
-            if (path is not null && File.Exists(path)) { _text.Remove(path); File.Delete(path); }
+            if (path is not null && File.Exists(path)) { _text.Remove(path); _docTitle.Remove(path); File.Delete(path); }
             список.Remove(info);
             var lib = ReadOr(LibraryPath, () => new DocumentLibrary());
             lib.Documents = список;
@@ -1575,6 +1710,10 @@ public class StorageService
         // записанное, а не то, что было до записи.
         var info = new FileInfo(path);
         _text[path] = (text, info.LastWriteTimeUtc, info.Length);
+        // Разобранный заголовок к записанному тексту отношения уже не имеет. Метка времени файла
+        // идёт с точностью файловой системы, и две записи подряд могут в неё не разойтись:
+        // тогда сверка имён взяла бы заголовок, которого в файле давно нет.
+        _docTitle.Remove(path);
     }
 
     private static DocumentConfig DefaultDocument() => new()

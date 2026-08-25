@@ -17,7 +17,19 @@
   /* Один размер и один интервал для всего текста документа: блоки, чекбоксы, варианты выбора и
      текст на странице подписи. Раньше блоки были заметно крупнее чекбоксов, и одна и та же
      страница читалась как собранная из двух разных документов. */
-  --doc-text: clamp(1.02rem, 2.2vw, 1.25rem);
+  /* Клиент, который плохо видит, увеличивает буквы сам. Множитель живёт одной переменной, и
+     каждый размер текста документа берётся через неё: тогда «крупнее» это действительно весь
+     документ, а не тот кусок, про который вспомнили. Единица это обычный вид, и при ней всё
+     считается ровно в прежние значения. Поле подписи, кнопки навигации и счётчик шагов
+     множителем не управляются: подпись рисуют пальцем, а не читают, а кнопки и счётчик и так
+     сделаны под палец, и от роста они бы только выдавили содержимое с экрана. */
+  --doc-scale: 1;
+  /* Обычный размер и он же, умноженный на выбор клиента. Разведены нарочно: переменная считается
+     там, где объявлена, поэтому умножать на множитель прямо здесь бесполезно - на :root он всегда
+     единица, и наследуется уже посчитанное значение. Умножение живёт на слое документа, где
+     множитель и стоит. Это ровно та ошибка, из-за которой заголовки росли, а текст нет. */
+  --doc-text-base: clamp(1.02rem, 2.2vw, 1.25rem);
+  --doc-text: var(--doc-text-base);
   --doc-line: 1.45;
 }
 
@@ -56,15 +68,19 @@ html, body {
 
 /* ---------- Document ---------- */
 #document { background: var(--doc-bg); color: var(--text); }
+/* Здесь и только здесь размер текста документа умножается на выбор клиента: слой документа это
+   ближайший общий предок всего, что клиент читает, и именно на нём стоит множитель. */
+#document { --doc-text: calc(var(--doc-text-base) * var(--doc-scale)); }
 .doc-frame {
+  font-size: calc(1rem * var(--doc-scale));
   position: absolute; inset: 0;
   display: flex; flex-direction: column;
   max-width: 960px; margin: 0 auto;
   padding: clamp(16px, 3vw, 40px);
 }
 .doc-header { border-bottom: 2px solid #e5e7eb; padding-bottom: 14px; margin-bottom: 8px; }
-.doc-header h1 { font-size: clamp(1.3rem, 3.2vw, 2rem); margin: 0 0 10px; }
-.doc-progress { color: var(--muted); font-size: 1rem; }
+.doc-header h1 { font-size: calc(clamp(1.3rem, 3.2vw, 2rem) * var(--doc-scale)); margin: 0 0 10px; }
+.doc-progress { color: var(--muted); font-size: 1rem; }  /* служебная строка: множителем не управляется */
 
 /* Колонка, чтобы экран подписи мог занять всю высоту и отцентрировать поле по вертикали:
    при min-height в процентах это зависело от того, как браузер разрешит высоту родителя. */
@@ -78,7 +94,7 @@ html, body {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
-.doc-body h2 { font-size: clamp(1.15rem, 2.6vw, 1.6rem); margin: 0 0 14px; }
+.doc-body h2 { font-size: calc(clamp(1.15rem, 2.6vw, 1.6rem) * var(--doc-scale)); margin: 0 0 14px; }
 .doc-text { font-size: var(--doc-text); line-height: var(--doc-line); white-space: pre-wrap; margin-bottom: 22px; }
 /* Curated rich-text sizes (relative to the surrounding text), used in headings and body. */
 .rt-l { font-size: 1.3em; }
@@ -167,7 +183,7 @@ html, body {
 .thankyou .mark::after { content: ""; position: absolute; left: 50%; top: 47%; width: 26px; height: 50px; border: solid #fff; border-width: 0 8px 8px 0; transform: translate(-50%, -50%) rotate(45deg); }
 @media (prefers-reduced-motion: no-preference) { .thankyou .mark { animation: pop .35s ease-out; } }
 @keyframes pop { from { transform: scale(.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-.thankyou h2 { font-size: clamp(1.4rem, 3vw, 2rem); margin: 0; }
+.thankyou h2 { font-size: calc(clamp(1.4rem, 3vw, 2rem) * var(--doc-scale)); margin: 0; }
 
 /* ---------- Footer / buttons ---------- */
 .doc-footer { border-top: 2px solid #b8c2d1; padding-top: 16px; display: flex; gap: 14px; justify-content: space-between; align-items: center; }
@@ -244,7 +260,7 @@ html, body {
 /* Подпись и сканирование это отдельные экраны, а не элементы среди текста: место под подпись
    занимает столько, сколько есть, иначе расписываться приходится в узкой полоске. */
 .screen-sign .page-sign-wrap { height: min(52vh, 460px); }
-.screen-sign .page-sign-title { font-size: 1.15rem; }
+.screen-sign .page-sign-title { font-size: calc(1.15rem * var(--doc-scale)); }
 /* Страница-экран сканирования: место под камеру занимает столько, сколько нужно. Правило
    ссылалось на класс .scan-inline, которого страница не создаёт вовсе (сканирование рисуется
    как .page-scan), и обещанный отдельный экран под камеру ничем не отличался от обычной
@@ -298,12 +314,62 @@ h2 { clear: both; }
 /* Поле ввода на странице. */
 .page-input { margin: 12px 0; }
 .page-input-title { display: block; font-weight: 600; margin-bottom: 6px; }
-.page-input-field { width: 100%; box-sizing: border-box; padding: 14px 12px; font-size: 1.05rem;
+.page-input-field { width: 100%; box-sizing: border-box; padding: 14px 12px; font-size: calc(1.05rem * var(--doc-scale));
   border: 2px solid var(--field-line); border-radius: 10px; background: #fff; }
 .page-input-field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px rgba(21,128,61,.18); }
 .page-input.bad .page-input-field { border-color: var(--danger); }
-.page-input-hint { min-height: 1.1em; margin-top: 4px; color: var(--danger); font-size: .9rem; }
+.page-input-hint { min-height: 1.1em; margin-top: 4px; color: var(--danger); font-size: calc(.9rem * var(--doc-scale)); }
 .page-input.miss .page-input-field { border-color: var(--danger); }
 
 /* Кнопка «отметить всё» над длинным списком пунктов. */
 .check-all { margin: 6px 0 2px; }
+
+/* ---------- Размер текста: значок в правом верхнем углу ----------
+   Клиент, который плохо видит, увеличивает буквы сам. Значок закреплён за экраном планшета, а не
+   за страницей: прокрутка его не уносит. Подложка тёмная и плотная, потому что бледный серый
+   значок на белом документе как раз тот, кому он нужен, и не заметит: белая надпись на #171a21
+   даёт запас по контрасту пятнадцать к одному, белая клавиша на той же подложке столько же.
+   Кнопки 64 на 64 с зазором: это уверенное попадание пальцем на планшете 800 на 1280, без
+   прицеливания и без случайного нажатия соседней. */
+.big-text {
+  position: fixed; top: 12px; right: 12px; z-index: 40;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; border-radius: 18px;
+  background: #171a21;
+  box-shadow: 0 12px 32px rgba(9, 12, 20, .40);
+  font-size: 13px;
+}
+.big-text-cap {
+  color: #e6ebf2; font-size: 13px; font-weight: 600; line-height: 1.1;
+  letter-spacing: .06em; text-transform: uppercase; text-align: center;
+}
+.big-text-row { display: flex; gap: 10px; }
+.big-text-btn {
+  appearance: none; border: none; cursor: pointer;
+  width: 64px; height: 64px; border-radius: 14px;
+  background: #fff; color: #171a21;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .05s, background .15s, color .15s;
+}
+.big-text-btn svg { width: 34px; height: 34px; display: block; }
+.big-text-btn:active { transform: translateY(1px); }
+/* Упор в край: кнопка видна и читается, но ясно, что она не работает. Пустое место на её месте
+   или молчаливое нажатие человек понимает как поломку. */
+.big-text-btn:disabled { background: rgba(255, 255, 255, .16); color: rgba(255, 255, 255, .62); cursor: default; }
+/* Место под значок вырезается из шапки распоркой, а не отступом по всей высоте: длинное название
+   документа обтекает значок и ниже его нижнего края снова идёт во всю ширину, вместо того чтобы
+   переноситься в узкую колонку до самого конца. Высота шапки при этом не ниже самого значка, так
+   что ни название, ни счётчик шагов не заезжают под него ни при каком заголовке. И то и другое
+   живёт только на том экране, где значок показан. */
+.doc-frame.has-bigtext .doc-header { min-height: 112px; }
+.doc-frame.has-bigtext .doc-header::before {
+  content: ""; float: right; width: 176px; height: 104px;
+}
+/* Квадратик отметки растёт вместе с текстом, иначе рядом с крупной строкой он превращается в
+   точку. Рост ограничен: дальше он начал бы теснить сам текст согласия. */
+.check input { width: min(calc(30px * var(--doc-scale)), 46px); height: min(calc(30px * var(--doc-scale)), 46px); }
+/* Кнопки, которые стоят внутри самого документа, растут вместе с его текстом: «отметить всё»
+   относится к списку согласий, «очистить» и «сканировать» к полю рядом с ними, и читает их тот
+   же человек тем же зрением. Кнопки навигации в подвале остаются прежними: они и так под палец,
+   а их рост выдавил бы с экрана то, ради чего клиент сюда пришёл. */
+.check-all, .page-sign-clear, .page-scan-btn { font-size: calc(clamp(1rem, 2.2vw, 1.2rem) * var(--doc-scale)); }

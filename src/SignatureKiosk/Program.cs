@@ -1439,6 +1439,10 @@ admin.MapPost("/document/import", (DocumentBackup? backup, string? code, string?
     // Версия 1 это файл без картинок, версия 2 с картинками. Обе читаются.
     if (backup.Version is < 1 or > 2)
         return Results.BadRequest(new { error = "Версия файла шаблона не поддерживается." });
+    // Название, заданное при импорте, это и есть имя документа, а имя документа это его заголовок.
+    // Прежде оно уходило только в список, и когда в файле был свой заголовок, заданное название
+    // молча не действовало: в списке одно, в открытом документе другое.
+    if (!string.IsNullOrWhiteSpace(title)) doc.Title = title!.Trim();
     // Условие, которое при разборе изменилось бы само, это отказ и здесь: принять чужой файл и
     // молча сохранить его с другим смыслом хуже, чем отказать и назвать причину. Правило то же,
     // что при сохранении из редактора.
@@ -1480,7 +1484,9 @@ admin.MapPost("/document/import", (DocumentBackup? backup, string? code, string?
     var n = 2;
     while (storage.FindByCode(свободный) is not null) свободный = желаемый + "-" + n++;
 
-    var (info, error) = storage.AddDocument(свободный, string.IsNullOrWhiteSpace(title) ? doc.Title : title, null);
+    // Имя берётся из заголовка, который уже сведён с заданным при импорте названием. Пустой
+    // заголовок оставляет документу именем его код: выдумывать заголовок за оператора нельзя.
+    var (info, error) = storage.AddDocument(свободный, doc.Title, null);
     if (error is not null) return Results.BadRequest(new { error });
     if (!storage.SaveDocument(info!.Id, doc))
         return Results.NotFound(new { error = "Документ не найден: " + info!.Id });

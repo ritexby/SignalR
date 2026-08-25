@@ -174,7 +174,10 @@
   // ==================================================================
   // Signing document flow
   // ==================================================================
-  var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null, idleTimer: null, idleMs: 0, thankTimer: null, session: 0,
+  // textStep это ступень размера текста, а firstIndex это экран, который клиент увидел первым.
+  // Оба живут ровно столько же, сколько сам показ: их сбрасывает каждый новый документ и каждый
+  // возврат к рекламе, поэтому следующий клиент начинает с обычного размера.
+  var doc = { config: null, screens: [], index: 0, checks: {}, pad: null, submitting: false, docPadResize: null, idleTimer: null, idleMs: 0, thankTimer: null, session: 0, textStep: 0, firstIndex: null,
     // Подписи полей заведены сразу: их спрашивают и до того, как на планшет пришёл документ.
     signStrokes: {}, signGeom: {}, signs: {}, signThumbs: {} };
   // Щель для проверок, как и __padForTest рядом: без неё нельзя развести то, что знает
@@ -211,6 +214,11 @@
     doc.finalStrokes = null;
     doc.finalInk = "";
     doc.submitting = false;
+    // Размер текста это выбор одного клиента, а не настройка планшета: следующему он достаётся
+    // обычным, даже если предыдущий увеличил буквы до предела.
+    doc.textStep = 0;
+    doc.firstIndex = null;
+    applyTextScale();
     doc.screens = [];
     (doc.config.pages || []).forEach(function (p, i) {
       doc.screens.push({ type: "page", pageIndex: i });
@@ -284,6 +292,12 @@
     // оставить следа, а значения полей ввода тут забыли, и они лежали в памяти планшета до
     // следующего документа.
     doc.inputs = {};
+    // Размер текста уходит вместе с остальным: и ступень, и сам множитель на слое документа, и
+    // значок из разметки. Иначе следующий клиент получил бы чужой размер, а на планшете, который
+    // вернулся к рекламе, в DOM остался бы след прошлого приёма.
+    doc.textStep = 0; doc.firstIndex = null;
+    applyTextScale();
+    unmountBigText();
     el.docBody.innerHTML = ""; el.docFooter.innerHTML = "";
     el.docTitle.textContent = ""; el.docProgress.textContent = "";
   }
@@ -901,6 +915,9 @@
     out.pageIndex = screen.pageIndex != null ? screen.pageIndex : -1;
     var pos = stepPosition();
     out.step = pos.current; out.steps = pos.total;
+    // Выбранный клиентом размер текста: наблюдатель должен видеть тот же документ, что и клиент,
+    // а не тот, который был бы при обычном размере.
+    out.textScale = bigScale();
     out.checks = doc.checks;
     out.picks = doc.picks;
     out.codes = doc.codes;
@@ -938,6 +955,131 @@
     }, 120);
   }
 
+  // ==================================================================
+  // Размер текста документа
+  // ==================================================================
+  // Клиент, который плохо видит, увеличивает буквы сам и сразу, не зовя оператора и не
+  // разбираясь в настройках. Ступени подобраны так, чтобы каждое нажатие было видно с одного
+  // взгляда и чтобы в упоре текст был примерно вдвое крупнее обычного: мельче шаг незаметен,
+  // крупнее шаг перепрыгивает нужный размер.
+  var BIG_STEPS = [1, 1.25, 1.5, 1.75, 2];
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var big = { node: null, minus: null, plus: null };
+
+  // Управление разрешено, если признак стоит хоть у одной страницы показа. Признак у страницы,
+  // а действие на весь документ: оператор, поставивший отметку не на той странице, иначе получил
+  // бы документ, где нажимать нечего, и решил бы, что возможность не работает.
+  function bigAllowed() {
+    if (!doc.config) return false;
+    var pages = doc.config.pages || [];
+    for (var i = 0; i < pages.length; i++) if (pages[i] && pages[i].bigText) return true;
+    return false;
+  }
+
+  function bigScale() { return BIG_STEPS[doc.textStep || 0] || 1; }
+
+  // Множитель ставится один раз на весь слой документа: заголовок, текст, пункты, варианты,
+  // подписи полей и таблицы берут размер через него, поэтому документ меняется целиком и в тот
+  // же кадр, без перерисовки разметки. Ничего не пересобирается, а значит не теряются ни
+  // нарисованная подпись, ни вписанное в поле, ни место, до которого клиент долистал.
+  function applyTextScale() {
+    var k = bigScale();
+    if (k === 1) el.document.style.removeProperty("--doc-scale");
+    else el.document.style.setProperty("--doc-scale", String(k));
+    var step = doc.textStep || 0;
+    // Упор показывается погашенной кнопкой, а не молчанием: нажал и ничего не произошло это
+    // поломка с точки зрения человека.
+    if (big.minus) big.minus.disabled = step <= 0;
+    if (big.plus) big.plus.disabled = step >= BIG_STEPS.length - 1;
+    watchPush();
+  }
+
+  function bigStep(на) {
+    var было = doc.textStep || 0;
+    var стало = Math.max(0, Math.min(BIG_STEPS.length - 1, было + на));
+    if (стало === было) return;
+    doc.textStep = стало;
+    applyTextScale();
+  }
+
+  // Значок в стиле остальных значков продукта: линии одной толщины, никаких картинок и эмодзи.
+  // Буква «А» со знаком читается с одного взгляда и не требует перевода.
+  function bigIcon(плюс) {
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    var линии = ["M2 20 7.5 4 13 20", "M4.2 15.2h6.6", "M15.5 9h6.5"];
+    if (плюс) линии.push("M18.75 5.75v6.5");
+    линии.forEach(function (d) {
+      var path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+    });
+    return svg;
+  }
+
+  function bigButton(id, подпись, плюс, на) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.id = id;
+    b.className = "big-text-btn";
+    b.setAttribute("aria-label", подпись);
+    b.title = подпись;
+    b.appendChild(bigIcon(плюс));
+    b.addEventListener("click", function () { bigStep(на); });
+    return b;
+  }
+
+  function mountBigText() {
+    if (big.node) return;
+    var box = document.createElement("div");
+    box.id = "bigTextPanel";
+    box.className = "big-text";
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", "Размер текста");
+    var cap = document.createElement("div");
+    cap.className = "big-text-cap";
+    cap.textContent = "Размер текста";
+    box.appendChild(cap);
+    var row = document.createElement("div");
+    row.className = "big-text-row";
+    big.minus = bigButton("bigTextMinus", "Мельче", false, -1);
+    big.plus = bigButton("bigTextPlus", "Крупнее", true, 1);
+    row.appendChild(big.minus);
+    row.appendChild(big.plus);
+    box.appendChild(row);
+    // Живёт на слое документа, а не в рамке страницы: рамка прокручивается и переписывается на
+    // каждой перерисовке, а значок должен стоять в углу экрана неподвижно.
+    el.document.appendChild(box);
+    big.node = box;
+    applyTextScale();
+  }
+
+  function unmountBigText() {
+    if (big.node && big.node.parentNode) big.node.parentNode.removeChild(big.node);
+    big.node = null; big.minus = null; big.plus = null;
+    var frame = el.document.querySelector(".doc-frame");
+    if (frame) frame.classList.remove("has-bigtext");
+  }
+
+  // Значок показывается только на том экране, который клиент увидел первым: там он и нужен, а
+  // дальше уже сделал своё дело. Первым может оказаться не первая страница документа: она могла
+  // не подойти по условию, и тогда значок встаёт на той, что открылась.
+  function updateBigText() {
+    var надо = bigAllowed() && doc.firstIndex != null && doc.index === doc.firstIndex;
+    if (!надо) { unmountBigText(); return; }
+    mountBigText();
+    // Шапка отодвигается ровно настолько, чтобы название документа не заезжало под значок.
+    // Отступ снимается вместе со значком, поэтому на остальных экранах заголовок во всю ширину.
+    var frame = el.document.querySelector(".doc-frame");
+    if (frame) frame.classList.add("has-bigtext");
+  }
+
   function renderScreen() {
     watchPush();
     var screen = doc.screens[doc.index];
@@ -949,9 +1091,13 @@
       if (to < 0) to = stepIndex(doc.index, -1);
       if (to >= 0 && to !== doc.index) { doc.index = to; return renderScreen(); }
     }
+    // Какой экран клиент увидел первым, известно только здесь: до этой строки экран мог
+    // смениться из-за условия, и значок встал бы на странице, которой клиент не видел.
+    if (doc.firstIndex == null) doc.firstIndex = doc.index;
     var pos = stepPosition();
     el.docProgress.textContent = screen.type === "thankyou"
       ? "" : "Шаг " + pos.current + " из " + pos.total;
+    updateBigText();
     if (screen.type === "page") return renderPage(screen.pageIndex);
     if (screen.type === "signature") return renderSignature();
     return renderThankYou();
@@ -985,7 +1131,7 @@
         // Свой размер в точках сильнее ступени: оператор задал его руками, значит хотел именно
         // его. Точки в CSS те же, что в PDF, поэтому экран и бумага сходятся.
         var pt = parseInt(r.sizePt, 10);
-        if (pt >= 8 && pt <= 40) span.style.fontSize = pt + "pt";
+        if (pt >= 8 && pt <= 40) span.style.fontSize = "calc(" + pt + "pt * var(--doc-scale))";
         else if (r.size === "l") span.className = "rt-l";
         else if (r.size === "h") span.className = "rt-h";
         span.textContent = seg;
