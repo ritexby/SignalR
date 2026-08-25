@@ -8029,13 +8029,34 @@
   }
 
   $("saveAlertSettings").addEventListener("click", function () {
-    apiSend("/alerts/settings", "PUT", {
-      enabled: $("alertEnabled").checked,
-      offlineMinutes: parseInt($("alertOffline").value, 10) || 10,
-      errorCount: parseInt($("alertErrCount").value, 10) || 5,
-      errorWindowMinutes: parseInt($("alertErrWindow").value, 10) || 10
-    }).then(function () { return loadAlertSettings(); })
-      .then(function () { toast("Настройки сохранены"); })
+    // Сервер приводит пороги к разумным границам (1..1440 мин, 1..1000 ошибок), иначе опечатка
+    // в одну цифру либо выключает сторожа, либо заставляет его звонить непрерывно. Но менять
+    // введённое молча нельзя: оператор ушёл бы в уверенности, что порог у него тот, что он набрал.
+    // Сравниваем с тем, что оператор набрал руками, а не с тем, что отправили: подстановка
+    // запасного числа здесь, на странице, такая же подмена, как и приведение к границе на сервере.
+    var поля = [["alertOffline", "offlineMinutes", "порог молчания планшета", 10],
+                ["alertErrCount", "errorCount", "число ошибок", 5],
+                ["alertErrWindow", "errorWindowMinutes", "окно счёта ошибок", 10]];
+    var набрано = {}, послано = { enabled: $("alertEnabled").checked };
+    поля.forEach(function (f) {
+      набрано[f[1]] = ($(f[0]).value || "").trim();
+      послано[f[1]] = parseInt(набрано[f[1]], 10) || f[3];
+    });
+    apiSend("/alerts/settings", "PUT", послано)
+      .then(function (r) { return r.json().catch(function () { return null; }); })
+      .then(function (принято) {
+        return loadAlertSettings().then(function () { return принято; });
+      })
+      .then(function (принято) {
+        var изменено = [];
+        поля.forEach(function (f) {
+          var стало = принято ? принято[f[1]] : послано[f[1]];
+          if (String(стало) !== набрано[f[1]])
+            изменено.push(f[2] + ": " + (набрано[f[1]] || "пусто") + " не годится, взято " + стало);
+        });
+        if (изменено.length) toast("Сохранено, но " + изменено.join("; "), true);
+        else toast("Настройки сохранены");
+      })
       .catch(function () { /* reported by api() */ });
   });
   $("alertDesktop").addEventListener("change", function () {
