@@ -766,6 +766,41 @@ admin.MapPost("/devices/{id}/identify", async (string id, KioskCoordinator coord
 });
 
 // ---- Groups ----
+// Номер версии страницы планшета. Живёт он ровно в одном месте: в самой странице, которую этот
+// сервер и отдаёт планшетам. Админка сверяет с ним то, что сообщают планшеты по связи, и раньше
+// держала рядом свою копию номера. Копии разошлись на первом же выпуске, и админка написала
+// «старая версия страницы» на карточке каждого исправного планшета в парке.
+//
+// Файл читается один раз за жизнь службы: на работающей службе он не меняется, а меняется он
+// только при выкате, после которого служба перезапускается. Не прочитали, значит версия
+// неизвестна, и тогда админка не обвиняет никого: недоказанное обвинение хуже молчания, после
+// него идут снимать со стены исправный планшет.
+string? версияСтраницы = null;
+bool версияПрочитана = false;
+string? ВерсияСтраницыПланшета()
+{
+    if (версияПрочитана) return версияСтраницы;
+    версияПрочитана = true;
+    try
+    {
+        var корень = app.Environment.WebRootPath;
+        if (string.IsNullOrEmpty(корень)) return null;
+        var путь = Path.Combine(корень, "kiosk.js");
+        if (!File.Exists(путь)) return null;
+        var найдено = System.Text.RegularExpressions.Regex.Match(
+            File.ReadAllText(путь), "APP_VERSION\\s*=\\s*\"([^\"]*)\"");
+        if (найдено.Success && найдено.Groups[1].Value.Length > 0) версияСтраницы = найдено.Groups[1].Value;
+    }
+    catch
+    {
+        // Версия осталась неизвестной. Это не повод валить запрос: без неё админка просто
+        // перестаёт судить о версиях, а всё остальное работает.
+    }
+    return версияСтраницы;
+}
+
+admin.MapGet("/page-version", () => Results.Ok(new { version = ВерсияСтраницыПланшета() }));
+
 admin.MapGet("/groups", () => Results.Ok(storage.GetGroups()));
 admin.MapPost("/groups", (GroupDto dto) => Results.Ok(storage.AddGroup(dto?.Name ?? "")));
 admin.MapPut("/groups/{id}", (string id, GroupDto dto) =>

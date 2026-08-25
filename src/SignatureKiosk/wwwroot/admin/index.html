@@ -21,7 +21,7 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version">v7.4</span></div>
+      <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <span class="version" id="appVersion">v7.4</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -103,14 +103,18 @@
                  значит заставлять глаз прыгать. -->
             <span id="docDirty" class="dirty-mark hidden" title="Документ правили и не сохранили. Правки лежат в черновике этого браузера и вернутся, когда вы снова его откроете.">не сохранено</span>
           </div>
+          <!-- Шаг назад стоит рядом с сохранением, а не среди проверок: и то, и другое про
+               несохранённую работу оператора, и берутся они одно за другим. В ряду действий
+               ниже остались две группы разной природы: проверить и посмотреть, и работа с
+               планшетом. -->
+          <div class="tb-group tb-group-undo" role="group" aria-label="Правка">
+            <button id="undoDoc" class="btn btn-ghost" data-icon="back" disabled
+                    title="Вернуть документ на шаг назад (Ctrl+Z)">Шаг назад</button>
+          </div>
           <!-- Сохранение ушло наверх, к пометке о несохранённом: это одно дело, и держать их в
                разных рядах значило заставлять глаз прыгать. Внизу осталось две группы разной
                природы: слева проверить и посмотреть, справа работа с планшетом. -->
           <div class="toolbar-actions">
-            <div class="tb-group" role="group" aria-label="Правка">
-              <button id="undoDoc" class="btn btn-ghost" data-icon="back" disabled
-                      title="Вернуть документ на шаг назад (Ctrl+Z)">Шаг назад</button>
-            </div>
             <div class="tb-group" role="group" aria-label="Проверка и просмотр">
               <button id="checkDoc" class="btn btn-ghost" data-icon="shield" title="Найти ошибки в документе до того, как он попадёт к клиенту">Проверить</button>
               <button id="previewDoc" class="btn btn-ghost" data-icon="eye" title="Посмотреть, как документ будет выглядеть на планшете, с тестовыми значениями тегов">Предпросмотр</button>

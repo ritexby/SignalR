@@ -171,6 +171,12 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .field-hint { font-size: .8rem; font-weight: 500; color: var(--muted); }
 .field input, .field textarea { padding: 10px; border: 1.5px solid var(--field-line); border-radius: 9px; font-size: .98rem; color: var(--text); font-weight: 400; background: #fff; }
 .field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22,163,74,.14); }
+/* Поле, которое только показывает. Выглядеть как место для ввода оно не должно: иначе оператор
+   пишет в него, а буквы не появляются, и это читается как поломка. Так подписано имя документа
+   в окне кода: имя документа это его заголовок, и правится он в редакторе. */
+.field input[readonly] { background: #f1f4f8; border-style: dashed; border-color: var(--line);
+  color: var(--muted); cursor: default; }
+.field input[readonly]:focus { border-color: var(--line); box-shadow: none; }
 .pages-editor { display: flex; flex-direction: column; gap: 16px; }
 #pagesEditor { display: flex; flex-direction: column; gap: 24px; }
 .page-card { border: 1.5px solid var(--line); border-left: 5px solid var(--accent); border-radius: 14px; padding: 0 18px 18px; background: #fff; box-shadow: 0 2px 12px rgba(16,24,40,.06); display: flex; flex-direction: column; gap: 12px; }
@@ -1172,6 +1178,12 @@ body.watch-solo #logout,
 body.watch-solo .content > .panel { display: none; }
 body.watch-solo .content { padding-top: 12px; }
 .watch-solo-page { max-width: 1100px; margin: 0 auto; }
+/* Возврат в админку прижат к правому краю шапки наблюдения: он не про планшет, а про то, где
+   находится сам оператор, и путать его с состоянием связи нельзя. Мелкой ссылкой, а не кнопкой:
+   кнопка здесь читалась бы как действие над планшетом, а их в этом окне нет ни одного. */
+.watch-back { margin-left: auto; font-size: .85rem; color: var(--muted); text-decoration: none;
+  border-bottom: 1px dashed var(--line); padding-bottom: 1px; white-space: nowrap; }
+.watch-back:hover { color: var(--text); border-bottom-color: currentColor; }
 .watch-solo-page .watch-frame { min-height: 60vh; }
 
 /* Поле ввода в списке элементов страницы: та же строка, что у сканирования и подписи. */
