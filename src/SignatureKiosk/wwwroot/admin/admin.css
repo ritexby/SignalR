@@ -1466,3 +1466,12 @@ body.watch-solo .content { padding-top: 12px; }
 .toc-fixed-title { padding: 0 8px 6px; font-size: 11px; text-transform: uppercase;
   letter-spacing: .04em; color: #5a6473; }
 .toc-fixed-note { padding: 4px 8px 0; font-size: 11px; color: #5a6473; }
+
+/* Таблица на четыре колонки: адресация планшета. Первая колонка это имя поля, ей широкой быть
+   незачем, а «откуда взять» и «когда удобно» несут текст. */
+.api-tbl-4 th:first-child { width: 20%; }
+.api-tbl-4 th:nth-child(2) { width: 27%; }
+.api-tbl-4 th:nth-child(3) { width: 28%; }
+/* Строка «нужно ли тело» стоит первой в разделе «Что слать» и должна читаться как правило,
+   а не как ещё один абзац описания. */
+.api-body-need { font-weight: 600; }
