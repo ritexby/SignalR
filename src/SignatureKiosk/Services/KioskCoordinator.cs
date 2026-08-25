@@ -117,8 +117,10 @@ public class KioskCoordinator
     /// Разослать рекламу заново всем планшетам, которые её показывают. Нужно, когда состав
     /// картинок мог измениться сам: наступил или кончился срок показа. Планшет, на котором идёт
     /// документ, не трогается: реклама никогда не перебивает подписание.
+    /// С номером планшета рассылка идёт только ему: смена наборов у одного планшета не повод
+    /// пересобирать и слать список ещё двумстам.
     /// </summary>
-    public async Task RefreshSlidesAsync()
+    public async Task RefreshSlidesAsync(string? deviceId = null)
     {
         // Состояние читается один раз на всех: при двухстах планшетах чтение на каждого
         // означало бы двести разборов одного и того же файла подряд.
@@ -127,6 +129,7 @@ public class KioskCoordinator
         var today = DateTime.Now.Date;
         foreach (var dev in _storage.GetDevices())
         {
+            if (deviceId is not null && dev.Id != deviceId) continue;
             // Отозванный планшет пропускается: он показывает «Планшет отвязан от системы», и
             // рассылка рекламы увела бы его обратно на слайды.
             if (!НеОтозван(dev)) continue;
@@ -228,7 +231,18 @@ public class KioskCoordinator
     public CurrentCommand BuildCurrentCommand(string deviceId)
     {
         var state = _storage.ResolveState(deviceId);
-        if (IsExpired(state))
+        // Просроченная сессия убирается, только если планшет НЕ на связи. Ровно то же правило
+        // стоит у фонового сторожа выше, и с тем же доводом: планшет на связи показывает
+        // документ живому человеку прямо сейчас, и стереть сессию под ним значит отбить его
+        // подпись.
+        //
+        // Здесь этой сверки не было, а сюда приходит обычное чтение экрана планшета из админки:
+        // GET /api/admin/devices/{id}/screen, которым открывается окно наблюдения. Замер:
+        // сессия старше двух часов, планшет на связи, оператор один раз заглянул в окно
+        // наблюдения; клиент дописал, расписался и получил «Сессия подписания уже завершена»,
+        // записи не появилось, а у оператора окно навсегда осталось на «Документ загружается».
+        // Само чтение при этом обещает в справке API «ничего никуда не записывается».
+        if (IsExpired(state) && !_tracker.IsOnline(deviceId))
         {
             // Abandoned session: clear it now and show ads instead of the previous client's data.
             ClearSignerSession(deviceId);
@@ -239,17 +253,23 @@ public class KioskCoordinator
             // Переподключившийся планшет получает снимок, сделанный при показе, а не пересборку
             // из текущего шаблона: шаблон могли править, пока клиент подписывал, и документ
             // менялся бы у него на глазах посреди подписания.
+            // Сколько секунд назад показали документ. Планшету это нужно, чтобы отличить
+            // «оператор только что прислал» от «страница перезагрузилась посреди подписания».
+            var показанСекундНазад = state.DocumentSetUtc is DateTime когда
+                ? (int)Math.Max(0, (DateTime.UtcNow - когда).TotalSeconds) : 0;
             if (!string.IsNullOrEmpty(state.SessionId))
             {
                 var session = _storage.GetDocSession(deviceId);
                 if (session is not null && session.SessionId == state.SessionId)
-                    return new CurrentCommand { Mode = "document", Document = session.Document, SessionId = session.SessionId };
+                    return new CurrentCommand { Mode = "document", Document = session.Document,
+                        SessionId = session.SessionId, ShownSecondsAgo = показанСекундНазад };
             }
             // Снимка нет: сессия начата до появления снимков. Прежний путь, с данными только
             // этого планшета: чужого он не получит и здесь.
             var doc = DocumentTemplating.Resolve(_storage.GetDocument(), state.Fields, state.DynamicCheckboxes,
                 state.GroupSelections, state.CheckboxStates, state.Texts, state.GroupOptions);
-            return new CurrentCommand { Mode = "document", Document = doc, SessionId = state.SessionId };
+            return new CurrentCommand { Mode = "document", Document = doc, SessionId = state.SessionId,
+                ShownSecondsAgo = показанСекундНазад };
         }
         return new CurrentCommand { Mode = "slides", Slides = BuildSlidesPayload(state, deviceId) };
     }

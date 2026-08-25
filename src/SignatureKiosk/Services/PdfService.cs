@@ -17,7 +17,13 @@ public class PdfService
 {
     /// <summary>Upper bound on image blocks rendered into one PDF, so a pathological document
     /// cannot make a single signature consume hundreds of MB.</summary>
-    private const int MaxImageBlocks = 30;
+    /// <summary>
+    /// Сколько РАЗНЫХ картинок разбирается в одном документе. Расход памяти задаёт именно это
+    /// число: каждый файл разбирается один раз и держится в keepImages, а сколько раз он потом
+    /// поставлен на листы, стоит ноль. Прежде считались размещения, и одна печать, поставленная
+    /// у сорока пунктов, теряла десять из них молча.
+    /// </summary>
+    private const int MaxImages = 30;
 
     private readonly StorageService _storage;
     private readonly ILogger<PdfService>? _log;
@@ -195,7 +201,6 @@ public class PdfService
         var keepImages = new Dictionary<string, XImage>(StringComparer.Ordinal);
         // Потоки картинок, присланных заказом: живут до сохранения вместе с самими картинками.
         var keepStreams = new List<MemoryStream>();
-        var imageBlocks = 0;
         // <param name="поУмолчаниюПоЦентру">
         // Блоки экрана подписи на планшете стоят по центру: поле подписи по центру, и текст
         // вокруг него тоже. В бумаге они прижимались влево, и экран расходился с листом.
@@ -231,7 +236,27 @@ public class PdfService
                 }
                 if (!string.IsNullOrEmpty(block.ImageUrl))
                 {
-                    if (imageBlocks >= MaxImageBlocks) continue;   // bounded work per document
+                    // Предел стоит на число РАЗНЫХ картинок, а не на число их размещений. Память
+                    // расходуют разобранные файлы, и они уже посчитаны словарём keepImages; сорок
+                    // раз поставленная одна и та же печать не стоит ни байта сверх первой. Раньше
+                    // считались размещения, и документ с одной печатью на каждом из сорока пунктов
+                    // терял десять из них молча. Замер: 35 блоков, в бумаге 30 картинок, 35 меток,
+                    // и ни слова об этом ни в бумаге, ни в ответе сохранения, ни в журнале.
+                    var путьКартинки = DocumentTemplating.IsApiImage(block.ImageUrl)
+                        ? null : MediaFile(block.ImageUrl);
+                    var новаяКартинка = путьКартинки is not null && !keepImages.ContainsKey(путьКартинки);
+                    if (новаяКартинка && keepImages.Count >= MaxImages)
+                    {
+                        _log?.LogWarning("Картинка {Url} не вложена в PDF: больше {Max} разных картинок в одном документе",
+                                         block.ImageUrl, MaxImages);
+                        w.ClearWrap();
+                        w.Rich(new List<TextRun> { new()
+                        {
+                            Text = "[рисунок не вложен: в одном документе не больше " + MaxImages + " разных картинок]",
+                            Italic = true
+                        } }, isHeading: false);
+                        continue;
+                    }
                     // Картинка из заказа приходит прямо в документе строкой BASE64: файла для
                     // неё нет и быть не должно, иначе запись перестала бы быть самодостаточной,
                     // а собрать PDF заново через год стало бы нечем.
@@ -266,7 +291,21 @@ public class PdfService
                     else
                     {
                         var file = MediaFile(block.ImageUrl);
-                        if (file == null) continue;
+                        if (file == null)
+                        {
+                            // Молчать нельзя. Файла нет, значит рисунок из документа пропал, а
+                            // человек под этим документом расписался. Раньше здесь стоял тихий
+                            // пропуск: в бумаге на месте схемы оказывалось пустое место, и по
+                            // листу нельзя было понять, что чего-то не хватает.
+                            _log?.LogWarning("Картинка {Url} не вложена в PDF: файла нет", block.ImageUrl);
+                            w.ClearWrap();
+                            w.Rich(new List<TextRun> { new()
+                            {
+                                Text = "[рисунок не вложен: файл удалён из библиотеки картинок]",
+                                Italic = true
+                            } }, isHeading: false);
+                            continue;
+                        }
                         ключ = file;
                         if (!keepImages.TryGetValue(file, out xi))
                         {
@@ -276,7 +315,6 @@ public class PdfService
                             keepImages[file] = xi;
                         }
                     }
-                    imageBlocks++;
                     // Картинка не встаёт сбоку другой картинки: две обтекаемые подряд означали бы
                     // колонку из картинок и обрывки текста между ними.
                     w.ClearWrap();
@@ -310,14 +348,22 @@ public class PdfService
         // собранные в конец галочки уже читались бы про другое. Состояние берётся из записи
         // подписи (что человек действительно отметил), а место - из документа, который ему
         // показали. Сопоставление по имени, а при его отсутствии по тексту, по порядку.
-        var itemsByKey = new Dictionary<string, SubmittedItem>(StringComparer.OrdinalIgnoreCase);
-        foreach (var it in rec.Items ?? new List<SubmittedItem>())
-            if (it is not null && !string.IsNullOrEmpty(it.Key)) itemsByKey[it.Key] = it;
+        // Записи держатся СПИСКОМ по порядку, а не словарём «имя к одной записи». Словарь при
+        // двух пунктах с одним именем оставлял последнюю, и StateOf отдавал её состояние обоим
+        // пунктам сразу. Замер: клиент отметил второй из двух одноимённых, и в бумаге галочка
+        // встала у первого, то есть лист утверждал согласие, которого человек не давал. Первая
+        // запись при этом уходила в хвост «Отмеченные пункты», и лист противоречил сам себе.
+        //
+        // Порядок записи совпадает с порядком документа: планшет собирает отметки, обходя
+        // страницы и их содержимое сверху вниз. Поэтому первая ещё не напечатанная запись с
+        // этим именем и есть та самая. Ровно так уже сделано для безымянных пунктов ниже, и
+        // верное правило просто не применялось к именованным.
+        var сПунктами = new List<SubmittedItem>((rec.Items ?? new List<SubmittedItem>())
+            .Where(i => i is not null && !string.IsNullOrEmpty(i.Key)));
         var unkeyed = new List<SubmittedItem>((rec.Items ?? new List<SubmittedItem>())
             .Where(i => i is not null && string.IsNullOrEmpty(i.Key)));
-        var groupsByKey = new Dictionary<string, SubmittedGroup>(StringComparer.OrdinalIgnoreCase);
-        foreach (var g in rec.Groups ?? new List<SubmittedGroup>())
-            if (g is not null && !string.IsNullOrEmpty(g.Key)) groupsByKey[g.Key] = g;
+        var сГруппами = new List<SubmittedGroup>((rec.Groups ?? new List<SubmittedGroup>())
+            .Where(g => g is not null && !string.IsNullOrEmpty(g.Key)));
         // Подпись из поля страницы. Расшифровывается один раз: одна и та же подпись может
         // печататься и в потоке, и по заданному месту.
         XImage? PageSignature(string? key)
@@ -344,10 +390,15 @@ public class PdfService
 
         bool StateOf(DocCheckbox cb)
         {
-            if (!string.IsNullOrEmpty(cb.Key) && itemsByKey.TryGetValue(cb.Key, out var byKey))
+            if (!string.IsNullOrEmpty(cb.Key))
             {
-                printedItems.Add(byKey);
-                return byKey.Checked;
+                var byKey = сПунктами.FirstOrDefault(i => !printedItems.Contains(i) &&
+                    string.Equals(i.Key, cb.Key, StringComparison.OrdinalIgnoreCase));
+                if (byKey is not null)
+                {
+                    printedItems.Add(byKey);
+                    return byKey.Checked;
+                }
             }
             // Безымянный пункт узнаём по тексту, беря первый ещё не напечатанный: на планшете
             // отметки собираются в том же порядке, в каком они здесь встречаются.
@@ -413,9 +464,19 @@ public class PdfService
                     // в бумаге не оставалось ни следа: по документу не видно, что подписи ждали.
                     // В режиме раскладки настоящих подписей нет вовсе, поэтому там размещённое
                     // поле пропускается как раньше: иначе макет показывал бы лишний блок.
-                    if (placed.Contains((sig.Key ?? "").Trim()) && (capture is not null || PageSignature(sig.Key) is not null)) continue;
+                    // Заданное место убирает с потока только пустую коробку под росчерк, а не
+                    // надпись над ней. Раньше пропускался весь блок целиком, и слова, которые
+                    // клиент читал прямо перед тем, как расписаться, из бумаги исчезали: по
+                    // подписанному листу нельзя было понять, что именно подтверждено подписью.
+                    var местоЗадано = placed.Contains((sig.Key ?? "").Trim())
+                        && (capture is not null || PageSignature(sig.Key) is not null);
                     w.ClearWrap();
                     w.Gap(6);
+                    if (местоЗадано)
+                    {
+                        w.Rich(НадписьПодписи(sig.Label), isHeading: true, align: null, доляВысотыШрифта: 1.15);
+                        continue;
+                    }
                     w.SignatureBlock(НадписьПодписи(sig.Label), PageSignature(sig.Key),
                         "Подпись в этом поле не поставлена.",
                         sig.Key ?? "", sig.Width, sig.Height, sig.Align);
@@ -443,9 +504,17 @@ public class PdfService
                     // относится к соседнему абзацу, а собранное в конец читалось бы про другое.
                     var inp = page.Inputs[index];
                     w.ClearWrap();
-                    var значение = (rec.Inputs ?? new List<SubmittedInput>())
-                        .FirstOrDefault(x => x is not null && string.Equals(x.Key, inp.Key, StringComparison.OrdinalIgnoreCase))?.Value;
-                    if (string.IsNullOrWhiteSpace(значение)) значение = inp.Value;
+                    // Запись берётся целиком, а не сразу её значение. Разница решающая: «записи
+                    // по этому имени нет» и «запись есть, но пустая» это два разных ответа
+                    // клиента, а прежнее IsNullOrWhiteSpace склеивало их в один и на оба
+                    // подставляло предзаполненное значение из снимка. Клиент стирал присланный
+                    // заказом телефон, а бумага печатала его как подтверждённый.
+                    var записьПоля = (rec.Inputs ?? new List<SubmittedInput>())
+                        .FirstOrDefault(x => x is not null && string.Equals(x.Key, inp.Key, StringComparison.OrdinalIgnoreCase));
+                    // Записи нет вовсе: планшет старой версии её не слал. Тогда предзаполненное
+                    // это лучшее, что мы знаем. Запись есть и пуста: клиент поле видел и оставил
+                    // пустым, и подставлять сюда нечего.
+                    var значение = записьПоля is null ? inp.Value : записьПоля.Value;
                     var подпись = string.IsNullOrWhiteSpace(inp.Label) ? inp.Key : inp.Label;
                     w.Rich(new List<TextRun> { new() { Text = Надпись(подпись, inp.Required) } }
                         .Concat(new[] { new TextRun { Text = string.IsNullOrWhiteSpace(значение)
@@ -456,10 +525,14 @@ public class PdfService
 
                 var g = page.Groups[index];
                 SubmittedGroup? sg = null;
-                if (!string.IsNullOrEmpty(g.Key) && groupsByKey.TryGetValue(g.Key, out var foundGroup))
+                if (!string.IsNullOrEmpty(g.Key))
                 {
-                    sg = foundGroup;
-                    printedGroups.Add(sg);
+                    // Первая ещё не напечатанная запись с этим именем, а не «одна на имя»: два
+                    // выбора с одним именем иначе печатали бы один и тот же ответ дважды, а
+                    // второй выбор клиента терялся. То же правило, что и у пунктов выше.
+                    sg = сГруппами.FirstOrDefault(x => !printedGroups.Contains(x) &&
+                        string.Equals(x.Key, g.Key, StringComparison.OrdinalIgnoreCase));
+                    if (sg is not null) printedGroups.Add(sg);
                 }
                 // Что выбрано, знает только запись подписи, а как варианты выглядят, знает только
                 // документ, который показали клиенту: в нём у вариантов есть куски оформления, а
@@ -515,6 +588,17 @@ public class PdfService
         // выглядел бы неподписанным. Поэтому сообщение печатается и тогда, когда подписи задано
         // своё место на листе.
         var брак = signaturePng is not null && img is null;
+        // Надпись над итоговой подписью печатается ВСЕГДА, даже когда подписи задано своё место
+        // на листе: заданное место убирает коробку под росчерк, а не слова над ней. Клиент читал
+        // их перед росчерком, и в подписанной бумаге они обязаны стоять, о чём и говорит
+        // пояснение к НадписьИтоговойПодписи ниже. Раньше при заданном месте пропадал весь блок.
+        var местоИтоговойЗадано = placed.Contains("") && !брак;
+        if (местоИтоговойЗадано)
+        {
+            w.ClearWrap();
+            w.Gap(26);
+            w.Rich(НадписьИтоговойПодписи(doc), isHeading: true, align: null, доляВысотыШрифта: 1.15);
+        }
         if (!placed.Contains("") || брак)
         {
             w.ClearWrap();
@@ -1224,6 +1308,19 @@ public class PdfService
                     // Явный перенос строки заканчивает абзац: строка перед ним последняя и по
                     // обоим краям не растягивается.
                     if (si > 0) Flush(true);
+                    // Пустой отрезок это пустая строка, которой оператор разделил разделы. Она
+                    // обязана двигать вниз, иначе разбивка пропадает: на планшете шаг между
+                    // разделами 51 и 77 точек, а в бумаге было 16.0 и 15.9, то есть две пустые
+                    // строки и три давали одно и то же. Оператор делит документ на разделы,
+                    // клиент видит разделы, а в бумаге стена текста. Соседний Flow.Paragraph
+                    // делает это правильно с самого начала.
+                    if (si > 0 && segments[si].Length == 0)
+                    {
+                        // Шаг берётся у шрифта этого куска: пустая строка в крупном тексте
+                        // должна быть крупной, как в браузере.
+                        Gap(Шаг(font.Size, font.GetHeight()));
+                        continue;
+                    }
                     var слова = segments[si].Split(' ');
                     for (var wi = 0; wi < слова.Length; wi++)
                     {
@@ -1520,12 +1617,32 @@ public class PdfService
             // рамкой на бумаге была вся расчерчена красным.
             var сетка = XColor.FromArgb(0x97, 0xa2, 0xb2);
             var рамка = string.IsNullOrEmpty(border) ? сетка : ColorOf(border);
-            var верхТаблицы = _y;
+            // Верх таблицы НА ЭТОМ ЛИСТЕ. Раньше он был один на всю таблицу, и у таблицы,
+            // перешедшей на следующий лист, внешняя рамка рисовалась одним прямоугольником от
+            // верха на первом листе до низа на последнем, то есть поперёк всего листа.
+            var верхНаЛисте = _y;
             // Шаг строки в ячейке. Заданный оператором интервал это доля кегля, как unitless
             // line-height на планшете; незаданный это прежние 1.15 высоты шрифта, до последнего
             // знака. Прежде высота строки таблицы была одна и та же при любом интервале.
             var доля = lineHeightPct > 0 ? Math.Clamp(lineHeightPct, 100, 250) / 100.0 : 0;
             double Шаг(XFont f) => доля > 0 ? f.Size * доля : f.GetHeight() * 1.15;
+
+            // Внешняя рамка цветом блока: на экране она обводит таблицу целиком, а не каждую
+            // ячейку. Закрывается на каждом листе своим прямоугольником.
+            void ЗакрытьРамку()
+            {
+                if (string.IsNullOrEmpty(border) || _y - верхНаЛисте <= 0) return;
+                _gfx.DrawRectangle(new XPen(рамка, 1.0), Margin, верхНаЛисте, _contentW, _y - верхНаЛисте);
+                Note("border", Margin, верхНаЛисте, _contentW, _y - верхНаЛисте, border!, color: border!);
+            }
+
+            void НаНовыйЛист()
+            {
+                ЗакрытьРамку();
+                ClearFloat();
+                NewPage();
+                верхНаЛисте = _y;
+            }
 
             for (var ri = 0; ri < rows.Count; ri++)
             {
@@ -1544,46 +1661,100 @@ public class PdfService
                     h = Math.Max(h, строки.Count * Шаг(font));
                 }
                 h += 2 * отступ;
-                Ensure(h);
 
-                double x = Margin;
-                for (var ci = 0; ci < cols; ci++)
+                // Строка рисуется частями, если целиком на лист не влезает. Раньше здесь стояло
+                // одно Ensure(h): оно уводило на новый лист, а строку выше листа рисовало за его
+                // нижним краем, и хвост ячейки пропадал молча. Замер до починки: ячейка из 700
+                // кусков текста, клиент прочитал на планшете все 700, в бумаге оказалось 636,
+                // и ни служба, ни бумага об этом не сказали ни слова. Это ровно то, чего быть
+                // не должно: клиент подписал одно, а в бумаге другое.
+                //
+                // Тот же приём уже применён к плашке блока (см. _boxParts): часть рисуется на
+                // этом листе, остальное продолжается на следующем.
+                var шаг = Шаг(font);
+                var строкВЯчейке = Math.Max(1, разбито.Count == 0 ? 0 : разбито.Max(c => c.Count));
+                var нарисовано = 0;
+
+                // Шапка не остаётся на листе одна. Раньше место резервировалось под неё саму, и
+                // при неудачном стечении шапка печаталась внизу листа, а её строки уезжали на
+                // следующий: на первом листе заголовки столбцов без единой строки под ними, на
+                // втором столбцы значений без заголовков, и по бумаге не понять, что в каком
+                // столбце. На экране такого не бывает никогда: там таблица одна и цельная.
+                //
+                // Считаем высоту шапки вместе с первой строкой данных и просим место сразу под
+                // обе. Тот же приём уже применён к заголовку раздела, который не отрывается от
+                // своего текста.
+                if (шапка && rows.Count > 1)
                 {
-                    var rect = new XRect(x, _y, widths[ci], h);
-                    var заливка = шапка ? "#f1f5f9" : bg;
-                    // Заливка и сетка ячейки сообщаются в раскладку теми же видами, что плашка и
-                    // рамка блока: читающий раскладку разбирает их одним и тем же кодом, и таблица
-                    // не оказывается исключением из общего правила.
-                    if (!string.IsNullOrEmpty(заливка))
+                    var следующая = rows[1] ?? new List<string>();
+                    double hСледующей = 0;
+                    var шрифтДанных = Body;
+                    var шагДанных = Шаг(шрифтДанных);
+                    for (var ci = 0; ci < cols; ci++)
                     {
-                        var цвет = HexOf(ColorOf(заливка));
-                        _gfx.DrawRectangle(new XSolidBrush(ColorOf(заливка)), rect);
-                        Note("box", rect.X, rect.Y, rect.Width, rect.Height, цвет, color: цвет);
+                        var текстЯчейки = ci < следующая.Count ? следующая[ci] ?? "" : "";
+                        var строкиЯчейки = WrapInto(текстЯчейки, шрифтДанных, widths[ci] - 2 * отступ);
+                        hСледующей = Math.Max(hСледующей, строкиЯчейки.Count * шагДанных);
                     }
-                    _gfx.DrawRectangle(new XPen(сетка, 0.6), rect);
-                    Note("border", rect.X, rect.Y, rect.Width, rect.Height, HexOf(сетка), color: HexOf(сетка));
-                    // Лишнее место от заданного межстрочного делится над строкой и под ней, как и
-                    // в обычном абзаце: иначе текст ячейки прижимался бы к её верху.
-                    var шаг = Шаг(font);
-                    var ty = _y + отступ + Math.Max(0, шаг - font.GetHeight() * 1.15) / 2;
-                    foreach (var строка in разбито[ci])
-                    {
-                        _gfx.DrawString(строка, font, XBrushes.Black, new XPoint(x + отступ, ty + font.GetHeight()));
-                        ty += шаг;
-                    }
-                    Note("cell", rect.X, rect.Y, rect.Width, rect.Height,
-                        string.Join(" ", разбито[ci]), font.Size, шапка);
-                    x += widths[ci];
+                    hСледующей += 2 * отступ;
+                    // Просим место под шапку и первую строку разом, но только если обе вместе
+                    // на лист вообще помещаются: иначе бы мы гнали шапку на новый лист впустую.
+                    var вместе = h + hСледующей;
+                    if (вместе <= _pageH - 2 * Margin && _y + вместе > _pageH - Margin) НаНовыйЛист();
                 }
-                _y += h;
+
+                while (true)
+                {
+                    var свободноПодТекст = _pageH - Margin - _y - 2 * отступ;
+                    var влезает = свободноПодТекст > 0 ? (int)Math.Floor(свободноПодТекст / шаг) : 0;
+                    if (влезает <= 0)
+                    {
+                        НаНовыйЛист();
+                        свободноПодТекст = _pageH - Margin - _y - 2 * отступ;
+                        влезает = свободноПодТекст > 0 ? (int)Math.Floor(свободноПодТекст / шаг) : 0;
+                        // На чистом листе одна строка обязана поместиться, иначе круг вечен.
+                        if (влезает <= 0) влезает = 1;
+                    }
+                    var сколько = Math.Min(влезает, строкВЯчейке - нарисовано);
+                    if (сколько <= 0) сколько = 1;
+                    var высотаЧасти = сколько * шаг + 2 * отступ;
+
+                    double x = Margin;
+                    for (var ci = 0; ci < cols; ci++)
+                    {
+                        var rect = new XRect(x, _y, widths[ci], высотаЧасти);
+                        var заливка = шапка ? "#f1f5f9" : bg;
+                        // Заливка и сетка ячейки сообщаются в раскладку теми же видами, что плашка
+                        // и рамка блока: читающий раскладку разбирает их одним и тем же кодом, и
+                        // таблица не оказывается исключением из общего правила.
+                        if (!string.IsNullOrEmpty(заливка))
+                        {
+                            var цвет = HexOf(ColorOf(заливка));
+                            _gfx.DrawRectangle(new XSolidBrush(ColorOf(заливка)), rect);
+                            Note("box", rect.X, rect.Y, rect.Width, rect.Height, цвет, color: цвет);
+                        }
+                        _gfx.DrawRectangle(new XPen(сетка, 0.6), rect);
+                        Note("border", rect.X, rect.Y, rect.Width, rect.Height, HexOf(сетка), color: HexOf(сетка));
+                        // Лишнее место от заданного межстрочного делится над строкой и под ней,
+                        // как и в обычном абзаце: иначе текст ячейки прижимался бы к её верху.
+                        var ty = _y + отступ + Math.Max(0, шаг - font.GetHeight() * 1.15) / 2;
+                        var часть = разбито[ci].Skip(нарисовано).Take(сколько).ToList();
+                        foreach (var строка in часть)
+                        {
+                            _gfx.DrawString(строка, font, XBrushes.Black, new XPoint(x + отступ, ty + font.GetHeight()));
+                            ty += шаг;
+                        }
+                        Note("cell", rect.X, rect.Y, rect.Width, rect.Height,
+                            string.Join(" ", часть), font.Size, шапка);
+                        x += widths[ci];
+                    }
+                    _y += высотаЧасти;
+                    нарисовано += сколько;
+                    if (нарисовано >= строкВЯчейке) break;
+                    НаНовыйЛист();
+                }
             }
-            // Внешний прямоугольник цветом рамки блока: на экране рамка обводит таблицу целиком,
-            // а не каждую ячейку.
-            if (!string.IsNullOrEmpty(border))
-            {
-                _gfx.DrawRectangle(new XPen(рамка, 1.0), Margin, верхТаблицы, _contentW, _y - верхТаблицы);
-                Note("border", Margin, верхТаблицы, _contentW, _y - верхТаблицы, border!, color: border!);
-            }
+            ЗакрытьРамку();
             _y += 8;
         }
 

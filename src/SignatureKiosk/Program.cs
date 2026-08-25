@@ -722,9 +722,14 @@ admin.MapPut("/devices/{id}", async (string id, DeviceUpdateDto dto, KioskCoordi
     // Строка это номер места, пустая строка и присланный null это осознанное «снять с места».
     var местоИзТела = поле.ValueKind == System.Text.Json.JsonValueKind.String ? поле.GetString() : null;
     if (!storage.UpdateDevice(id, dto?.Name, dto?.GroupIds, местоИзТела, touchWorkstation: местоПрислали,
-                              out var местоСменилось))
+                              out var местоСменилось, out var наборыСменились))
         return Results.NotFound();
     if (местоСменилось) await УвестиСМеста(coord, id);
+    // Планшет переехал в другой набор, значит и реклама на нём теперь другая. Он держит выданный
+    // ему список картинок и сам о наборах не знает, поэтому список пересобирается и уходит заново.
+    // Замер до починки: планшет из «Кабинета 1» переведён в «Кабинет 2», админка показывала
+    // список нового кабинета, а на экране планшета оставалась картинка прежнего.
+    if (наборыСменились) await coord.RefreshSlidesAsync(id);
     await coord.NotifyAdminsDevicesAsync();
     return Results.Ok(new { ok = true });
 });
@@ -799,7 +804,6 @@ bool версияПрочитана = false;
 string? ВерсияСтраницыПланшета()
 {
     if (версияПрочитана) return версияСтраницы;
-    версияПрочитана = true;
     try
     {
         var корень = app.Environment.WebRootPath;
@@ -808,7 +812,15 @@ string? ВерсияСтраницыПланшета()
         if (!File.Exists(путь)) return null;
         var найдено = System.Text.RegularExpressions.Regex.Match(
             File.ReadAllText(путь), "APP_VERSION\\s*=\\s*\"([^\"]*)\"");
-        if (найдено.Success && найдено.Groups[1].Value.Length > 0) версияСтраницы = найдено.Groups[1].Value;
+        if (найдено.Success && найдено.Groups[1].Value.Length > 0)
+        {
+            версияСтраницы = найдено.Groups[1].Value;
+            // Запоминаем ТОЛЬКО удачу. Раньше отметка «прочитано» ставилась до чтения, и один
+            // промах (файла ещё нет, права не те, диск занят) означал, что версия неизвестна
+            // навсегда, до перезапуска службы. А неизвестная версия это админка, которая
+            // перестаёт следить за версиями страницы вообще и молчит об этом.
+            версияПрочитана = true;
+        }
     }
     catch
     {
@@ -976,8 +988,30 @@ admin.MapPost("/images", async (HttpRequest req) =>
     return Results.Ok(new { added, skipped });
 });
 
-admin.MapDelete("/images/{id}", (string id, KioskCoordinator coord) =>
+admin.MapDelete("/images/{id}", (string id, KioskCoordinator coord, bool? force) =>
 {
+    // Картинку, которая стоит в документе, удалять нельзя молча. Раньше удаление отвечало
+    // «ок», документ оставался со ссылкой на несуществующий файл, и дальше было тихо со всех
+    // сторон: клиент видел на месте рисунка пустое место, в бумаге рисунка не было, «Проверить
+    // документ» отвечал «Замечаний нет», а показ по API возвращал ok без единого слова.
+    //
+    // Хуже всего то, что беда достаёт задним числом: подписанная запись хранит путь к файлу, а
+    // не сам рисунок, и пересборка утраченного PDF через год отдаёт лист без схемы, под которой
+    // человек расписался.
+    var карточка = storage.GetImages().FirstOrDefault(x => x.Id == id);
+    if (карточка is not null && force != true)
+    {
+        var где = storage.ГдеСтоитКартинка(карточка.FileName);
+        if (где.Count > 0)
+            return Results.Json(new
+            {
+                error = "Картинка стоит в документах: " + string.Join(", ", где.Select(x => "«" + x + "»")) +
+                        ". Удалить её значит оставить там пустое место, о котором никто не скажет " +
+                        "ни клиенту, ни оператору, ни в бумаге. Сначала уберите её из этих документов. " +
+                        "Если решение обдуманное, повторите запрос с ?force=1.",
+                documents = где
+            }, statusCode: StatusCodes.Status409Conflict);
+    }
     if (!storage.DeleteImage(id)) return Results.NotFound();
     // Планшет держит выданный ему список и о том, что файла больше нет, не знает: он показывал
     // бы битую картинку до самой перезагрузки. Список пересобирается и уходит заново.
@@ -1150,10 +1184,24 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
     // Присланный пункт переводится так же, как на пути показа: обязательность только та, о
     // которой сказали явно. Иначе предпросмотр показывал бы звёздочку там, где на планшете её
     // не будет, и обещал бы не тот экран.
+    // Страница, назначенная оператором принимающей пункты из заказа. Нет такой, значит документ
+    // закрыт от дописок, и присланный пункт НЕ показывается: ровно так поступает показ на
+    // планшет. Раньше предпросмотр показывал такой пункт всегда и даже заводил под него
+    // отдельную страницу, а планшет его отбрасывал. Оператор смотрел предпросмотр, видел
+    // присланные пункты и считал, что настроил верно, а клиент их не видел.
+    var страницаПрисланных = DocumentTemplating.СтраницаДляПрисланных(doc);
+    var отброшеноПред = new List<string>();
     foreach (var cb in (dto?.Checkboxes ?? new List<ApiCheckboxDto>()).Where(x => x is not null).Select(x => x.ВПункт()))
     {
         var key = DocumentTemplating.CleanKey(cb.Key);
         if (key.Length > 0 && live.Contains(key)) { states[key] = cb.Checked; continue; }
+        if (страницаПрисланных is null)
+        {
+            отброшеноПред.Add("пункт «" + (key.Length > 0 ? key : (cb.Label ?? "").Trim())
+                + "» не показан: ни одна страница документа не принимает пункты из API. "
+                + "Отметьте нужную страницу в редакторе признаком «чекбоксы из API»");
+            continue;
+        }
         extra.Add(cb);
     }
     var selections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1173,7 +1221,10 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
         missingPlaceholders = DocumentTemplating.Missing(doc, dto?.Fields),
         emptyPlaceholders = DocumentTemplating.Empty(doc, dto?.Fields),
         pagesTotal = (doc.Pages ?? new List<DocPage>()).Count,
-        pagesShown = resolved.Pages.Count
+        pagesShown = resolved.Pages.Count,
+        // То же поле и с тем же смыслом, что у показа на планшет: что из присланного не попало
+        // на экран и почему. Предпросмотр обязан обещать ровно то, что увидит клиент.
+        dropped = отброшеноПред
     });
 });
 

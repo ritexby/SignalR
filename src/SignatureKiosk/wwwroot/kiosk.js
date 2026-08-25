@@ -282,16 +282,9 @@
   // Wipe every trace of the signer session from the tablet when returning to ads.
   function clearDocState() {
     endDocSession();
-    doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {}; doc.picks = {};
-    // Росчерки полей стираются вместе с их картинками. Порознь нельзя: росчерк это и есть
-    // подпись, и оставленный в памяти он вернул бы её следующему клиенту на глаза.
-    doc.signStrokes = {}; doc.signGeom = {};
-    doc.signs = {}; doc.signThumbs = {}; doc.codes = {}; doc.pagePads = {};
-    doc.pad = null; doc.finalInk = ""; doc.finalStrokes = null; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
-    // Вписанное клиентом стирается вместе со всем остальным: заголовок этого куска обещает не
-    // оставить следа, а значения полей ввода тут забыли, и они лежали в памяти планшета до
-    // следующего документа.
-    doc.inputs = {};
+    doc.config = null; doc.screens = []; doc.index = 0;
+    забытьПодписанта();
+    doc.pad = null; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
     // Размер текста уходит вместе с остальным: и ступень, и сам множитель на слое документа, и
     // значок из разметки. Иначе следующий клиент получил бы чужой размер, а на планшете, который
     // вернулся к рекламе, в DOM остался бы след прошлого приёма.
@@ -302,7 +295,50 @@
     el.docTitle.textContent = ""; el.docProgress.textContent = "";
   }
 
+  /// Стереть из памяти планшета всё, что клиент ответил или нарисовал.
+  ///
+  /// Названо отдельно, потому что звать это надо из двух мест: при возврате к рекламе и на
+  /// экране прощания. Раньше стирание было только в первом, а на прощании чистились лишь
+  /// заголовок, документ и отметки. Замер: после подписи в памяти планшета оставались вписанный
+  /// телефон, выбранный вариант, росчерк поля, его картинка и уменьшенная копия, и всё это
+  /// уезжало оператору, если тот открывал наблюдение уже после ухода человека. Жило это до
+  /// срабатывания таймера прощания, то есть до минуты.
+  ///
+  /// Пояснение к экрану прощания при этом обещает обратное: данные стираются, как только
+  /// подписание закончено.
+  function забытьПодписанта() {
+    doc.checks = {}; doc.picks = {};
+    // Росчерки полей стираются вместе с их картинками. Порознь нельзя: росчерк это и есть
+    // подпись, и оставленный в памяти он вернул бы её следующему клиенту на глаза.
+    doc.signStrokes = {}; doc.signGeom = {};
+    doc.signs = {}; doc.signThumbs = {}; doc.codes = {}; doc.pagePads = {};
+    doc.finalInk = ""; doc.finalStrokes = null;
+    // Вписанное клиентом стирается вместе со всем остальным.
+    doc.inputs = {};
+  }
+
+  /// Была ли уже хоть одна команда от службы с момента загрузки страницы. Нужно, чтобы отличить
+  /// «оператор прислал документ» от «страница перезагрузилась, пока клиент подписывал».
+  var перваяКомандаПослеЗагрузки = true;
+
   function checkKey(page, idx) { return "p" + page + "_c" + idx; }
+
+  /// Одно ли это имя. Сравнение без учёта регистра и с обрезкой краёв, как на сервере.
+  ///
+  /// Служба всюду сравнивает имена элементов без регистра: и в LiveKeys, и в ApplyLiveConditions,
+  /// и при приёме отметок, и при приёме подписи, и внешним системам это обещано в справке API.
+  /// Планшет же сравнивал строки точно, и условие с именем в другом написании служба признавала
+  /// живым и отправляла сюда, а здесь оно не находило своего элемента.
+  ///
+  /// Замер до починки: восемь расхождений в обе стороны. Блок под «SOGLASIE eq true» на экране
+  /// не показан, а в бумаге напечатан; блок под «SOGLASIE empty» показан на экране и пропал из
+  /// бумаги. Целая страница под таким условием не показывалась клиенту и целиком попадала в
+  /// подписанный лист. Обязательный пункт под таким условием делал документ неподписываемым:
+  /// планшет пункт не показывал, а служба требовала его заполнить.
+  function тоЖеИмя(своё, искомое) {
+    return String(своё == null ? "" : своё).trim().toLowerCase()
+        === String(искомое == null ? "" : искомое).trim().toLowerCase();
+  }
 
   // Условие, которое сервер не смог решить сам, потому что оно зависит от того, что клиент
   // отмечает прямо сейчас. Сервер уже убрал всё, что решается по тегам, поэтому сюда доходят
@@ -332,36 +368,38 @@
     // имени получался разный: на экране одно, в записи другое.
     (doc.config.pages || []).forEach(function (p, pi) {
       (p.checkboxes || []).forEach(function (cb, ci) {
-        if (!cb || cb.key !== key) return;
+        if (!cb || !тоЖеИмя(cb.key, key)) return;
         нашли = true;
         found = (видноЛи("c" + pi + "_" + ci, cb.visibleWhen, p.visibleWhen)
           && doc.checks[checkKey(pi, ci)]) ? "true" : "false";
       });
       (p.groups || []).forEach(function (g, gi) {
-        if (!g || g.key !== key) return;
+        if (!g || !тоЖеИмя(g.key, key)) return;
         нашли = true;
-        found = видноЛи("g" + pi + "_" + gi, g.visibleWhen, p.visibleWhen) ? (doc.picks[key] || "") : "";
+        // Значение берётся по СОБСТВЕННОМУ имени элемента, а не по имени из условия: они могут
+        // различаться регистром, и тогда элемент нашёлся бы, а значение прочиталось из пустоты.
+        found = видноЛи("g" + pi + "_" + gi, g.visibleWhen, p.visibleWhen) ? (doc.picks[g.key] || "") : "";
       });
       (p.inputs || []).forEach(function (inp, ii) {
-        if (!inp || inp.key !== key) return;
+        if (!inp || !тоЖеИмя(inp.key, key)) return;
         нашли = true;
         found = видноЛи("i" + pi + "_" + ii, inp.visibleWhen, p.visibleWhen)
-          ? String(doc.inputs[key] != null ? doc.inputs[key] : (inp.value || "")) : "";
+          ? String(doc.inputs[inp.key] != null ? doc.inputs[inp.key] : (inp.value || "")) : "";
       });
       // Имена полей подписи и сканирования тоже живые: сервер объявляет их такими и отдаёт
       // условие планшету. Значения для них планшет раньше не производил вовсе, и условие
       // «код отсканирован» не срабатывало ни разу, а обратное держалось всегда.
       (p.signatures || []).forEach(function (sg, si) {
-        if (!sg || sg.key !== key) return;
+        if (!sg || !тоЖеИмя(sg.key, key)) return;
         нашли = true;
         // Спрашивается росчерк: он и есть подпись. Картинка рядом с ним лишь его отпечаток.
         found = (видноЛи("s" + pi + "_" + si, sg.visibleWhen, p.visibleWhen)
-          && (doc.signStrokes[key] || []).length) ? "подписано" : "";
+          && (doc.signStrokes[sg.key] || []).length) ? "подписано" : "";
       });
       (p.scans || []).forEach(function (sc, ni) {
-        if (!sc || sc.key !== key) return;
+        if (!sc || !тоЖеИмя(sc.key, key)) return;
         нашли = true;
-        var код = doc.codes[key];
+        var код = doc.codes[sc.key];
         found = (видноЛи("n" + pi + "_" + ni, sc.visibleWhen, p.visibleWhen) && код) ? (код.code || "") : "";
       });
     });
@@ -502,9 +540,14 @@
       var n = числоИз(val);
       if (n === null) return false;
       if (cond.op === "numin") {
+        // Пустой край это «без предела», как у промежутка дат. Раньше требовались обе границы,
+        // и «5..» не выполнялся ни при каком значении.
         var гр = target.split("..");
         var a = числоИз(гр[0]), b = числоИз(гр.length > 1 ? гр[1] : "");
-        return a !== null && b !== null && n >= a && n <= b;
+        if (a === null && b === null) return false;
+        if (a !== null && n < a) return false;
+        if (b !== null && n > b) return false;
+        return true;
       }
       var lim = числоИз(target);
       if (lim === null) return false;
@@ -577,10 +620,10 @@
           // пункта не считалась зависимостью: экран не перерисовывался, и блок, открытый счётом
           // отметок, на планшете не появлялся, хотя в записи и в бумаге он был.
           if (part.op === "minchecked") {
-            String(part.field || "").split(",").forEach(function (x) { if (x.trim() === key) uses = true; });
+            String(part.field || "").split(",").forEach(function (x) { if (тоЖеИмя(x, key)) uses = true; });
             return;
           }
-          if (part.field === key) uses = true;
+          if (тоЖеИмя(part.field, key)) uses = true;
         });
       });
     }
@@ -1203,6 +1246,12 @@
         box.appendChild(li);
       });
       if (!box.childNodes.length) return;
+      // Выравнивание списка планшет не выполнял вовсе, а бумага выполняла: оператор задавал
+      // «по правому краю», клиент видел список слева, а в подписанном листе он стоял справа.
+      // Замер: на планшете textAlign «start» и правый край пункта на 164 при ширине 800, в
+      // бумаге правый край 544.9 при правом поле 545.
+      var выравн = String((b && b.align) || "").toLowerCase();
+      if (выравн === "center" || выравн === "right" || выравн === "justify") box.style.textAlign = выравн;
       styleBox(box, b);
       parent.appendChild(box); return;
     }
@@ -1233,7 +1282,18 @@
           ? "0 " + зазор + "px " + зазор + "px 0"
           : "0 0 " + зазор + "px " + зазор + "px";
       }
-      var im = document.createElement("img"); im.src = b.imageUrl;
+      var im = document.createElement("img");
+      // Рисунка может не оказаться: его удалили из библиотеки, а документ остался со ссылкой.
+      // Раньше клиент видел на этом месте пустоту и подписывал документ, не зная, что схемы,
+      // плана или бланка в нём не хватает. Теперь на месте рисунка стоят слова, и молчаливой
+      // потери нет: то же самое печатается и в бумаге.
+      im.onerror = function () {
+        var вместо = document.createElement("div");
+        вместо.className = "doc-image-missing";
+        вместо.textContent = "Рисунок не отображается. Обратитесь к сотруднику, прежде чем подписывать.";
+        if (im.parentNode) im.parentNode.replaceChild(вместо, im);
+      };
+      im.src = b.imageUrl;
       var w = Math.min(Math.max(parseInt(b.imageWidth, 10) || 100, 10), 100);
       im.style.width = (wrap === "left" || wrap === "right") ? "100%" : (w + "%");
       fig.appendChild(im); parent.appendChild(fig);
@@ -1910,7 +1970,10 @@
     el.docTitle.textContent = "";
     doc.config = { thankYouText: thanks, thankYouRuns: runs, thankYouBlocks: blocks,
       thankYouAlign: align, thankYouSec: держать, pages: [] };
-    doc.checks = {};
+    // Ответы клиента стираются прямо здесь, а не через минуту, когда планшет вернётся к рекламе.
+    // Блоки прощания уже посчитаны выше и условий на себе не несут, поэтому стирать безопасно.
+    // Экран прощания личных данных не показывает: он собран оператором.
+    забытьПодписанта();
     var body = document.createElement("div");
     body.className = "thankyou";
     var mark = document.createElement("div"); mark.className = "mark"; body.appendChild(mark);
@@ -2091,7 +2154,12 @@
       (page.inputs || []).forEach(function (inp) {
         if (!inp || !condHolds(inp.visibleWhen)) return;
         var v = String(doc.inputs[inp.key] != null ? doc.inputs[inp.key] : (inp.value || "")).trim();
-        if (!v.length) return;
+        // Пустое значение тоже сообщается. Раньше пустое поле просто не попадало в запись, и
+        // «клиент видел поле и оставил его пустым» становилось неотличимо от «поля ему не
+        // показывали». Хуже того, на бумаге вместо пустого печаталось значение, присланное
+        // заказом, то есть ровно то, что клиент своими руками стёр. Замер: две бумаги, одна
+        // после стирания телефона и адреса, другая где клиент ничего не трогал, совпали буква
+        // в букву, а записи разошлись полностью.
         out.push({ key: inp.key || "", label: inp.label || "", value: v });
       });
     });
@@ -2126,6 +2194,16 @@
   function submitSignature() {
     if (doc.submitting || !doc.pad || doc.pad.isEmpty()) return;
     doc.submitting = true;
+    // Таймер возврата к рекламе останавливается на время отправки. Человек, который расписался
+    // и нажал кнопку, бездействующим не является, а таймер этого не знал и добивал сессию, пока
+    // запрос был в пути. Замер: возврат через 2 секунды, отправка задержана на 5; записи не
+    // появилось, планшет ушёл к рекламе, нарисованная подпись пропала, и клиенту не сказали
+    // ничего. Отдельно тот же таймер стирал и подсказку «Нажмите ПОДПИСАТЬ ещё раз» вместе с
+    // самой кнопкой: выполнить собственную просьбу планшета было нечем.
+    //
+    // Обратно таймер взводится только там, где кнопка возвращается клиенту, то есть в ветках
+    // поправимого отказа ниже.
+    stopIdle();
     var session = doc.session;     // this signing session; abandon the callbacks if it changed
     updateFooter();
     // One id per signing session: if the response is lost and the signer presses ПОДПИСАТЬ again,
@@ -2189,6 +2267,9 @@
         // 401, 403 и 409 от повтора не изменятся: там кнопка остаётся выключенной.
         if (err.status === 400) {
           doc.submitting = false;
+          // Кнопка вернулась клиенту, значит и таймер бездействия снова уместен: человек опять
+          // что-то делает, а не ждёт ответа службы.
+          startIdle();
           var текст = note ? note.textContent : "";
           updateFooter();
           if (note) note.textContent = текст;
@@ -2196,6 +2277,7 @@
         return;
       }
       doc.submitting = false;
+      startIdle();                                  // кнопка вернулась, таймер снова уместен
       updateFooter();                               // re-enable the button first...
       if (note) note.textContent = "Не удалось отправить: нет связи с сервером. Нажмите ПОДПИСАТЬ ещё раз."; // ...then show the error so it is not wiped
     });
@@ -2479,9 +2561,32 @@
         if (activeLayer !== "scan") { showLayer("document"); renderScreen(); startIdle(); }
         return;
       }
+      // Страница перезагрузилась посреди подписания. Отличаем от обычного показа так: это
+      // первая команда после загрузки страницы, а документ на планшете лежит уже не первую
+      // секунду. Значит клиент что-то заполнял, и оно пропало: планшет между загрузками ничего
+      // не хранит.
+      //
+      // Молчать нельзя. Клиент оказывается на первой странице, внизу пусто, и он не понимает,
+      // что случилось с тем, что он уже отметил. А случается это не редко: «Обновить страницу»
+      // есть кнопкой у оператора, действием расписания и шагом автолечения.
+      //
+      // Заполненное не восстанавливается намеренно: держать ответы клиента на планшете между
+      // загрузками значило бы оставлять их там и после его ухода, а это противоречит правилу,
+      // по которому данные подписанта уходят с планшета сразу.
+      var потеряноПриПерезагрузке = перваяКомандаПослеЗагрузки
+        && (cmd.shownSecondsAgo || 0) >= 5;
+      перваяКомандаПослеЗагрузки = false;
       applyDocument(cmd.document, cmd.sessionId);
+      if (потеряноПриПерезагрузке) {
+        var подсказка = el.footerNote || document.getElementById("footerNote");
+        if (подсказка) {
+          подсказка.textContent = "Страница обновилась. То, что вы уже отмечали и вписывали, "
+            + "не сохранилось: пожалуйста, заполните документ заново.";
+          подсказка.classList.add("note-warn");
+        }
+      }
     }
-    else applySlides(cmd.slides);
+    else { перваяКомандаПослеЗагрузки = false; applySlides(cmd.slides); }
   }
 
   // ==================================================================
@@ -2544,7 +2649,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "7.6";
+  var APP_VERSION = "8.0";
 
   // ==================================================================
   // Размер экрана планшета

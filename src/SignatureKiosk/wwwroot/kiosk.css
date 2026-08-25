@@ -373,3 +373,29 @@ h2 { clear: both; }
    же человек тем же зрением. Кнопки навигации в подвале остаются прежними: они и так под палец,
    а их рост выдавил бы с экрана то, ради чего клиент сюда пришёл. */
 .check-all, .page-sign-clear, .page-scan-btn { font-size: calc(clamp(1rem, 2.2vw, 1.2rem) * var(--doc-scale)); }
+
+/* Место пропавшего рисунка. Видно и на расстоянии, и понятно, что делать: подписывать документ,
+   в котором чего-то не хватает, клиент не должен. Цвет предупреждающий, но не тревожный: это не
+   поломка планшета, а недостача в документе. */
+.doc-image-missing {
+  padding: 14px 16px;
+  margin: 8px 0;
+  border: 2px dashed #b45309;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #7c2d12;
+  font-size: 1.05em;
+  line-height: 1.4;
+}
+
+/* Подсказка внизу экрана, когда что-то пошло не так и клиент должен это заметить. Цвет
+   предупреждающий, но не тревожный: планшет не сломан, просто заполнять придётся заново. */
+.footer-note.note-warn {
+  color: #7c2d12;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 1.05em;
+  line-height: 1.35;
+}

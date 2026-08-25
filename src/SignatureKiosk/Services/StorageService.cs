@@ -137,8 +137,13 @@ public class StorageService
         // Плотность округляется до сотых: дальше идут только погрешности вычисления масштаба, а
         // из-за них планшет сообщал бы «изменение» на ровном месте и заставлял все открытые
         // админки перечитывать список планшетов.
-        var ratio = double.IsNaN(pixelRatio) || double.IsInfinity(pixelRatio) || pixelRatio <= 0 || pixelRatio > 20
-            ? 1d
+        // Негодная плотность означает «неизвестно», а не единицу. Раньше сюда подставлялась
+        // единица, и карточка планшета уверенно писала «плотность 1» и считала по ней число
+        // пикселей: выдуманное число, поданное как измеренное. Поле необязательное, и пусто в
+        // нём уже значит «неизвестно», ровно как у ширины и высоты у планшета на старой
+        // странице. Числа, которых мы не знаем, показывать нельзя.
+        double? ratio = double.IsNaN(pixelRatio) || double.IsInfinity(pixelRatio) || pixelRatio <= 0 || pixelRatio > 20
+            ? null
             : Math.Round(pixelRatio, 2, MidpointRounding.AwayFromZero);
         lock (_lock)
         {
@@ -166,16 +171,25 @@ public class StorageService
     /// зря уведённый экран это оборванное подписание у живого человека.
     /// </param>
     public bool UpdateDevice(string id, string? name, List<string>? groupIds, string? workstationId,
-                             bool touchWorkstation, out bool местоСменилось)
+                             bool touchWorkstation, out bool местоСменилось, out bool наборыСменились)
     {
         местоСменилось = false;
+        наборыСменились = false;
         lock (_lock)
         {
             var list = ReadOr(DevicesPath, () => new List<Device>());
             var dev = list.FirstOrDefault(d => d.Id == id);
             if (dev == null) return false;
             if (!string.IsNullOrWhiteSpace(name)) dev.Name = name!.Trim();
-            if (groupIds != null) dev.GroupIds = groupIds;
+            if (groupIds != null)
+            {
+                // Наборы решают, какая реклама доходит до этого планшета. Смена набора это переезд
+                // в другой кабинет, и о ней надо сказать наружу: планшет держит выданный ему
+                // список картинок и сам о наборах не знает.
+                наборыСменились = !dev.GroupIds.OrderBy(x => x, StringComparer.Ordinal)
+                    .SequenceEqual(groupIds.OrderBy(x => x, StringComparer.Ordinal), StringComparer.Ordinal);
+                dev.GroupIds = groupIds;
+            }
             if (touchWorkstation)
             {
                 var новое = string.IsNullOrWhiteSpace(workstationId) ? null : workstationId;
@@ -594,6 +608,43 @@ public class StorageService
     }
 
     // ---------------- Images ----------------
+
+    /// <summary>
+    /// В каких документах библиотеки стоит эта картинка. Отдаются названия для человека, а не
+    /// внутренние номера: список показывается оператору в отказе на удаление.
+    /// </summary>
+    /// <remarks>
+    /// Ссылка в блоке хранится как «/media/имя-файла», а иногда с запросом на конце. Поэтому
+    /// сравнивается имя файла, а не строка целиком.
+    /// </remarks>
+    public List<string> ГдеСтоитКартинка(string? имяФайла)
+    {
+        var файл = (имяФайла ?? "").Trim();
+        var где = new List<string>();
+        if (файл.Length == 0) return где;
+        lock (_lock)
+        {
+            foreach (var info in ЧитатьСписокNoLock())
+            {
+                var док = GetDocumentNoLock(info.Id);
+                if (док is null) continue;
+                var нашлось = false;
+                foreach (var стр in док.Pages ?? new List<DocPage>())
+                {
+                    foreach (var б in стр.Blocks ?? new List<DocBlock>())
+                    {
+                        var url = (б?.ImageUrl ?? "").Trim();
+                        if (url.Length == 0) continue;
+                        var имя = url.Split('?')[0].Split('/').LastOrDefault() ?? "";
+                        if (string.Equals(имя, файл, StringComparison.OrdinalIgnoreCase)) { нашлось = true; break; }
+                    }
+                    if (нашлось) break;
+                }
+                if (нашлось) где.Add(ИмяДляСписка(док.Title, info.Name, info.Code));
+            }
+        }
+        return где;
+    }
 
     public List<ImageInfo> GetImages()
     {
@@ -1619,6 +1670,24 @@ public class StorageService
     }
 
     /// <summary>Записать итог запуска правила, не трогая остальные его поля.</summary>
+    /// <summary>
+    /// Записать итог у правила, НЕ трогая дату суточного пуска. Нужно для пуска вручную: оператор
+    /// должен видеть, чем кончилось, и после перезагрузки страницы, но такой пуск не должен
+    /// съедать сегодняшний выход правила по времени.
+    /// </summary>
+    public void MarkScheduleResult(string id, string result)
+    {
+        lock (_lock)
+        {
+            var store = ReadOr(SchedulePath, () => new ScheduleStore());
+            var rule = (store.Rules ?? new List<ScheduleRule>()).FirstOrDefault(r => r.Id == id);
+            if (rule is null) return;
+            rule.LastRunUtc = DateTime.UtcNow;
+            rule.LastResult = result.Length > 300 ? result[..300] : result;
+            Write(SchedulePath, store);
+        }
+    }
+
     public void MarkScheduleRun(string id, string localDate, string result)
     {
         lock (_lock)
