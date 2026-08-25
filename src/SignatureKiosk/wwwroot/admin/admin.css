@@ -447,7 +447,6 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .pv-input-field { width: 100%; box-sizing: border-box; padding: 10px 12px; font-size: 1rem;
   border: 1.5px solid var(--field-line); border-radius: 9px; background: #fff; color: var(--text); }
 .pv-input-field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(21,128,61,.14); }
-.watch-value { font-weight: 600; color: var(--text); padding: 4px 0; }
 /* Подпись и сканирование в предпросмотре: видно место, которое они займут на планшете. */
 .pv-inline-sign, .pv-inline-scan { display: flex; flex-direction: column; gap: 8px; padding: 12px;
   border: 2px solid #e5e7eb; border-radius: 12px; background: #fff; margin: 4px 0; }
@@ -1016,54 +1015,169 @@ body.dragging-now .topbar { pointer-events: none; }
 .opt-default { display: inline-flex; align-items: center; gap: 4px; font-size: .82rem; color: var(--muted); white-space: nowrap; }
 
 /* ---- Наблюдение за экраном планшета ---- */
-/* Окно только для просмотра: ни одной кнопки, меняющей что-либо, здесь нет. */
+/* Окно только для просмотра: ни одной кнопки, меняющей что-либо, здесь нет.
+   Устройство окна: шапка с именем планшета и площадка, на которой лежит сцена. Сцена это копия
+   экрана планшета: её размер в точках равен настоящему экрану, а к окну оператора она подогнана
+   одним множителем. Пропорция сцены принадлежит планшету и от размера окна не зависит. */
 .watch { display: flex; flex-direction: column; gap: 10px; }
 .watch-head { display: flex; align-items: center; gap: 10px; }
 .watch-head h3 { margin: 0; }
-.watch-live { font-size: .78rem; color: #fff; background: var(--accent); border-radius: 999px; padding: 2px 10px; }
-/* Размер экрана планшета: не украшение, а объяснение, почему у клиента текст переносится
-   иначе, чем в редакторе. */
-.watch-size { font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums;
-  border: 1px solid #b8c2d1; border-radius: 999px; padding: 2px 10px; }
-.watch-live::before { content: "●"; margin-right: 5px; animation: watch-pulse 1.6s infinite; }
+.watch-name { font-size: 1rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watch-place { font-size: .84rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watch-live { font-size: .78rem; color: #fff; background: var(--accent); border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+.watch-live::before { content: "\25CF"; margin-right: 5px; animation: watch-pulse 1.6s infinite; }
 @keyframes watch-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-.watch-frame { background: #f1f3f6; border: 1px solid #b8c2d1; border-radius: 12px; padding: 14px;
-  max-height: calc(100vh - 260px); overflow: auto; }
-/* Рамка подогнанной копии: содержимое внутри свёрстано по настоящей ширине планшета и
-   уменьшено масштабом, поэтому лишнее прячем, а высоту рамке задаёт код. */
-.watch-frame-scaled { overflow: hidden; padding: 1px; }
-.watch-frame-scaled .watch-screen { border-radius: 0; box-shadow: none; border: 1px solid #b8c2d1; }
-/* Размер текста внутри копии приходит числом от ширины планшета: доли ширины окна тут
-   считались бы от окна оператора и давали чужие переносы. */
-.watch-screen { --pv-doc-text: 1.05rem; }
-/* Всё, что на планшете набрано кеглем текста документа, в наблюдении получает тот же кегль,
-   пересчитанный от настоящей ширины планшета. Списки, ячейки таблиц и заголовки страниц тут
-   раньше забыли, и в окне наблюдения строки ломались не там, где у клиента. */
-.watch-screen .pv-text, .watch-screen .watch-label, .watch-screen .pv-group-title,
-.watch-screen .pv-inline-title,
-.watch-screen .pv-list li, .watch-screen .pv-table th, .watch-screen .pv-table td { font-size: var(--pv-doc-text); }
-/* Заголовок страницы на планшете задан долей ширины окна: 2.6vw с потолком. Пересчитываем
-   так же, от ширины планшета, а не от ширины окна оператора. */
-.watch-screen .pv-heading { font-size: calc(var(--pv-doc-text) * 1.28); }
-.watch-screen { background: #fff; border-radius: 12px; padding: 18px 20px; min-height: 260px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, .08); }
-.watch-note { color: var(--muted); text-align: center; padding: 40px 0; }
-.watch-bar { display: flex; justify-content: space-between; gap: 12px; font-size: .85rem; color: var(--muted);
-  border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 12px; }
-.watch-title { font-weight: 600; color: var(--fg, #1a1c22); }
-.watch-check { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; }
-.watch-box { flex: 0 0 auto; width: 22px; height: 22px; border: 2px solid var(--field-line); border-radius: 6px;
-  display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; }
+/* Планшет не сообщил размер своего экрана. Не украшение: без этой строки оператор считал бы
+   пропорцию окна настоящей формой планшета, а она взята обычная. */
+.watch-unknown { font-size: .78rem; color: #9a5b00; background: #fff4e0; border: 1px solid #f0c98a;
+  border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+
+/* Масштаб сцены. Значки, а не кнопки: кнопка в этом окне читается как действие над планшетом. */
+.watch-zoom { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+.watch-zoom-act { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 7px; color: var(--muted); text-decoration: none;
+  font-size: .95rem; line-height: 1; background: #fff; }
+.watch-zoom-act:hover { color: var(--text); border-color: var(--field-line); }
+
+/* Площадка под сцену: всё, что осталось от окна. Сцена стоит по её середине. */
+.watch-stage { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center;
+  padding: 8px; overflow: hidden; }
+/* Рамка обрезана точно по сцене: её размер задаёт код, и пустых полей внутри не остаётся. */
+.watch-frame { background: #fff; border: 1px solid #b8c2d1; border-radius: 8px; overflow: hidden;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .10); flex: 0 0 auto; }
+
+/* Сама сцена. Размеры её букв и полей приходят числами от настоящей ширины планшета: доли
+   ширины окна (vw) тут считались бы от окна оператора и давали бы чужие переносы. Значения по
+   умолчанию нужны только до первого расчёта. */
+.watch-screen { position: relative; overflow: hidden; background: #f5f6f8; color: #1a1c22;
+  --wt-base: 16px; --wt-text: 17.6px; --wt-h1: 25.6px; --wt-h2: 20.8px; --wt-thanks: 24px;
+  --wt-btn: 17.6px; --wt-pad: 24px; --wt-box: 30px; --wt-ink: 520px; --wt-ink-page: 460px;
+  --wt-scan: 560px; --wt-line: 1.45; }
+.watch-note { color: var(--muted); text-align: center; padding: 40px 20px; }
+
+/* Экран документа: те же части и в том же порядке, что на планшете (kiosk.css, .doc-frame). */
+.wt-frame { position: absolute; inset: 0; display: flex; flex-direction: column;
+  max-width: 960px; margin: 0 auto; padding: var(--wt-pad); font-size: var(--wt-base); }
+.wt-head { border-bottom: 2px solid #e5e7eb; padding-bottom: 14px; margin-bottom: 8px; }
+.wt-doc-title { font-size: var(--wt-h1); margin: 0 0 10px; font-weight: 700; line-height: 1.2; }
+/* Служебная строка планшета: множителем «крупнее» она не управляется, поэтому размер прямой. */
+.wt-progress { color: #5a6473; font-size: 16px; }
+.wt-body { flex: 1; overflow: hidden; padding: 18px 4px; display: flex; flex-direction: column; }
+/* Содержимое лежит одним обычным блоком внутри колонки: ровно как на планшете. В колонке
+   отступы соседей не схлопываются, а в обычном блоке схлопываются, и от этого зависит, где
+   окажется каждый пункт. */
+.wt-page { display: block; }
+.wt-body, .wt-body .pv-text, .wt-body .pv-heading, .watch-label, .wt-doc-title {
+  overflow-wrap: anywhere; word-break: break-word; }
+
+/* Нижняя панель планшета. Это её изображение, а не кнопки: нажать здесь нельзя ничего. */
+.wt-foot { border-top: 2px solid #b8c2d1; padding-top: 16px; display: flex; gap: 14px;
+  justify-content: space-between; align-items: center; }
+.wt-foot-empty { border-top: none; padding-top: 0; }
+.wt-btn { border-radius: 12px; padding: 16px 26px; font-size: var(--wt-btn); font-weight: 600;
+  min-width: 130px; text-align: center; user-select: none; }
+.wt-btn-primary { background: #15803d; color: #fff; }
+.wt-btn-sign { background: #15803d; color: #fff; }
+.wt-btn-ghost { background: #e5e7eb; color: #374151; }
+.wt-btn-off { opacity: .7; }
+.wt-btn-wait { opacity: .72; }
+.wt-note { color: #b91c1c; font-size: 15.2px; text-align: center; flex: 1; }
+.wt-check-all { align-self: flex-start; min-width: 0; padding: 10px 16px; margin-bottom: 10px;
+  font-size: var(--wt-text); }
+
+/* Пункты согласия. Подряд идущие собраны в один блок с тесным отступом, как на планшете. */
+.wt-checks { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.watch-check { display: flex; align-items: flex-start; gap: 16px; background: #fff;
+  border: 2px solid var(--field-line); border-radius: 14px; padding: 16px 18px; }
+.watch-check.on { border-color: var(--accent); background: #e7f7ee; }
+.watch-box { flex: 0 0 auto; width: var(--wt-box); height: var(--wt-box); margin-top: 2px;
+  border: 2px solid var(--field-line); border-radius: 6px; display: flex; align-items: center;
+  justify-content: center; color: #fff; font-weight: 700; font-size: calc(var(--wt-box) * .62);
+  background: #fff; line-height: 1; }
 .watch-check.on .watch-box { background: var(--accent); border-color: var(--accent); }
-.watch-check.miss .watch-box { border-color: var(--danger, #dc2626); }
-.watch-check.miss .watch-label { color: var(--danger, #dc2626); }
-.watch-ink { border: 1px dashed var(--line); border-radius: 10px; min-height: 90px; padding: 8px;
-  display: flex; align-items: center; justify-content: center; background: #fcfcfd; }
-.watch-ink img { max-width: 100%; max-height: 200px; }
-.watch-scan { text-align: center; padding: 40px 10px; }
-.watch-scan-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 6px; }
-.watch-code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 1.05rem; font-weight: 600;
-  background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 8px 12px; display: inline-block; margin-top: 10px; }
+.watch-label { font-size: var(--wt-text); line-height: var(--wt-line); }
+/* Звёздочка обязательного пункта: на планшете она красная (kiosk.css, .check .req). Без этого
+   правила она наследовала цвет текста, и обязательный пункт у оператора ничем не отличался от
+   необязательного, хотя у клиента отличается. */
+.watch-screen .watch-check .req { color: #b91c1c; font-weight: 600; margin-left: 2px; }
+
+/* Всё, что на планшете набрано кеглем текста документа, получает тот же кегль, пересчитанный от
+   настоящей ширины планшета: абзацы, пункты, заголовки групп, подписи полей, списки и ячейки. */
+.watch-screen .pv-text, .watch-screen .pv-group-title, .watch-screen .pv-inline-title,
+.watch-screen .pv-list li, .watch-screen .pv-table th, .watch-screen .pv-table td,
+.watch-screen .watch-value { font-size: var(--wt-text); line-height: var(--wt-line); }
+/* Общие отступы предпросмотра снимаются целиком, а ниже каждому виду задаётся тот отступ,
+   который стоит у него на планшете. Правило идёт первым намеренно: вес у него тот же, и стой
+   оно ниже, оно съело бы всё, что задано следом. */
+.watch-screen .pv-body > * { margin-bottom: 0; }
+.watch-screen .pv-heading { font-size: var(--wt-h2); margin: 0 0 14px; font-weight: 700; }
+.watch-screen .pv-text { white-space: pre-wrap; margin: 0 0 22px; background: none; }
+.watch-screen .pv-group { margin: 18px 0 6px; display: block; }
+.watch-screen .pv-group-title { font-weight: 700; margin: 0 0 8px; }
+.watch-screen .pv-group-options { display: flex; flex-direction: row; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+.watch-screen .pv-group-options .watch-check { flex: 1 1 140px; padding: 12px 14px; }
+.watch-screen .pv-group-options .watch-check.on { background: rgba(37, 99, 235, .06); }
+.watch-screen .pv-group-options .watch-label { font-weight: 600; }
+.watch-screen .pv-divider { border-top: 1px solid #808080; margin: 14px 0; }
+.watch-screen .pv-list { margin: 8px 0 8px 22px; padding: 0; }
+.watch-screen .pv-list li { margin: 4px 0; }
+.watch-screen .pv-table-wrap { overflow: hidden; margin: 10px 0; }
+.watch-screen .pv-table th, .watch-screen .pv-table td { border: 1px solid #97a2b2; padding: 8px 10px; }
+.watch-screen .pv-table th { background: #f1f5f9; font-weight: 700; }
+.watch-screen .pv-image { margin: 0 0 22px; }
+.watch-screen .pv-inline-sign, .watch-screen .pv-inline-scan, .watch-screen .pv-inline-input {
+  background: #fff; border: 2px solid var(--field-line); border-radius: 14px; padding: 16px;
+  margin: 18px 0; display: flex; flex-direction: column; gap: 12px; }
+.watch-screen .pv-inline-title { font-weight: 700; }
+.watch-value { font-weight: 600; color: var(--text); padding: 4px 0; }
+
+/* Экран подписи стоит по середине высоты, как на планшете: клиент подписывает на весу. */
+.wt-sign-screen { flex: 1; min-height: 100%; display: flex; flex-direction: column;
+  justify-content: center; gap: 4px; }
+.wt-sign-prompt { font-size: var(--wt-text); line-height: var(--wt-line); margin-bottom: 16px; text-align: center; }
+.wt-sign-custom { text-align: center; max-width: 820px; width: 100%; margin: 0 auto 16px; }
+.wt-sign-custom:empty { display: none; margin: 0; }
+.watch-ink { background: #fff; border: 2px dashed #9aa3b2; border-radius: 16px; position: relative;
+  height: var(--wt-ink); width: 100%; max-width: 820px; margin: 0 auto;
+  display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.watch-ink img { max-width: 100%; max-height: 100%; }
+.watch-screen .pv-inline-sign .watch-ink { height: 190px; }
+.watch-screen .wt-page-sign .pv-inline-sign .watch-ink { height: var(--wt-ink-page); }
+.watch-screen .wt-page-scan .pv-inline-scan { min-height: var(--wt-ink-page); }
+
+/* Экран прощания: тот же зелёный кружок с галочкой, что видит клиент. */
+.wt-thanks { height: 100%; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center; gap: 22px; }
+.wt-thanks-mark { width: 104px; height: 104px; border-radius: 50%; background: #15803d;
+  position: relative; box-shadow: 0 10px 28px rgba(21, 128, 61, .35); flex: 0 0 auto; }
+.wt-thanks-mark::after { content: ""; position: absolute; left: 50%; top: 47%; width: 26px; height: 50px;
+  border: solid #fff; border-width: 0 8px 8px 0; transform: translate(-50%, -50%) rotate(45deg); }
+.wt-thanks-title { font-size: var(--wt-thanks); margin: 0; font-weight: 700; }
+
+/* Экран сканирования. Камера у оператора не открывается никогда и разрешения не спрашивает:
+   на месте окна камеры стоит подпись словами, а место она занимает то же, что и у клиента. */
+.wt-mode-scan { background: #000; color: #fff; }
+.wt-scan { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 18px; padding: 20px; }
+.wt-scan-title { font-size: var(--wt-h2); font-weight: 600; }
+.wt-scan-window { position: relative; width: var(--wt-scan); aspect-ratio: 4 / 3; border-radius: 18px;
+  background: #111; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, .12); }
+.wt-scan-off { color: #94a3b8; font-size: var(--wt-text); }
+.wt-scan-result { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.wt-scan-ok { font-size: var(--wt-h2); font-weight: 700; color: #15803d; }
+.wt-scan-code { margin-top: 0; }
+.watch-code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--wt-text); font-weight: 600;
+  background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 8px 12px; display: inline-block;
+  word-break: break-all; }
+
+/* Реклама: слайд занимает весь экран планшета, как и у клиента. */
+.wt-mode-slides { background: #0b0b0f; }
+.wt-slides { position: absolute; inset: 0; }
+.wt-slide { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.wt-slides-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #cbd5e1; font-size: var(--wt-h2); }
+
 /* Предложение посмотреть за планшетом: ждёт оператора, а не исчезает через две секунды. */
 .toast-watch { position: fixed; right: 20px; bottom: 20px; z-index: 60; display: flex; align-items: center;
   gap: 10px; background: #1a1c22; color: #fff; border-radius: 12px; padding: 10px 12px 10px 16px;
@@ -1095,14 +1209,9 @@ body.dragging-now .topbar { pointer-events: none; }
 /* Окно условия по сроку: два числа, «дней до» и «дней после». */
 .cond-window { display: inline-flex; align-items: center; gap: 6px; }
 .cond-window-sep { font-size: .82rem; color: var(--muted); white-space: nowrap; }
-/* Реклама в окне наблюдения: сам слайд, а не надпись о нём. */
-.watch-slides { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.watch-slide { max-width: 100%; max-height: 60vh; border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,.14); }
-
 /* Крестик закрытия окна стоит в правом верхнем углу: элементы управления не должны под него
    заезжать, иначе «плюс» масштаба и закрытие сливаются в одно пятно. */
 .modal-box.wide .pdfl-head { padding-right: 44px; }
-.modal-box.wide .watch-head { padding-right: 44px; }
 
 /* Проверка запроса API: поле для тела запроса и ответ сервера как есть. */
 .apitest { display: flex; flex-direction: column; gap: 10px; }
@@ -1171,20 +1280,37 @@ body.dragging-now .topbar { pointer-events: none; }
 .watch-live.off { background: #6b7280; }
 .watch-live.off::before { animation: none; }
 
-/* Окно, открытое ссылкой #watch=. Оно целиком занято экраном планшета: вкладки, выход и панели
-   админки в нём не нужны и только отвлекают от того, ради чего окно открыли. */
+/* Окно, открытое ссылкой #watch=. Оно целиком занято экраном планшета: ни шапки админки с
+   именем системы и её версией, ни вкладок, ни панелей здесь нет. Окно открывают, чтобы смотреть
+   на экран планшета, и всё остальное только отнимает у экрана место. */
+body.watch-solo { overflow: hidden; }
+body.watch-solo .topbar,
 body.watch-solo .tabs,
 body.watch-solo #logout,
 body.watch-solo .content > .panel { display: none; }
-body.watch-solo .content { padding-top: 12px; }
-.watch-solo-page { max-width: 1100px; margin: 0 auto; }
+/* Страница наблюдения занимает окно целиком и сама делит его на шапку и площадку под сцену.
+   Растяжкой в потоке, а не отдельным слоем поверх: слой поверх оставляет саму страницу админки
+   пустой высоты, и её проверки не находят её на экране. Отступы и предельная ширина админки
+   при этом снимаются: к экрану планшета они отношения не имеют, а раньше отъедали у него по
+   сотне точек с каждой стороны. */
+body.watch-solo #app { height: 100vh; display: flex; flex-direction: column; }
+/* margin: 0, а не только max-width: none. У обычной админки колонка стоит по середине окна
+   отступами auto, а в колоночной раскладке отступ auto поперёк отменяет растяжку: полоса
+   съёживалась до ширины собственной шапки, и площадка под сцену теряла по три сотни точек. */
+body.watch-solo .content { flex: 1 1 auto; min-height: 0; padding: 0; max-width: none; margin: 0;
+  width: auto; display: flex; flex-direction: column; }
+.watch-solo-page { flex: 1 1 auto; min-height: 0; max-width: none; margin: 0;
+  display: flex; flex-direction: column; gap: 0; background: #eef1f5; }
+.watch-solo-page .watch-head { flex: 0 0 auto; padding: 7px 14px; background: var(--card, #fff);
+  border-bottom: 1px solid var(--line); }
 /* Возврат в админку прижат к правому краю шапки наблюдения: он не про планшет, а про то, где
    находится сам оператор, и путать его с состоянием связи нельзя. Мелкой ссылкой, а не кнопкой:
    кнопка здесь читалась бы как действие над планшетом, а их в этом окне нет ни одного. */
 .watch-back { margin-left: auto; font-size: .85rem; color: var(--muted); text-decoration: none;
   border-bottom: 1px dashed var(--line); padding-bottom: 1px; white-space: nowrap; }
 .watch-back:hover { color: var(--text); border-bottom-color: currentColor; }
-.watch-solo-page .watch-frame { min-height: 60vh; }
+/* Возврат стоит после значков масштаба, поэтому к правому краю его прижимают уже они. */
+.watch-solo-page .watch-back { margin-left: 12px; }
 
 /* Поле ввода в списке элементов страницы: та же строка, что у сканирования и подписи. */
 .input-item .cb-row { align-items: center; }
