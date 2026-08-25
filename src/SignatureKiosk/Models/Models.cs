@@ -1033,7 +1033,15 @@ public class DocSession
 
 public record LoginDto(string? Password);
 /// <summary>DeviceIds задаёт произвольный набор планшетов, когда Target = devices.</summary>
-public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int IntervalSec, List<string>? DeviceIds = null);
+/// <summary>
+/// Сохранение рекламного плейлиста. IntervalSec именно int?, а не int: у ненулевого int
+/// отсутствие поля в теле разбирается в 0, выражение «dto?.IntervalSec ?? 8» на нуле не
+/// срабатывает, и дальше 0 приводится к нижней границе. Значит запрос без этого поля давал не
+/// обещанные восемь секунд, а одну, и реклама мелькала раз в секунду. Замер: PUT
+/// /api/admin/playlist телом {"target":"all","imageIds":[...]} ответил 200, а GET следом вернул
+/// intervalSec 1.
+/// </summary>
+public record PlaylistSaveDto(string? Target, List<string>? ImageIds, int? IntervalSec, List<string>? DeviceIds = null);
 public record TargetDto(string? Target);
 public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields, List<ApiCheckboxDto>? Checkboxes, List<GroupSelectionDto>? Groups,
     Dictionary<string, string>? Images = null, string? DocumentCode = null);
