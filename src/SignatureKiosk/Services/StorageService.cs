@@ -171,16 +171,25 @@ public class StorageService
     /// зря уведённый экран это оборванное подписание у живого человека.
     /// </param>
     public bool UpdateDevice(string id, string? name, List<string>? groupIds, string? workstationId,
-                             bool touchWorkstation, out bool местоСменилось)
+                             bool touchWorkstation, out bool местоСменилось, out bool наборыСменились)
     {
         местоСменилось = false;
+        наборыСменились = false;
         lock (_lock)
         {
             var list = ReadOr(DevicesPath, () => new List<Device>());
             var dev = list.FirstOrDefault(d => d.Id == id);
             if (dev == null) return false;
             if (!string.IsNullOrWhiteSpace(name)) dev.Name = name!.Trim();
-            if (groupIds != null) dev.GroupIds = groupIds;
+            if (groupIds != null)
+            {
+                // Наборы решают, какая реклама доходит до этого планшета. Смена набора это переезд
+                // в другой кабинет, и о ней надо сказать наружу: планшет держит выданный ему
+                // список картинок и сам о наборах не знает.
+                наборыСменились = !dev.GroupIds.OrderBy(x => x, StringComparer.Ordinal)
+                    .SequenceEqual(groupIds.OrderBy(x => x, StringComparer.Ordinal), StringComparer.Ordinal);
+                dev.GroupIds = groupIds;
+            }
             if (touchWorkstation)
             {
                 var новое = string.IsNullOrWhiteSpace(workstationId) ? null : workstationId;

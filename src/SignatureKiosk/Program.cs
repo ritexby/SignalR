@@ -722,9 +722,14 @@ admin.MapPut("/devices/{id}", async (string id, DeviceUpdateDto dto, KioskCoordi
     // Строка это номер места, пустая строка и присланный null это осознанное «снять с места».
     var местоИзТела = поле.ValueKind == System.Text.Json.JsonValueKind.String ? поле.GetString() : null;
     if (!storage.UpdateDevice(id, dto?.Name, dto?.GroupIds, местоИзТела, touchWorkstation: местоПрислали,
-                              out var местоСменилось))
+                              out var местоСменилось, out var наборыСменились))
         return Results.NotFound();
     if (местоСменилось) await УвестиСМеста(coord, id);
+    // Планшет переехал в другой набор, значит и реклама на нём теперь другая. Он держит выданный
+    // ему список картинок и сам о наборах не знает, поэтому список пересобирается и уходит заново.
+    // Замер до починки: планшет из «Кабинета 1» переведён в «Кабинет 2», админка показывала
+    // список нового кабинета, а на экране планшета оставалась картинка прежнего.
+    if (наборыСменились) await coord.RefreshSlidesAsync(id);
     await coord.NotifyAdminsDevicesAsync();
     return Results.Ok(new { ok = true });
 });
