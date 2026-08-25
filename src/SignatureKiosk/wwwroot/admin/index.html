@@ -24,7 +24,7 @@
       <div class="brand">HELIX <span class="brand-accent">SignTablet</span> <!-- Номер тут заглушка на время загрузки: настоящий приходит от службы, которая читает его из
            самой страницы планшета. Копий номера в продукте больше нет, они однажды разошлись, и
            админка обвинила в старой версии весь исправный парк. -->
-      <span class="version" id="appVersion">v7.5</span></div>
+      <span class="version" id="appVersion">v7.6</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="slides">Слайды</button>
         <button class="tab" data-tab="document">Документ</button>
@@ -95,11 +95,10 @@
           <button id="exportDoc" class="btn btn-ghost" data-icon="download" title="Сохранить весь документ в файл, вместе с картинками и настройками PDF">Экспорт</button>
           <button id="importDoc" class="btn btn-ghost" data-icon="upload" title="Восстановить документ из ранее сохранённого файла">Импорт</button>
           <input id="importDocFile" type="file" accept="application/json,.json" hidden />
-          <!-- Перенос строки задан явно, а не отдан на волю переносу по ширине: иначе при одной
-               ширине окна «Сохранить» оказывалось в конце первой строки, при другой в начале
-               второй, и ряд кнопок каждый раз выглядел по-новому. Первая строка про планшет и
-               файлы, вторая про сам документ. -->
-          <span class="tb-break" aria-hidden="true"></span>
+          <!-- Сохранение и шаг назад стоят в ПЕРВОМ ряду, справа: это главное действие
+               оператора, и место справа в этом ряду всё равно пустовало. Раньше здесь стоял
+               явный перенос строки, и «Сохранить» уезжало во второй ряд, под кнопки проверок,
+               то есть дальше от глаз, чем «Отправить на планшет». -->
           <div class="tb-group tb-group-save" role="group" aria-label="Сохранение">
             <button id="saveDocument" class="btn btn-primary" data-icon="save" title="Записать документ на сервер">Сохранить</button>
             <!-- Пометка стоит вплотную к кнопке: это одно дело, и разносить их по разным углам

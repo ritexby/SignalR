@@ -1935,9 +1935,14 @@
     bar.appendChild(tbBtn("К", "Курсив", rtCommand(function (ed) {
       if (insideEditor(ed)) { document.execCommand("italic", false, null); ed.dispatchEvent(new Event("input", { bubbles: true })); }
     }), true));
-    bar.appendChild(tbBtn("A", "Обычный размер: выделенному куску или всему полю, если ничего не выделено", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-n"; }, "size"); })));
-    bar.appendChild(tbBtn("A+", "Крупный: выделенному куску или всему полю, если ничего не выделено", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-l"; }, "size"); })));
-    bar.appendChild(tbBtn("A++", "Огромный: выделенному куску или всему полю, если ничего не выделено", rtCommand(function (ed) { wrapSelection(ed, function (s) { s.className = "rt-h"; }, "size"); })));
+    // Кнопок «A», «A+» и «A++» здесь больше нет. Они делали ровно то же, что поле размера в
+    // точках, только тремя заранее выбранными числами, и панель из-за них не помещалась в одну
+    // строку. Два способа задать одно и то же это не выбор, а повод гадать, какой из них
+    // победит: они и спорили между собой, пока это не пришлось разбирать отдельно.
+    //
+    // Понимание уже сделанного ими никуда не делось: куски со ступенью размера (size «l» и «h»)
+    // по-прежнему читаются и показываются и на планшете, и в бумаге, и в поле размера видно их
+    // размер в точках. Иначе документы, набранные раньше, потеряли бы вид.
     RT_COLORS.forEach(function (c) {
       var sw = el("button", "rt-swatch"); sw.type = "button"; sw.style.background = c; sw.title = "Цвет " + c;
       sw.addEventListener("mousedown", function (e) { e.preventDefault(); });
@@ -2056,7 +2061,13 @@
       tsel.value = "";
     });
     bar.appendChild(tsel);
-    bar.appendChild(el("span", "rt-hint"));
+    // Подсказки отдельной строкой в панели больше нет. Она была неломающейся строкой в треть
+    // ряда и сталкивала тег на вторую строку, а перенос в гибком ряду происходит раньше сжатия,
+    // поэтому ужать её было нельзя. Вдобавок она появлялась и исчезала вместе с курсором, и
+    // прилипшая панель прыгала по высоте, а с ней и весь документ под ней.
+    //
+    // Сказать то же самое есть чем: пока поле не выбрано, кнопки гаснут, а объяснение висит на
+    // самой панели и показывается при наведении.
     return bar;
   }
 
@@ -2078,8 +2089,7 @@
   function syncRtBar() {
     if (!rtBar) return;
     rtBar.classList.toggle("rt-idle", !rtTarget);
-    var hint = rtBar.querySelector(".rt-hint");
-    if (hint) hint.textContent = rtTarget ? "" : "Поставьте курсор в текст, чтобы оформить его";
+    rtBar.title = rtTarget ? "" : "Поставьте курсор в текст, чтобы оформить его";
     var карточкаСп = rtTarget && rtTarget.closest ? rtTarget.closest('[data-role="blockcard"]') : null;
     var селСп = карточкаСп ? карточкаСп.querySelector('[data-role="blocklistmode"]') : null;
     var now = alignOf(rtTarget);
