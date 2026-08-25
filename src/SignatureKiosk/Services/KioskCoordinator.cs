@@ -250,17 +250,23 @@ public class KioskCoordinator
             // Переподключившийся планшет получает снимок, сделанный при показе, а не пересборку
             // из текущего шаблона: шаблон могли править, пока клиент подписывал, и документ
             // менялся бы у него на глазах посреди подписания.
+            // Сколько секунд назад показали документ. Планшету это нужно, чтобы отличить
+            // «оператор только что прислал» от «страница перезагрузилась посреди подписания».
+            var показанСекундНазад = state.DocumentSetUtc is DateTime когда
+                ? (int)Math.Max(0, (DateTime.UtcNow - когда).TotalSeconds) : 0;
             if (!string.IsNullOrEmpty(state.SessionId))
             {
                 var session = _storage.GetDocSession(deviceId);
                 if (session is not null && session.SessionId == state.SessionId)
-                    return new CurrentCommand { Mode = "document", Document = session.Document, SessionId = session.SessionId };
+                    return new CurrentCommand { Mode = "document", Document = session.Document,
+                        SessionId = session.SessionId, ShownSecondsAgo = показанСекундНазад };
             }
             // Снимка нет: сессия начата до появления снимков. Прежний путь, с данными только
             // этого планшета: чужого он не получит и здесь.
             var doc = DocumentTemplating.Resolve(_storage.GetDocument(), state.Fields, state.DynamicCheckboxes,
                 state.GroupSelections, state.CheckboxStates, state.Texts, state.GroupOptions);
-            return new CurrentCommand { Mode = "document", Document = doc, SessionId = state.SessionId };
+            return new CurrentCommand { Mode = "document", Document = doc, SessionId = state.SessionId,
+                ShownSecondsAgo = показанСекундНазад };
         }
         return new CurrentCommand { Mode = "slides", Slides = BuildSlidesPayload(state, deviceId) };
     }

@@ -387,3 +387,15 @@ h2 { clear: both; }
   font-size: 1.05em;
   line-height: 1.4;
 }
+
+/* Подсказка внизу экрана, когда что-то пошло не так и клиент должен это заметить. Цвет
+   предупреждающий, но не тревожный: планшет не сломан, просто заполнять придётся заново. */
+.footer-note.note-warn {
+  color: #7c2d12;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 1.05em;
+  line-height: 1.35;
+}
