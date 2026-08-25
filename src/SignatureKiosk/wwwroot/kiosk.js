@@ -304,6 +304,23 @@
 
   function checkKey(page, idx) { return "p" + page + "_c" + idx; }
 
+  /// Одно ли это имя. Сравнение без учёта регистра и с обрезкой краёв, как на сервере.
+  ///
+  /// Служба всюду сравнивает имена элементов без регистра: и в LiveKeys, и в ApplyLiveConditions,
+  /// и при приёме отметок, и при приёме подписи, и внешним системам это обещано в справке API.
+  /// Планшет же сравнивал строки точно, и условие с именем в другом написании служба признавала
+  /// живым и отправляла сюда, а здесь оно не находило своего элемента.
+  ///
+  /// Замер до починки: восемь расхождений в обе стороны. Блок под «SOGLASIE eq true» на экране
+  /// не показан, а в бумаге напечатан; блок под «SOGLASIE empty» показан на экране и пропал из
+  /// бумаги. Целая страница под таким условием не показывалась клиенту и целиком попадала в
+  /// подписанный лист. Обязательный пункт под таким условием делал документ неподписываемым:
+  /// планшет пункт не показывал, а служба требовала его заполнить.
+  function тоЖеИмя(своё, искомое) {
+    return String(своё == null ? "" : своё).trim().toLowerCase()
+        === String(искомое == null ? "" : искомое).trim().toLowerCase();
+  }
+
   // Условие, которое сервер не смог решить сам, потому что оно зависит от того, что клиент
   // отмечает прямо сейчас. Сервер уже убрал всё, что решается по тегам, поэтому сюда доходят
   // только условия на чекбоксы и группы. Чекбокс в скрытом блоке считается неотмеченным: так
@@ -332,36 +349,38 @@
     // имени получался разный: на экране одно, в записи другое.
     (doc.config.pages || []).forEach(function (p, pi) {
       (p.checkboxes || []).forEach(function (cb, ci) {
-        if (!cb || cb.key !== key) return;
+        if (!cb || !тоЖеИмя(cb.key, key)) return;
         нашли = true;
         found = (видноЛи("c" + pi + "_" + ci, cb.visibleWhen, p.visibleWhen)
           && doc.checks[checkKey(pi, ci)]) ? "true" : "false";
       });
       (p.groups || []).forEach(function (g, gi) {
-        if (!g || g.key !== key) return;
+        if (!g || !тоЖеИмя(g.key, key)) return;
         нашли = true;
-        found = видноЛи("g" + pi + "_" + gi, g.visibleWhen, p.visibleWhen) ? (doc.picks[key] || "") : "";
+        // Значение берётся по СОБСТВЕННОМУ имени элемента, а не по имени из условия: они могут
+        // различаться регистром, и тогда элемент нашёлся бы, а значение прочиталось из пустоты.
+        found = видноЛи("g" + pi + "_" + gi, g.visibleWhen, p.visibleWhen) ? (doc.picks[g.key] || "") : "";
       });
       (p.inputs || []).forEach(function (inp, ii) {
-        if (!inp || inp.key !== key) return;
+        if (!inp || !тоЖеИмя(inp.key, key)) return;
         нашли = true;
         found = видноЛи("i" + pi + "_" + ii, inp.visibleWhen, p.visibleWhen)
-          ? String(doc.inputs[key] != null ? doc.inputs[key] : (inp.value || "")) : "";
+          ? String(doc.inputs[inp.key] != null ? doc.inputs[inp.key] : (inp.value || "")) : "";
       });
       // Имена полей подписи и сканирования тоже живые: сервер объявляет их такими и отдаёт
       // условие планшету. Значения для них планшет раньше не производил вовсе, и условие
       // «код отсканирован» не срабатывало ни разу, а обратное держалось всегда.
       (p.signatures || []).forEach(function (sg, si) {
-        if (!sg || sg.key !== key) return;
+        if (!sg || !тоЖеИмя(sg.key, key)) return;
         нашли = true;
         // Спрашивается росчерк: он и есть подпись. Картинка рядом с ним лишь его отпечаток.
         found = (видноЛи("s" + pi + "_" + si, sg.visibleWhen, p.visibleWhen)
-          && (doc.signStrokes[key] || []).length) ? "подписано" : "";
+          && (doc.signStrokes[sg.key] || []).length) ? "подписано" : "";
       });
       (p.scans || []).forEach(function (sc, ni) {
-        if (!sc || sc.key !== key) return;
+        if (!sc || !тоЖеИмя(sc.key, key)) return;
         нашли = true;
-        var код = doc.codes[key];
+        var код = doc.codes[sc.key];
         found = (видноЛи("n" + pi + "_" + ni, sc.visibleWhen, p.visibleWhen) && код) ? (код.code || "") : "";
       });
     });
@@ -577,10 +596,10 @@
           // пункта не считалась зависимостью: экран не перерисовывался, и блок, открытый счётом
           // отметок, на планшете не появлялся, хотя в записи и в бумаге он был.
           if (part.op === "minchecked") {
-            String(part.field || "").split(",").forEach(function (x) { if (x.trim() === key) uses = true; });
+            String(part.field || "").split(",").forEach(function (x) { if (тоЖеИмя(x, key)) uses = true; });
             return;
           }
-          if (part.field === key) uses = true;
+          if (тоЖеИмя(part.field, key)) uses = true;
         });
       });
     }
@@ -2131,6 +2150,16 @@
   function submitSignature() {
     if (doc.submitting || !doc.pad || doc.pad.isEmpty()) return;
     doc.submitting = true;
+    // Таймер возврата к рекламе останавливается на время отправки. Человек, который расписался
+    // и нажал кнопку, бездействующим не является, а таймер этого не знал и добивал сессию, пока
+    // запрос был в пути. Замер: возврат через 2 секунды, отправка задержана на 5; записи не
+    // появилось, планшет ушёл к рекламе, нарисованная подпись пропала, и клиенту не сказали
+    // ничего. Отдельно тот же таймер стирал и подсказку «Нажмите ПОДПИСАТЬ ещё раз» вместе с
+    // самой кнопкой: выполнить собственную просьбу планшета было нечем.
+    //
+    // Обратно таймер взводится только там, где кнопка возвращается клиенту, то есть в ветках
+    // поправимого отказа ниже.
+    stopIdle();
     var session = doc.session;     // this signing session; abandon the callbacks if it changed
     updateFooter();
     // One id per signing session: if the response is lost and the signer presses ПОДПИСАТЬ again,
@@ -2194,6 +2223,9 @@
         // 401, 403 и 409 от повтора не изменятся: там кнопка остаётся выключенной.
         if (err.status === 400) {
           doc.submitting = false;
+          // Кнопка вернулась клиенту, значит и таймер бездействия снова уместен: человек опять
+          // что-то делает, а не ждёт ответа службы.
+          startIdle();
           var текст = note ? note.textContent : "";
           updateFooter();
           if (note) note.textContent = текст;
@@ -2201,6 +2233,7 @@
         return;
       }
       doc.submitting = false;
+      startIdle();                                  // кнопка вернулась, таймер снова уместен
       updateFooter();                               // re-enable the button first...
       if (note) note.textContent = "Не удалось отправить: нет связи с сервером. Нажмите ПОДПИСАТЬ ещё раз."; // ...then show the error so it is not wiped
     });

@@ -1187,6 +1187,15 @@
   // следующего раза). Двух админок в двух окнах хватает, чтобы разница стала видна: каждое окно
   // возвращается в свой документ, а не в тот, который последним открыли в соседнем. Открытое
   // заново окно берёт последний известный, и черновик того документа сразу предлагается.
+  /// Одно ли это имя. Сравнение без учёта регистра и с обрезкой краёв, как на сервере и как на
+  /// планшете. Служба всюду сравнивает имена элементов без регистра, и всё, что показывает
+  /// оператору «то же, что видит клиент» (предпросмотр, окно наблюдения, прожектор условий),
+  /// обязано считать так же. Иначе оператор смотрит на экран клиента и видит не то.
+  function тоЖеИмя(своё, искомое) {
+    return String(своё == null ? "" : своё).trim().toLowerCase()
+        === String(искомое == null ? "" : искомое).trim().toLowerCase();
+  }
+
   var КЛЮЧ_ОТКРЫТОГО = "sk_doc_open";
   // Начало ключа черновика. Объявлено здесь, а не рядом с работой черновиков ниже по файлу:
   // им пользуется ещё и уборка при выходе из админки, а она стоит в самом верху. Объявление
@@ -3436,7 +3445,11 @@
     var problems = [];
     var pages = state.doc.pages || [];
     var keys = docKeys();
-    var known = keys.checks.concat(Object.keys(keys.groups));
+    // Все имена документа, а не только отметки и выборы. Раньше сюда не входили поля ввода,
+    // подписи и сканирования, и проверка ругалась на исправное условие словами «такого имени
+    // нет, блок не покажется никогда». Оператор либо убирал рабочее условие, либо переставал
+    // верить проверке вообще, и тогда настоящие ошибки в том же списке проходили мимо.
+    var known = keys.checks.concat(Object.keys(keys.groups), keys.inputs, keys.signs, keys.scans);
     var seenKeys = {};
 
     function checkCondition(cond, where) {
@@ -3455,7 +3468,10 @@
       if (!cond || !cond.field) return;
       var f = cond.field;
       var isTag = KNOWN_FIELDS.some(function (k) { return k.toLowerCase() === f.toLowerCase(); });
-      var isKey = known.some(function (k) { return k === f; });
+      // Без учёта регистра, как сравнивает сервер: иначе проверка обвиняет исправное условие,
+      // написанное в другом написании, и обещает, что блок «не покажется никогда». Он и правда
+      // не покажется клиенту, но в бумагу попадёт, и это ровно наоборот от сказанного.
+      var isKey = known.some(function (k) { return тоЖеИмя(k, f); });
       if (!isTag && !isKey)
         problems.push({ level: "warn", text: where + ": условие ссылается на «" + f + "». Такого имени нет ни среди стандартных тегов, ни среди чекбоксов документа. Это сработает, только если внешняя система пришлёт поле с точно таким именем; иначе блок не покажется никогда." });
       if (cond.op !== "empty" && cond.op !== "notempty" && !String(cond.value || "").trim())
@@ -4010,6 +4026,12 @@
   // оператор задаёт «как будто клиент отметил вот это».
   function прожекторЗначение(имя) {
     var v = прожектор.значения[имя];
+    // Имя ищется без учёта регистра, как везде: иначе прожектор уверенно врёт про условие,
+    // написанное в другом написании.
+    if (v == null) {
+      var своё = Object.keys(прожектор.значения).filter(function (k) { return тоЖеИмя(k, имя); })[0];
+      if (своё != null) v = прожектор.значения[своё];
+    }
     return v == null ? "" : String(v);
   }
 
@@ -6272,12 +6294,16 @@
     // Значение имени, на которое ссылается условие. Скрытый пункт считается неотмеченным:
     // так взаимные ссылки разрешаются сами и не зацикливаются. Точно как на планшете.
     function liveValue(key) {
-      if (Object.prototype.hasOwnProperty.call(picks, key)) return picks[key] || "";
-      if (Object.prototype.hasOwnProperty.call(вписано, key)) return вписано[key] || "";
+      // Имя ищется без учёта регистра, как на планшете и на сервере: иначе предпросмотр
+      // показывает оператору не то, что увидит клиент.
+      var своё = Object.keys(picks).filter(function (k) { return тоЖеИмя(k, key); })[0];
+      if (своё != null) return picks[своё] || "";
+      своё = Object.keys(вписано).filter(function (k) { return тоЖеИмя(k, key); })[0];
+      if (своё != null) return вписано[своё] || "";
       var found = "";
       pages.forEach(function (p, pi) {
         (p.checkboxes || []).forEach(function (cb, ci) {
-          if (cb && cb.key === key) found = checks["p" + pi + "_c" + ci] ? "true" : "false";
+          if (cb && тоЖеИмя(cb.key, key)) found = checks["p" + pi + "_c" + ci] ? "true" : "false";
         });
       });
       return found;
@@ -11065,24 +11091,24 @@
       // Последнее и побеждает, если одно имя досталось двум элементам.
       pages.forEach(function (p, i) {
         (p.checkboxes || []).forEach(function (cb, ci) {
-          if (!cb || cb.key !== key) return;
+          if (!cb || !тоЖеИмя(cb.key, key)) return;
           нашли = true; found = checks["p" + i + "_c" + ci] ? "true" : "false";
         });
         (p.groups || []).forEach(function (g) {
-          if (!g || g.key !== key) return;
+          if (!g || !тоЖеИмя(g.key, key)) return;
           нашли = true; found = picks[key] || "";
         });
         (p.inputs || []).forEach(function (inp) {
-          if (!inp || inp.key !== key) return;
+          if (!inp || !тоЖеИмя(inp.key, key)) return;
           нашли = true;
           found = String(inputs[key] != null ? inputs[key] : (inp.value || ""));
         });
         (p.signatures || []).forEach(function (sg) {
-          if (!sg || sg.key !== key) return;
+          if (!sg || !тоЖеИмя(sg.key, key)) return;
           нашли = true; found = signs[key] ? "подписано" : "";
         });
         (p.scans || []).forEach(function (sc) {
-          if (!sc || sc.key !== key) return;
+          if (!sc || !тоЖеИмя(sc.key, key)) return;
           нашли = true; found = (codes[key] && codes[key].code) || "";
         });
       });
