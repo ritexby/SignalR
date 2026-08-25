@@ -1409,15 +1409,48 @@
           .catch(function () { /* уже показано */ });
       } else {
         тело.copyOfId = копияИз || null;
-        apiSend("/documents", "POST", тело)
-          .then(function (r) { return r.json(); })
-          .then(function (созданный) {
-            closeModal();
-            state.docId = созданный.id;
-            return loadLibrary().then(function () { return loadDoc(созданный.id); });
-          })
-          .then(function () { renderLibrary(); toast("Документ заведён"); })
-          .catch(function () { /* уже показано */ });
+        // Заведение и копия уводят с открытого документа так же, как переход по закладке,
+        // поэтому и спрашивать про несохранённое надо так же. Раньше эти два пути уводили без
+        // вопроса, и правка, набранная минуту назад, оставалась только в черновике, о котором
+        // оператор в этот момент не думает. Дожим черновика при уходе стоит в loadDoc и
+        // сработает в любом случае, но вопрос важнее: он даёт сохранить по-настоящему.
+        var завести = function () {
+          apiSend("/documents", "POST", тело)
+            .then(function (r) { return r.json(); })
+            .then(function (созданный) {
+              closeModal();
+              state.docId = созданный.id;
+              return loadLibrary().then(function () { return loadDoc(созданный.id); });
+            })
+            .then(function () { renderLibrary(); toast("Документ заведён"); })
+            .catch(function () { /* уже показано */ });
+        };
+        if (!dirty) { завести(); return; }
+        closeModal();
+        var сп = el("div");
+        сп.appendChild(el("h3", null, "Есть несохранённые правки"));
+        сп.appendChild(el("p", "sig-meta",
+          "Вы правили открытый документ и не сохранили. Сейчас редактор перейдёт на новый, и " +
+          "правки останутся только в черновике этого браузера."));
+        var сСохранением = iconBtn("save", "Сохранить и завести", "btn-primary");
+        сСохранением.addEventListener("click", function () {
+          closeModal();
+          saveDoc().then(завести).catch(function () { /* уже показано */ });
+        });
+        var без = iconBtn("right", "Завести без сохранения", "btn-ghost");
+        без.addEventListener("click", function () {
+          closeModal();
+          saveDraft();
+          dirty = false; syncDirty();
+          завести();
+        });
+        var отмена = iconBtn("back", "Остаться", "btn-ghost");
+        отмена.addEventListener("click", function () { closeModal(); });
+        сп.appendChild(сСохранением);
+        var ряд2 = el("div", "modal-actions modal-actions-left");
+        ряд2.appendChild(без); ряд2.appendChild(отмена);
+        сп.appendChild(ряд2);
+        openModal(сп);
       }
     });
     c.appendChild(ok);
@@ -3819,6 +3852,12 @@
       var landed = item.parentNode;
       item = null; moved = false;
       if (!wasMoved) return;
+      // Порядок изменился, значит документ изменён. Раньше перетаскивание не помечало его
+      // изменённым вовсе: ни точки «не сохранено», ни черновика, ни вопроса при уходе. Оператор
+      // расставлял блоки в нужном порядке, ничего больше не трогал, уходил, и порядок молча
+      // возвращался к прежнему. Замер: порядок стал [ВТОРОЙ, ПЕРВЫЙ], метки нет, черновика нет,
+      // при перезагрузке ничего не спросили и вернулся [ПЕРВЫЙ, ВТОРОЙ].
+      markDirty();
       // Порядок изменился: перечитываем документ из DOM. Для страниц ещё и перерисовываем,
       // иначе номера страниц и оглавление разойдутся с тем, что на экране.
       if (list === $("pagesEditor")) { collectDoc(); collapsedPages = {}; renderPages(); }
@@ -4961,11 +5000,32 @@
         var nl = el("label", "field-sm", "Сколько отметить");
         n = el("input"); n.type = "number"; n.min = "1"; n.max = "50"; n.value = "1";
         nl.appendChild(n); c.appendChild(nl);
+        // Верхняя граница поля идёт за числом выбранных пунктов: набрать заведомо непосильное
+        // число нельзя даже случайно.
+        var поправитьПредел = function () {
+          var сколько = поля.querySelectorAll("input:checked").length;
+          n.max = String(Math.max(1, сколько));
+          if (parseInt(n.value, 10) > сколько && сколько >= 1) n.value = String(сколько);
+        };
+        поля.addEventListener("change", поправитьПредел);
+        поправитьПредел();
       }
       var ok = iconBtn("check", "Добавить правило", "btn-primary");
       ok.addEventListener("click", function () {
         var keys = Array.prototype.slice.call(поля.querySelectorAll("input:checked")).map(function (i) { return i.value; });
         if (keys.length < 2) { toast("Выберите хотя бы два пункта", true); return; }
+        // Число «сколько отметить» не может быть больше, чем выбрано пунктов: служба его всё
+        // равно уменьшит, а на экране осталось бы прежнее, и оператор ушёл бы уверенный, что
+        // правило работает по его числу. Замер: правило по двум пунктам с N=4 сохранялось как
+        // N=2, а строка правила так и говорила «не меньше 4» до перезагрузки страницы.
+        if (вид === "minchecked" && n) {
+          var надо = parseInt(n.value, 10);
+          if (!(надо >= 1)) { toast("Сколько отметить: нужно число от 1", true); return; }
+          if (надо > keys.length) {
+            toast("Отметить нельзя больше, чем выбрано пунктов: вы выбрали " + keys.length, true);
+            return;
+          }
+        }
         var l = правила();
         l.push({ kind: вид, keys: keys, n: n ? (parseInt(n.value, 10) || 1) : 1 });
         записать(l);
@@ -6724,7 +6784,13 @@
   $("importDocFile").addEventListener("change", function () {
     var input = this, file = input.files && input.files[0];
     if (!file) return;
-    if (!confirm("Файл будет добавлен в библиотеку новым документом. Открытый документ не изменится. Продолжить?")) { input.value = ""; return; }
+    // Обещание должно совпадать с делом: ввезённый документ сразу открывается в редакторе, и
+    // прежний закрывается. Раньше здесь было написано «Открытый документ не изменится», а через
+    // десять строк тот же обработчик его и менял.
+    if (!confirm("Файл будет добавлен в библиотеку новым документом, и редактор откроет его. "
+        + "Документ, открытый сейчас, не изменится, но закладка переключится на новый. Продолжить?")) {
+      input.value = ""; return;
+    }
     var reader = new FileReader();
     reader.onload = function () {
       var parsed;
