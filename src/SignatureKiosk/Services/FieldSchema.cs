@@ -143,3 +143,40 @@ public class LenientStringDictionaryConverter : JsonConverter<Dictionary<string,
         writer.WriteEndObject();
     }
 }
+
+/// <summary>
+/// Принимает строковое поле, присланное числом, и отдаёт его строкой.
+///
+/// Зачем. Коды рабочих мест у владельца выглядят как числа: 1232, 3244, 54545. Интегратор пишет
+/// их в JSON естественным образом, числом, и до этой уступки весь запрос отвергался платформой
+/// ещё до обработчика. Ответ приходил такой: 400, длина тела ноль, ни заголовка Content-Type, ни
+/// единого слова, и ни следа в журналах. Разобраться в этом снаружи нельзя ничем, кроме догадки.
+/// Тот же код строкой проходил.
+///
+/// Уступка ровно одна: число становится своим же написанием. Настоящие числа в JSON остаются
+/// числами, потому что они объявлены числовыми полями и сюда не попадают. Объект и массив на
+/// месте строки по-прежнему отвергаются: это не описка в написании, а другая мысль, и принять её
+/// молча значило бы потерять то, что прислали.
+///
+/// Это продолжение решения, которое в продукте уже принято для значений тегов
+/// (LenientStringDictionaryConverter): вид написания на проводе не должен решать, доедет ли
+/// документ до клиента.
+/// </summary>
+public class LenientStringConverter : JsonConverter<string>
+{
+    public override string? Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options) =>
+        reader.TokenType switch
+        {
+            JsonTokenType.String => reader.GetString(),
+            JsonTokenType.Null => null,
+            JsonTokenType.Number => reader.TryGetInt64(out var l)
+                ? l.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : reader.GetDouble().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            JsonTokenType.True => "true",
+            JsonTokenType.False => "false",
+            _ => throw new JsonException("ожидалась строка")
+        };
+
+    public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value);
+}

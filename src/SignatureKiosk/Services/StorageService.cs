@@ -159,8 +159,16 @@ public class StorageService
         }
     }
 
-    public bool UpdateDevice(string id, string? name, List<string>? groupIds, string? workstationId, bool touchWorkstation)
+    /// <param name="местоСменилось">
+    /// Планшет действительно уехал с одного рабочего места на другое или был снят с места. Это
+    /// не то же самое, что «место было в теле запроса»: запрос мог назвать то самое место, где
+    /// планшет и так стоит. Вызывающий по этому признаку уводит экран планшета на рекламу, а
+    /// зря уведённый экран это оборванное подписание у живого человека.
+    /// </param>
+    public bool UpdateDevice(string id, string? name, List<string>? groupIds, string? workstationId,
+                             bool touchWorkstation, out bool местоСменилось)
     {
+        местоСменилось = false;
         lock (_lock)
         {
             var list = ReadOr(DevicesPath, () => new List<Device>());
@@ -168,7 +176,12 @@ public class StorageService
             if (dev == null) return false;
             if (!string.IsNullOrWhiteSpace(name)) dev.Name = name!.Trim();
             if (groupIds != null) dev.GroupIds = groupIds;
-            if (touchWorkstation) dev.WorkstationId = string.IsNullOrWhiteSpace(workstationId) ? null : workstationId;
+            if (touchWorkstation)
+            {
+                var новое = string.IsNullOrWhiteSpace(workstationId) ? null : workstationId;
+                местоСменилось = !string.Equals(dev.WorkstationId, новое, StringComparison.Ordinal);
+                dev.WorkstationId = новое;
+            }
             Write(DevicesPath, list);
             return true;
         }
@@ -219,8 +232,17 @@ public class StorageService
     /// «device or workstation not found», не зная, что чинить: несуществующий номер планшета или
     /// код рабочего места, которого ещё не завели.
     /// </remarks>
-    public РезультатПривязки AssignWorkstationByExternalId(string deviceId, string? externalId)
+    public РезультатПривязки AssignWorkstationByExternalId(string deviceId, string? externalId) =>
+        AssignWorkstationByExternalId(deviceId, externalId, out _);
+
+    /// <param name="местоСменилось">
+    /// Планшет действительно уехал с места или был снят с него. Повторная привязка к тому же
+    /// месту сменой не считается: по этому признаку вызывающий уводит экран на рекламу, а зря
+    /// уведённый экран это оборванное подписание у живого человека.
+    /// </param>
+    public РезультатПривязки AssignWorkstationByExternalId(string deviceId, string? externalId, out bool местоСменилось)
     {
+        местоСменилось = false;
         lock (_lock)
         {
             // Планшет проверяется первым: он адресат запроса, и если его нет, всё остальное уже
@@ -241,6 +263,7 @@ public class StorageService
                 if (ws == null) return РезультатПривязки.НетМеста;
                 wsId = ws.Id;
             }
+            местоСменилось = !string.Equals(dev.WorkstationId, wsId, StringComparison.Ordinal);
             dev.WorkstationId = wsId;
             Write(DevicesPath, list);
             return РезультатПривязки.Готово;
@@ -315,53 +338,120 @@ public class StorageService
         lock (_lock) return ReadOr(WorkstationsPath, () => new List<Workstation>());
     }
 
-    public Workstation AddWorkstation(string? externalId, string? name, string? location)
+    /// <summary>
+    /// Занят ли код рабочего места кем-то, кроме названной записи. Сравнение то же, что и везде,
+    /// где код места читается: без учёта регистра и окружающих пробелов.
+    /// </summary>
+    private static Workstation? КодЗанят(List<Workstation> список, string код, string? кромеId) =>
+        список.FirstOrDefault(w => !string.Equals(w.Id, кромеId, StringComparison.Ordinal)
+            && string.Equals((w.ExternalId ?? "").Trim(), код, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Завести рабочее место. Второй возвращаемый это причина отказа или null.
+    /// </summary>
+    /// <remarks>
+    /// Проверка на повтор кода стоит здесь, в хранилище, а не в обработчике: раньше она была
+    /// только на внешнем пути POST /api/ext/workstations, а админский путь, которым место и
+    /// заводит оператор, пропускал повтор молча.
+    ///
+    /// Чем это кончалось, замерено: два места с кодом «3244», планшет привязан ко второму, на
+    /// связи, карточка в порядке. Заказ по коду «3244» отвечает 404 «на этом месте нет
+    /// планшета», потому что отбор берёт первое совпадение и до второго не доходит. Оператор
+    /// идёт искать поломку в планшете и в сети, а поломка в списке мест. Второй исход хуже:
+    /// два живых планшета в разных кабинетах с одним кодом, и документ молча уходит к тому,
+    /// кто в списке раньше, то есть к чужому человеку.
+    ///
+    /// Для кода документа такая проверка есть и отказ произносится вслух. Код места, который на
+    /// карточке планшета так и подписан «код для API», стоял без неё.
+    /// </remarks>
+    public (Workstation? Место, string? Ошибка) AddWorkstation(string? externalId, string? name, string? location)
     {
         lock (_lock)
         {
             var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
+            var код = (externalId ?? "").Trim();
+            if (код.Length > 0)
+            {
+                var чужое = КодЗанят(list, код, null);
+                if (чужое is not null)
+                    return (null, "Код «" + код + "» уже занят рабочим местом «" + чужое.Name + "». " +
+                                  "Код рабочего места это адрес, по которому внешняя система шлёт документ, " +
+                                  "и он должен быть один на всю систему. Регистр и пробелы по краям не " +
+                                  "считаются: «" + код + "» и «" + код.ToUpperInvariant() + "» это один код.");
+            }
             var w = new Workstation
             {
                 Id = "ws-" + ShortId(),
-                ExternalId = (externalId ?? "").Trim(),
+                ExternalId = код,
                 Name = string.IsNullOrWhiteSpace(name) ? "Рабочее место" : name!.Trim(),
                 Location = (location ?? "").Trim()
             };
             list.Add(w);
             Write(WorkstationsPath, list);
-            return w;
+            return (w, null);
         }
     }
 
-    public bool UpdateWorkstation(string id, string? externalId, string? name, string? location)
+    /// <summary>Чем кончилась правка рабочего места.</summary>
+    public enum РезультатПравкиМеста { Готово, НетМеста, КодЗанят }
+
+    /// <summary>
+    /// Изменить рабочее место. Отдельный случай КодЗанят: раньше правка могла вписать записи чужой
+    /// код, и работавший адрес умирал на месте. Замер: место «КАБ-77» с живым планшетом показывает
+    /// документ; PUT вписывает «КАБ-77» другой, пустой записи; сразу после этого заказ по «КАБ-77»
+    /// отвечает 404, а планшет возвращается на рекламу. Ни одного предупреждения по дороге.
+    /// </summary>
+    public РезультатПравкиМеста UpdateWorkstation(string id, string? externalId, string? name,
+                                                  string? location, out string? ошибка)
     {
+        ошибка = null;
         lock (_lock)
         {
             var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
             var w = list.FirstOrDefault(x => x.Id == id);
-            if (w == null) return false;
-            if (externalId != null) w.ExternalId = externalId.Trim();
+            if (w == null) return РезультатПравкиМеста.НетМеста;
+            if (externalId != null)
+            {
+                var код = externalId.Trim();
+                if (код.Length > 0)
+                {
+                    var чужое = КодЗанят(list, код, id);
+                    if (чужое is not null)
+                    {
+                        ошибка = "Код «" + код + "» уже занят рабочим местом «" + чужое.Name + "». " +
+                                 "Код рабочего места это адрес, по которому внешняя система шлёт документ, " +
+                                 "и он должен быть один на всю систему.";
+                        return РезультатПравкиМеста.КодЗанят;
+                    }
+                }
+                w.ExternalId = код;
+            }
             if (!string.IsNullOrWhiteSpace(name)) w.Name = name.Trim();
             if (location != null) w.Location = location.Trim();
             Write(WorkstationsPath, list);
-            return true;
+            return РезультатПравкиМеста.Готово;
         }
     }
 
-    public bool DeleteWorkstation(string id)
+    /// <summary>
+    /// Удалить рабочее место. Возвращается список планшетов, которые этим с места сняты, или
+    /// null, если места с таким номером нет. Список нужен вызывающему: у снятого планшета на
+    /// экране может стоять открытый документ с данными клиента, и его надо увести на рекламу.
+    /// </summary>
+    public List<string>? DeleteWorkstation(string id)
     {
         lock (_lock)
         {
             var list = ReadOr(WorkstationsPath, () => new List<Workstation>());
             var w = list.FirstOrDefault(x => x.Id == id);
-            if (w == null) return false;
+            if (w == null) return null;
             list.Remove(w);
             Write(WorkstationsPath, list);
             var devs = ReadOr(DevicesPath, () => new List<Device>());
-            bool changed = false;
-            foreach (var d in devs) if (d.WorkstationId == id) { d.WorkstationId = null; changed = true; }
-            if (changed) Write(DevicesPath, devs);
-            return true;
+            var снятые = new List<string>();
+            foreach (var d in devs) if (d.WorkstationId == id) { d.WorkstationId = null; снятые.Add(d.Id); }
+            if (снятые.Count > 0) Write(DevicesPath, devs);
+            return снятые;
         }
     }
 
