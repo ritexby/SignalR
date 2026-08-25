@@ -269,7 +269,13 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 /* Пока поле не выбрано, панель на месте, но не работает: ничего не прыгает, и сразу видно,
    что оформлять пока нечего. */
 .rt-idle { opacity: .6; }
-.rt-hint { font-size: .82rem; color: var(--muted); margin-left: auto; padding-right: 4px; white-space: nowrap; }
+/* Подсказка «поставьте курсор в текст» занимает то, что осталось в ряду, и ужимается до нуля,
+   когда не осталось ничего. Раньше она была неломающейся строкой в 333 точки и сталкивала
+   панель на вторую строку, а при переводе курсора в текст исчезала, и панель прыгала по
+   высоте: она прилипшая, и под ней прыгал весь документ. Теперь ряд всегда один. Полный текст
+   остаётся во всплывающей подсказке. */
+.rt-hint { font-size: .82rem; color: var(--muted); margin-left: auto; padding-right: 4px;
+           white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .rt-btn { min-width: 30px; height: var(--h-ctl-sm); padding: 0 8px; border: 1px solid var(--field-line); border-radius: 6px; background: #fff; color: var(--text); font-weight: 700; cursor: pointer; font-size: .85rem; }
 .rt-btn:hover { border-color: var(--accent); }
 /* Образец цвета это такая же кнопка ряда, как «Ж» или «К», и рост у неё тот же. Прежде она была
@@ -1583,7 +1589,13 @@ body.watch-solo .content { flex: 1 1 auto; min-height: 0; padding: 0; max-width:
 /* Сохранение единственное здесь меняет документ на сервере, поэтому обведено. */
 /* Кнопка сохранения и пометка о несохранённом стоят вместе, одной группой. Рамки вокруг нет:
    главная кнопка сама себя выделяет цветом, а пунктир рядом с ней читался как «недоделано». */
-.tb-group-save { display: inline-flex; align-items: center; gap: 10px; }
+/* Сохранение прижато к правому краю своего ряда: слева выбор планшета и работа с файлами, а
+   справа главное действие оператора. Место там всё равно пустовало, и «Сохранить» из-за этого
+   стояло рядом с проверками, дальше от глаз, чем «Отправить на планшет». */
+.tb-group-save { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; }
+/* Шаг назад идёт сразу за сохранением, поэтому своего отступа ему не нужно: иначе автоотступ
+   сработал бы дважды и растащил их по разным углам. */
+.tb-group-undo { margin-left: 0; }
 /* Явный перенос строки внутри ряда кнопок. */
 .tb-break { flex-basis: 100%; height: 0; margin: 0; }
 
