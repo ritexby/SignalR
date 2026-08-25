@@ -1661,6 +1661,24 @@ public class StorageService
     }
 
     /// <summary>Записать итог запуска правила, не трогая остальные его поля.</summary>
+    /// <summary>
+    /// Записать итог у правила, НЕ трогая дату суточного пуска. Нужно для пуска вручную: оператор
+    /// должен видеть, чем кончилось, и после перезагрузки страницы, но такой пуск не должен
+    /// съедать сегодняшний выход правила по времени.
+    /// </summary>
+    public void MarkScheduleResult(string id, string result)
+    {
+        lock (_lock)
+        {
+            var store = ReadOr(SchedulePath, () => new ScheduleStore());
+            var rule = (store.Rules ?? new List<ScheduleRule>()).FirstOrDefault(r => r.Id == id);
+            if (rule is null) return;
+            rule.LastRunUtc = DateTime.UtcNow;
+            rule.LastResult = result.Length > 300 ? result[..300] : result;
+            Write(SchedulePath, store);
+        }
+    }
+
     public void MarkScheduleRun(string id, string localDate, string result)
     {
         lock (_lock)
