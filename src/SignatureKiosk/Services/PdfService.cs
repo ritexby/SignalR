@@ -17,7 +17,13 @@ public class PdfService
 {
     /// <summary>Upper bound on image blocks rendered into one PDF, so a pathological document
     /// cannot make a single signature consume hundreds of MB.</summary>
-    private const int MaxImageBlocks = 30;
+    /// <summary>
+    /// Сколько РАЗНЫХ картинок разбирается в одном документе. Расход памяти задаёт именно это
+    /// число: каждый файл разбирается один раз и держится в keepImages, а сколько раз он потом
+    /// поставлен на листы, стоит ноль. Прежде считались размещения, и одна печать, поставленная
+    /// у сорока пунктов, теряла десять из них молча.
+    /// </summary>
+    private const int MaxImages = 30;
 
     private readonly StorageService _storage;
     private readonly ILogger<PdfService>? _log;
@@ -195,7 +201,6 @@ public class PdfService
         var keepImages = new Dictionary<string, XImage>(StringComparer.Ordinal);
         // Потоки картинок, присланных заказом: живут до сохранения вместе с самими картинками.
         var keepStreams = new List<MemoryStream>();
-        var imageBlocks = 0;
         // <param name="поУмолчаниюПоЦентру">
         // Блоки экрана подписи на планшете стоят по центру: поле подписи по центру, и текст
         // вокруг него тоже. В бумаге они прижимались влево, и экран расходился с листом.
@@ -231,7 +236,27 @@ public class PdfService
                 }
                 if (!string.IsNullOrEmpty(block.ImageUrl))
                 {
-                    if (imageBlocks >= MaxImageBlocks) continue;   // bounded work per document
+                    // Предел стоит на число РАЗНЫХ картинок, а не на число их размещений. Память
+                    // расходуют разобранные файлы, и они уже посчитаны словарём keepImages; сорок
+                    // раз поставленная одна и та же печать не стоит ни байта сверх первой. Раньше
+                    // считались размещения, и документ с одной печатью на каждом из сорока пунктов
+                    // терял десять из них молча. Замер: 35 блоков, в бумаге 30 картинок, 35 меток,
+                    // и ни слова об этом ни в бумаге, ни в ответе сохранения, ни в журнале.
+                    var путьКартинки = DocumentTemplating.IsApiImage(block.ImageUrl)
+                        ? null : MediaFile(block.ImageUrl);
+                    var новаяКартинка = путьКартинки is not null && !keepImages.ContainsKey(путьКартинки);
+                    if (новаяКартинка && keepImages.Count >= MaxImages)
+                    {
+                        _log?.LogWarning("Картинка {Url} не вложена в PDF: больше {Max} разных картинок в одном документе",
+                                         block.ImageUrl, MaxImages);
+                        w.ClearWrap();
+                        w.Rich(new List<TextRun> { new()
+                        {
+                            Text = "[рисунок не вложен: в одном документе не больше " + MaxImages + " разных картинок]",
+                            Italic = true
+                        } }, isHeading: false);
+                        continue;
+                    }
                     // Картинка из заказа приходит прямо в документе строкой BASE64: файла для
                     // неё нет и быть не должно, иначе запись перестала бы быть самодостаточной,
                     // а собрать PDF заново через год стало бы нечем.
@@ -266,7 +291,21 @@ public class PdfService
                     else
                     {
                         var file = MediaFile(block.ImageUrl);
-                        if (file == null) continue;
+                        if (file == null)
+                        {
+                            // Молчать нельзя. Файла нет, значит рисунок из документа пропал, а
+                            // человек под этим документом расписался. Раньше здесь стоял тихий
+                            // пропуск: в бумаге на месте схемы оказывалось пустое место, и по
+                            // листу нельзя было понять, что чего-то не хватает.
+                            _log?.LogWarning("Картинка {Url} не вложена в PDF: файла нет", block.ImageUrl);
+                            w.ClearWrap();
+                            w.Rich(new List<TextRun> { new()
+                            {
+                                Text = "[рисунок не вложен: файл удалён из библиотеки картинок]",
+                                Italic = true
+                            } }, isHeading: false);
+                            continue;
+                        }
                         ключ = file;
                         if (!keepImages.TryGetValue(file, out xi))
                         {
@@ -276,7 +315,6 @@ public class PdfService
                             keepImages[file] = xi;
                         }
                     }
-                    imageBlocks++;
                     // Картинка не встаёт сбоку другой картинки: две обтекаемые подряд означали бы
                     // колонку из картинок и обрывки текста между ними.
                     w.ClearWrap();

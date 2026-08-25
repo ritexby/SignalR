@@ -595,6 +595,43 @@ public class StorageService
 
     // ---------------- Images ----------------
 
+    /// <summary>
+    /// В каких документах библиотеки стоит эта картинка. Отдаются названия для человека, а не
+    /// внутренние номера: список показывается оператору в отказе на удаление.
+    /// </summary>
+    /// <remarks>
+    /// Ссылка в блоке хранится как «/media/имя-файла», а иногда с запросом на конце. Поэтому
+    /// сравнивается имя файла, а не строка целиком.
+    /// </remarks>
+    public List<string> ГдеСтоитКартинка(string? имяФайла)
+    {
+        var файл = (имяФайла ?? "").Trim();
+        var где = new List<string>();
+        if (файл.Length == 0) return где;
+        lock (_lock)
+        {
+            foreach (var info in ЧитатьСписокNoLock())
+            {
+                var док = GetDocumentNoLock(info.Id);
+                if (док is null) continue;
+                var нашлось = false;
+                foreach (var стр in док.Pages ?? new List<DocPage>())
+                {
+                    foreach (var б in стр.Blocks ?? new List<DocBlock>())
+                    {
+                        var url = (б?.ImageUrl ?? "").Trim();
+                        if (url.Length == 0) continue;
+                        var имя = url.Split('?')[0].Split('/').LastOrDefault() ?? "";
+                        if (string.Equals(имя, файл, StringComparison.OrdinalIgnoreCase)) { нашлось = true; break; }
+                    }
+                    if (нашлось) break;
+                }
+                if (нашлось) где.Add(ИмяДляСписка(док.Title, info.Name, info.Code));
+            }
+        }
+        return где;
+    }
+
     public List<ImageInfo> GetImages()
     {
         lock (_lock) return ReadOr(ImagesIndexPath, () => new List<ImageInfo>());

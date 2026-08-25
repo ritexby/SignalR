@@ -1252,7 +1252,18 @@
           ? "0 " + зазор + "px " + зазор + "px 0"
           : "0 0 " + зазор + "px " + зазор + "px";
       }
-      var im = document.createElement("img"); im.src = b.imageUrl;
+      var im = document.createElement("img");
+      // Рисунка может не оказаться: его удалили из библиотеки, а документ остался со ссылкой.
+      // Раньше клиент видел на этом месте пустоту и подписывал документ, не зная, что схемы,
+      // плана или бланка в нём не хватает. Теперь на месте рисунка стоят слова, и молчаливой
+      // потери нет: то же самое печатается и в бумаге.
+      im.onerror = function () {
+        var вместо = document.createElement("div");
+        вместо.className = "doc-image-missing";
+        вместо.textContent = "Рисунок не отображается. Обратитесь к сотруднику, прежде чем подписывать.";
+        if (im.parentNode) im.parentNode.replaceChild(вместо, im);
+      };
+      im.src = b.imageUrl;
       var w = Math.min(Math.max(parseInt(b.imageWidth, 10) || 100, 10), 100);
       im.style.width = (wrap === "left" || wrap === "right") ? "100%" : (w + "%");
       fig.appendChild(im); parent.appendChild(fig);
