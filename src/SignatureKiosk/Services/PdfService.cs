@@ -1520,12 +1520,32 @@ public class PdfService
             // рамкой на бумаге была вся расчерчена красным.
             var сетка = XColor.FromArgb(0x97, 0xa2, 0xb2);
             var рамка = string.IsNullOrEmpty(border) ? сетка : ColorOf(border);
-            var верхТаблицы = _y;
+            // Верх таблицы НА ЭТОМ ЛИСТЕ. Раньше он был один на всю таблицу, и у таблицы,
+            // перешедшей на следующий лист, внешняя рамка рисовалась одним прямоугольником от
+            // верха на первом листе до низа на последнем, то есть поперёк всего листа.
+            var верхНаЛисте = _y;
             // Шаг строки в ячейке. Заданный оператором интервал это доля кегля, как unitless
             // line-height на планшете; незаданный это прежние 1.15 высоты шрифта, до последнего
             // знака. Прежде высота строки таблицы была одна и та же при любом интервале.
             var доля = lineHeightPct > 0 ? Math.Clamp(lineHeightPct, 100, 250) / 100.0 : 0;
             double Шаг(XFont f) => доля > 0 ? f.Size * доля : f.GetHeight() * 1.15;
+
+            // Внешняя рамка цветом блока: на экране она обводит таблицу целиком, а не каждую
+            // ячейку. Закрывается на каждом листе своим прямоугольником.
+            void ЗакрытьРамку()
+            {
+                if (string.IsNullOrEmpty(border) || _y - верхНаЛисте <= 0) return;
+                _gfx.DrawRectangle(new XPen(рамка, 1.0), Margin, верхНаЛисте, _contentW, _y - верхНаЛисте);
+                Note("border", Margin, верхНаЛисте, _contentW, _y - верхНаЛисте, border!, color: border!);
+            }
+
+            void НаНовыйЛист()
+            {
+                ЗакрытьРамку();
+                ClearFloat();
+                NewPage();
+                верхНаЛисте = _y;
+            }
 
             for (var ri = 0; ri < rows.Count; ri++)
             {
@@ -1544,46 +1564,72 @@ public class PdfService
                     h = Math.Max(h, строки.Count * Шаг(font));
                 }
                 h += 2 * отступ;
-                Ensure(h);
 
-                double x = Margin;
-                for (var ci = 0; ci < cols; ci++)
+                // Строка рисуется частями, если целиком на лист не влезает. Раньше здесь стояло
+                // одно Ensure(h): оно уводило на новый лист, а строку выше листа рисовало за его
+                // нижним краем, и хвост ячейки пропадал молча. Замер до починки: ячейка из 700
+                // кусков текста, клиент прочитал на планшете все 700, в бумаге оказалось 636,
+                // и ни служба, ни бумага об этом не сказали ни слова. Это ровно то, чего быть
+                // не должно: клиент подписал одно, а в бумаге другое.
+                //
+                // Тот же приём уже применён к плашке блока (см. _boxParts): часть рисуется на
+                // этом листе, остальное продолжается на следующем.
+                var шаг = Шаг(font);
+                var строкВЯчейке = Math.Max(1, разбито.Count == 0 ? 0 : разбито.Max(c => c.Count));
+                var нарисовано = 0;
+
+                while (true)
                 {
-                    var rect = new XRect(x, _y, widths[ci], h);
-                    var заливка = шапка ? "#f1f5f9" : bg;
-                    // Заливка и сетка ячейки сообщаются в раскладку теми же видами, что плашка и
-                    // рамка блока: читающий раскладку разбирает их одним и тем же кодом, и таблица
-                    // не оказывается исключением из общего правила.
-                    if (!string.IsNullOrEmpty(заливка))
+                    var свободноПодТекст = _pageH - Margin - _y - 2 * отступ;
+                    var влезает = свободноПодТекст > 0 ? (int)Math.Floor(свободноПодТекст / шаг) : 0;
+                    if (влезает <= 0)
                     {
-                        var цвет = HexOf(ColorOf(заливка));
-                        _gfx.DrawRectangle(new XSolidBrush(ColorOf(заливка)), rect);
-                        Note("box", rect.X, rect.Y, rect.Width, rect.Height, цвет, color: цвет);
+                        НаНовыйЛист();
+                        свободноПодТекст = _pageH - Margin - _y - 2 * отступ;
+                        влезает = свободноПодТекст > 0 ? (int)Math.Floor(свободноПодТекст / шаг) : 0;
+                        // На чистом листе одна строка обязана поместиться, иначе круг вечен.
+                        if (влезает <= 0) влезает = 1;
                     }
-                    _gfx.DrawRectangle(new XPen(сетка, 0.6), rect);
-                    Note("border", rect.X, rect.Y, rect.Width, rect.Height, HexOf(сетка), color: HexOf(сетка));
-                    // Лишнее место от заданного межстрочного делится над строкой и под ней, как и
-                    // в обычном абзаце: иначе текст ячейки прижимался бы к её верху.
-                    var шаг = Шаг(font);
-                    var ty = _y + отступ + Math.Max(0, шаг - font.GetHeight() * 1.15) / 2;
-                    foreach (var строка in разбито[ci])
+                    var сколько = Math.Min(влезает, строкВЯчейке - нарисовано);
+                    if (сколько <= 0) сколько = 1;
+                    var высотаЧасти = сколько * шаг + 2 * отступ;
+
+                    double x = Margin;
+                    for (var ci = 0; ci < cols; ci++)
                     {
-                        _gfx.DrawString(строка, font, XBrushes.Black, new XPoint(x + отступ, ty + font.GetHeight()));
-                        ty += шаг;
+                        var rect = new XRect(x, _y, widths[ci], высотаЧасти);
+                        var заливка = шапка ? "#f1f5f9" : bg;
+                        // Заливка и сетка ячейки сообщаются в раскладку теми же видами, что плашка
+                        // и рамка блока: читающий раскладку разбирает их одним и тем же кодом, и
+                        // таблица не оказывается исключением из общего правила.
+                        if (!string.IsNullOrEmpty(заливка))
+                        {
+                            var цвет = HexOf(ColorOf(заливка));
+                            _gfx.DrawRectangle(new XSolidBrush(ColorOf(заливка)), rect);
+                            Note("box", rect.X, rect.Y, rect.Width, rect.Height, цвет, color: цвет);
+                        }
+                        _gfx.DrawRectangle(new XPen(сетка, 0.6), rect);
+                        Note("border", rect.X, rect.Y, rect.Width, rect.Height, HexOf(сетка), color: HexOf(сетка));
+                        // Лишнее место от заданного межстрочного делится над строкой и под ней,
+                        // как и в обычном абзаце: иначе текст ячейки прижимался бы к её верху.
+                        var ty = _y + отступ + Math.Max(0, шаг - font.GetHeight() * 1.15) / 2;
+                        var часть = разбито[ci].Skip(нарисовано).Take(сколько).ToList();
+                        foreach (var строка in часть)
+                        {
+                            _gfx.DrawString(строка, font, XBrushes.Black, new XPoint(x + отступ, ty + font.GetHeight()));
+                            ty += шаг;
+                        }
+                        Note("cell", rect.X, rect.Y, rect.Width, rect.Height,
+                            string.Join(" ", часть), font.Size, шапка);
+                        x += widths[ci];
                     }
-                    Note("cell", rect.X, rect.Y, rect.Width, rect.Height,
-                        string.Join(" ", разбито[ci]), font.Size, шапка);
-                    x += widths[ci];
+                    _y += высотаЧасти;
+                    нарисовано += сколько;
+                    if (нарисовано >= строкВЯчейке) break;
+                    НаНовыйЛист();
                 }
-                _y += h;
             }
-            // Внешний прямоугольник цветом рамки блока: на экране рамка обводит таблицу целиком,
-            // а не каждую ячейку.
-            if (!string.IsNullOrEmpty(border))
-            {
-                _gfx.DrawRectangle(new XPen(рамка, 1.0), Margin, верхТаблицы, _contentW, _y - верхТаблицы);
-                Note("border", Margin, верхТаблицы, _contentW, _y - верхТаблицы, border!, color: border!);
-            }
+            ЗакрытьРамку();
             _y += 8;
         }
 

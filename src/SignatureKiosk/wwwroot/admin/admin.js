@@ -11262,7 +11262,15 @@
     conn.on("AlertsChanged", function () { loadAlerts(); });
     function reg() { conn.invoke("RegisterAdmin").catch(function () {}); }
     // Переподключение теряет группы: если окно наблюдения открыто, в свою надо войти заново.
-    conn.onreconnected(function () { reg(); loadDevices(); loadAlerts(); if (watch.deviceId) watchStart(); });
+    // Версия страницы перечитывается при каждом восстановлении связи. Связь рвётся как раз тогда,
+    // когда службу перезапускают, то есть при выкате новой версии. Раньше номер читался один раз
+    // за загрузку админки, и открытая с утра вкладка после выката сравнивала свежую версию,
+    // сообщённую планшетами, со своим вчерашним числом и писала «обновите страницу на планшете»
+    // на карточках исправного парка. Замер: три карточки из четырёх обвинены зря.
+    conn.onreconnected(function () {
+      узнатьВерсиюСтраницы();
+      reg(); loadDevices(); loadAlerts(); if (watch.deviceId) watchStart();
+    });
     conn.onclose(reconnectLater);
     conn.start().then(reg).then(loadAlerts).catch(reconnectLater);
   }
