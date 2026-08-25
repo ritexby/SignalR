@@ -1222,6 +1222,12 @@
         box.appendChild(li);
       });
       if (!box.childNodes.length) return;
+      // Выравнивание списка планшет не выполнял вовсе, а бумага выполняла: оператор задавал
+      // «по правому краю», клиент видел список слева, а в подписанном листе он стоял справа.
+      // Замер: на планшете textAlign «start» и правый край пункта на 164 при ширине 800, в
+      // бумаге правый край 544.9 при правом поле 545.
+      var выравн = String((b && b.align) || "").toLowerCase();
+      if (выравн === "center" || выравн === "right" || выравн === "justify") box.style.textAlign = выравн;
       styleBox(box, b);
       parent.appendChild(box); return;
     }
