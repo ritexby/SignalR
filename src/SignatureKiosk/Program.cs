@@ -1179,10 +1179,24 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
     // Присланный пункт переводится так же, как на пути показа: обязательность только та, о
     // которой сказали явно. Иначе предпросмотр показывал бы звёздочку там, где на планшете её
     // не будет, и обещал бы не тот экран.
+    // Страница, назначенная оператором принимающей пункты из заказа. Нет такой, значит документ
+    // закрыт от дописок, и присланный пункт НЕ показывается: ровно так поступает показ на
+    // планшет. Раньше предпросмотр показывал такой пункт всегда и даже заводил под него
+    // отдельную страницу, а планшет его отбрасывал. Оператор смотрел предпросмотр, видел
+    // присланные пункты и считал, что настроил верно, а клиент их не видел.
+    var страницаПрисланных = DocumentTemplating.СтраницаДляПрисланных(doc);
+    var отброшеноПред = new List<string>();
     foreach (var cb in (dto?.Checkboxes ?? new List<ApiCheckboxDto>()).Where(x => x is not null).Select(x => x.ВПункт()))
     {
         var key = DocumentTemplating.CleanKey(cb.Key);
         if (key.Length > 0 && live.Contains(key)) { states[key] = cb.Checked; continue; }
+        if (страницаПрисланных is null)
+        {
+            отброшеноПред.Add("пункт «" + (key.Length > 0 ? key : (cb.Label ?? "").Trim())
+                + "» не показан: ни одна страница документа не принимает пункты из API. "
+                + "Отметьте нужную страницу в редакторе признаком «чекбоксы из API»");
+            continue;
+        }
         extra.Add(cb);
     }
     var selections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1202,7 +1216,10 @@ admin.MapPost("/document/preview", (PreviewDto? dto) =>
         missingPlaceholders = DocumentTemplating.Missing(doc, dto?.Fields),
         emptyPlaceholders = DocumentTemplating.Empty(doc, dto?.Fields),
         pagesTotal = (doc.Pages ?? new List<DocPage>()).Count,
-        pagesShown = resolved.Pages.Count
+        pagesShown = resolved.Pages.Count,
+        // То же поле и с тем же смыслом, что у показа на планшет: что из присланного не попало
+        // на экран и почему. Предпросмотр обязан обещать ровно то, что увидит клиент.
+        dropped = отброшеноПред
     });
 });
 

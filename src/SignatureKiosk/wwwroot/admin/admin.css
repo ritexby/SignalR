@@ -1613,3 +1613,29 @@ body.watch-solo .content { flex: 1 1 auto; min-height: 0; padding: 0; max-width:
 /* Строка «нужно ли тело» стоит первой в разделе «Что слать» и должна читаться как правило,
    а не как ещё один абзац описания. */
 .api-body-need { font-weight: 600; }
+
+/* Что из присланного заказом не попало на экран клиента. Стоит в шапке предпросмотра, где
+   оператор и так читает счёт страниц: беда должна попасться на глаза там же, где итог. */
+.pv-dropped {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 3px solid #b45309;
+  background: #fffbeb;
+  border-radius: 0 6px 6px 0;
+}
+.pv-dropped-head { font-weight: 600; color: #7c2d12; margin-bottom: 4px; }
+.pv-dropped-list { margin: 0; padding-left: 18px; color: #7c2d12; font-size: .9rem; line-height: 1.4; }
+
+/* Повторяющиеся коды рабочих мест: стоят над списком, потому что это не свойство одной строки,
+   а беда всего списка, и увидеть её надо до того, как оператор начнёт править строки. */
+.ws-dup {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #f59e0b;
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: #fffbeb;
+}
+.ws-dup-head { font-weight: 600; color: #7c2d12; margin-bottom: 6px; }
+.ws-dup-list { margin: 0 0 6px; padding-left: 18px; color: #7c2d12; }
+.ws-dup-note { font-size: .88rem; color: #7c2d12; line-height: 1.45; }
