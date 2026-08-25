@@ -169,6 +169,38 @@ public class KioskHub : Hub
         await _coord.NotifyAdminsDevicesAsync();
     }
 
+    /// <summary>
+    /// Планшет сообщает размер своего экрана: ширину и высоту области просмотра в точках
+    /// разметки и плотность пикселей. Окно наблюдения показывает уменьшенный экран планшета
+    /// один в один, и настоящие размеры знает только сам планшет.
+    ///
+    /// Отдельный вызов, а не аргументы RegisterKiosk, ровно по той же причине, что и
+    /// ReportVersion: SignalR сопоставляет методы хаба по имени и числу аргументов, и лишний
+    /// параметр у регистрации оставил бы без регистрации весь парк, который ещё не перезагрузил
+    /// страницу. Планшет, который сюда не звонит, просто остаётся без размеров, и это само по
+    /// себе ответ оператору.
+    ///
+    /// Личность берётся из токена, а не из аргументов: иначе один планшет мог бы переписать
+    /// размеры чужой карточки.
+    /// </summary>
+    /// <returns>Принял ли сервер сведения. Планшет запоминает отправленное только по этому
+    /// ответу: иначе он считал бы доставленным то, что сервер отверг, и не повторил бы, когда
+    /// повод для отказа исчез.</returns>
+    public async Task<bool> ReportScreenSize(double width, double height, double pixelRatio)
+    {
+        var deviceId = DeviceId;
+        if (string.IsNullOrEmpty(deviceId)) return false;
+        // Отсев до приведения к целому: приведение бесконечности или NaN к int даёт мусорное
+        // число, а не ошибку. Сравнения с NaN ложны сами по себе, поэтому он отсеивается здесь же.
+        if (!(width >= 1 && width <= 10000) || !(height >= 1 && height <= 10000)) return false;
+        var итог = _storage.SetDeviceScreen(deviceId, (int)Math.Round(width), (int)Math.Round(height), pixelRatio);
+        // Уведомление только на настоящем изменении: планшет сообщает размер на каждом
+        // подключении, и без этого условия любое переподключение парка гнало бы в админки
+        // обновление списка ни о чём.
+        if (итог == DeviceScreenUpdate.Changed) await _coord.NotifyAdminsDevicesAsync();
+        return итог != DeviceScreenUpdate.Rejected;
+    }
+
     /// <summary>Called by a tablet once a code has been scanned, so it returns to whatever it
     /// should be showing (its ads, or the document it was on).</summary>
     public async Task FinishScan()

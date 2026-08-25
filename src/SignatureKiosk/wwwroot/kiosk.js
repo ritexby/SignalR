@@ -2546,12 +2546,92 @@
   // added since, and without this the only symptom is a command that seems to do nothing.
   var APP_VERSION = "7.4";
 
+  // ==================================================================
+  // Размер экрана планшета
+  // ==================================================================
+  // Окно наблюдения показывает уменьшенный экран планшета один в один, но настоящие размеры
+  // знает только сам планшет: сервер о них не знал ничего, и окно рисовало рамку по собственным
+  // числам, к планшету отношения не имевшим. Планшет сообщает размер при подключении и дальше
+  // при каждом изменении: поворот, системная панель, изменение области просмотра.
+  //
+  // Отдельно от потока состояния, который уходит наблюдателю: тот идёт, только пока за планшетом
+  // кто-то смотрит, и обрывается вместе с наблюдением. Сервер же должен знать размер и заранее,
+  // чтобы окно наблюдения открылось правильной формы ещё до первого кадра, и после того, как
+  // планшет ушёл со связи.
+  //
+  // Пачками, а не на каждое событие. Поворот планшета это не одно изменение размера, а очередь
+  // из них, пока система доводит разметку, и каждое ушло бы отдельным сообщением. Треть секунды
+  // заведомо длиннее этой очереди и незаметна оператору, который смотрит на экран человека.
+  var SCREEN_HOLD = 300;
+  var screenTimer = null;
+  var screenSent = null;    // что уже принято сервером: то же самое второй раз не отправляется
+  var screenKnown = true;   // знает ли служба этот вызов; служба старше страницы его не знает
+  var screenMine = false;   // узнала ли служба в этом подключении планшет; иначе говорить некому
+
+  function screenNow() {
+    // Те же точки, в которых планшет сам рисует: разметка идёт в них, и окну наблюдения нужны
+    // они, а не пиксели матрицы. Плотность уходит отдельным числом и в размер не подмешивается.
+    var w = Math.round(window.innerWidth || document.documentElement.clientWidth || 0);
+    var h = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
+    if (!(w > 0) || !(h > 0)) return null;
+    var r = Number(window.devicePixelRatio);
+    if (!(r > 0) || !isFinite(r)) r = 1;
+    // До сотых: дальше идут только погрешности вычисления масштаба, из-за которых планшет
+    // сообщал бы «изменение» на ровном месте.
+    return { w: w, h: h, r: Math.round(r * 100) / 100 };
+  }
+
+  function screenSend() {
+    screenTimer = null;
+    if (!conn || !screenMine || !screenKnown) return;
+    var s = screenNow();
+    if (!s) return;
+    var ключ = s.w + "x" + s.h + "@" + s.r;
+    if (ключ === screenSent) return;
+    // Отправленным считается только то, что служба действительно приняла и подтвердила: иначе
+    // сообщение, потерянное на разрыве связи или отвергнутое службой (планшет отозвали),
+    // считалось бы доставленным, и размер оставался бы неверным до следующего поворота.
+    conn.invoke("ReportScreenSize", s.w, s.h, s.r).then(function (принято) {
+      screenSent = принято === false ? null : ключ;
+    }).catch(function (e) {
+      screenSent = null;
+      // Служба старше страницы: такого метода у неё нет, и звонить туда на каждый поворот
+      // незачем. До следующего подключения планшет об этом молчит.
+      if (/method does not exist/i.test(String((e && e.message) || e))) screenKnown = false;
+    });
+  }
+
+  function screenPush(сразу) {
+    clearTimeout(screenTimer);
+    screenTimer = null;
+    if (сразу) { screenSend(); return; }
+    screenTimer = setTimeout(screenSend, SCREEN_HOLD);
+  }
+
+  ["resize", "orientationchange"].forEach(function (ev) {
+    window.addEventListener(ev, function () { screenPush(false); });
+  });
+  // Область просмотра меняется и без изменения окна: экранная клавиатура, панели системы.
+  // Есть не во всяком WebView, поэтому только там, где браузер это умеет.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", function () { screenPush(false); });
+  }
+
   function register() {
     return conn.invoke("RegisterKiosk").then(function (cmd) {
       applyCommand(cmd);
       // Sent separately, and failure is ignored: registering is what matters, the version is
       // only there so the operator can spot a tablet still running an older page.
       conn.invoke("ReportVersion", APP_VERSION).catch(function () { /* older server */ });
+      // Размер экрана: тем же порядком и с теми же последствиями, что и версия страницы.
+      // Заново на каждом подключении, а не один раз за жизнь страницы: служба могла
+      // перезапуститься или обновиться, а кроме планшета размер его экрана не знает никто.
+      // Окну, в котором планшет не узнан, рассказывать о себе нечего и некому: страницу
+      // планшета открывают и в браузере оператора, и тогда за ней нет никакого железа.
+      screenMine = !cmd || cmd.mode !== "notdevice";
+      screenSent = null;
+      screenKnown = true;
+      if (screenMine) screenPush(true);
     }).catch(function (e) { console.error("register failed", e); });
   }
 

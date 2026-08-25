@@ -118,6 +118,47 @@ public class StorageService
         }
     }
 
+    // Разумные пределы для размера экрана. Числа приходят от страницы планшета, а её можно
+    // открыть в чём угодно, вплоть до окна в один пиксель: заведомо бессмысленное значение
+    // лучше не запоминать вовсе, чем показать оператору как размер его железа.
+    private const int ScreenSideMin = 1;
+    private const int ScreenSideMax = 10000;
+
+    /// <summary>
+    /// Планшет сообщил размер своего экрана. Записывается и рассылается только настоящее
+    /// изменение: поворот планшета иначе означал бы запись файла на каждое промежуточное
+    /// состояние разметки. Отказ отличается от «уже знаю» намеренно: по отказу планшет поймёт,
+    /// что сведения не приняты, и не будет считать их доставленными.
+    /// </summary>
+    public DeviceScreenUpdate SetDeviceScreen(string id, int width, int height, double pixelRatio)
+    {
+        if (width < ScreenSideMin || width > ScreenSideMax) return DeviceScreenUpdate.Rejected;
+        if (height < ScreenSideMin || height > ScreenSideMax) return DeviceScreenUpdate.Rejected;
+        // Плотность округляется до сотых: дальше идут только погрешности вычисления масштаба, а
+        // из-за них планшет сообщал бы «изменение» на ровном месте и заставлял все открытые
+        // админки перечитывать список планшетов.
+        var ratio = double.IsNaN(pixelRatio) || double.IsInfinity(pixelRatio) || pixelRatio <= 0 || pixelRatio > 20
+            ? 1d
+            : Math.Round(pixelRatio, 2, MidpointRounding.AwayFromZero);
+        lock (_lock)
+        {
+            var list = ReadOr(DevicesPath, () => new List<Device>());
+            var dev = list.FirstOrDefault(d => d.Id == id);
+            if (dev == null) return DeviceScreenUpdate.Rejected;
+            // Отозванный планшет не рассказывает о себе ничего. Отзыв закрывает вход по токену,
+            // но соединение, открытое до отзыва, живёт до своего разрыва, и без этой проверки
+            // отозванный планшет продолжал бы обновлять свою карточку в админке.
+            if (dev.Status != "active") return DeviceScreenUpdate.Rejected;
+            if (dev.ScreenWidth == width && dev.ScreenHeight == height && dev.ScreenPixelRatio == ratio)
+                return DeviceScreenUpdate.Unchanged;
+            dev.ScreenWidth = width;
+            dev.ScreenHeight = height;
+            dev.ScreenPixelRatio = ratio;
+            Write(DevicesPath, list);
+            return DeviceScreenUpdate.Changed;
+        }
+    }
+
     public bool UpdateDevice(string id, string? name, List<string>? groupIds, string? workstationId, bool touchWorkstation)
     {
         lock (_lock)

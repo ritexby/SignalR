@@ -678,6 +678,14 @@ admin.MapGet("/devices", (KioskHealthCache healthCache) =>
                 // Which build of the kiosk page this tablet is actually running. Blank on an old
                 // page that does not report it yet, which is itself the answer.
                 appVersion = isOnline && appVersions.TryGetValue(d.Id, out var v) ? v : null,
+                // Размер экрана планшета, каким его сообщила его собственная страница. Отдаётся
+                // и для отключённого планшета: окно наблюдения открывается по этим числам ещё до
+                // первого кадра, а карточка рассказывает, какое железо стоит на рабочем месте.
+                // Пусто у планшета на старой странице, которая размер не сообщает; пусто это
+                // «неизвестно», и его нельзя путать с нулём.
+                d.ScreenWidth,
+                d.ScreenHeight,
+                d.ScreenPixelRatio,
                 // Что сейчас на экране: реклама или документ. Оператору это нужно, чтобы знать,
                 // за чем есть смысл смотреть, особенно когда документ отправила внешняя система,
                 // а не он сам.
