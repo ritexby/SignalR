@@ -4372,6 +4372,30 @@
       // и перетаскивании: два разных счёта одного и того же однажды разошлись бы.
       обновитьПризнакPdf(card);
 
+      // Крупный текст для тех, кто плохо видит. Признак живёт у страницы, но показывается он
+      // только у первой: клиент включает крупный текст один раз в начале, и выбор держится до
+      // конца работы с этим документом. Ставить такую галочку на каждой странице значило бы
+      // обещать оператору то, чего планшет не делает.
+      //
+      // До этой правки признак был только в хранилище и на планшете, а в редакторе его не было
+      // вовсе: включить было негде, а сохранение из редактора его снимало, потому что сборка
+      // страницы это поле не читала. Оператор ставил признак, сохранял, и значок пропадал.
+      if (pi === 0) {
+        var крупно = el("label", "check-inline dyn-anchor head-flag");
+        var крупноCb = el("input"); крупноCb.type = "checkbox";
+        крупноCb.checked = !!page.bigText;
+        крупноCb.setAttribute("data-role", "bigtext");
+        крупно.title = "Клиент сможет сам увеличить буквы на планшете значком «Ааа» в правом верхнем углу.";
+        крупно.appendChild(крупноCb);
+        крупно.appendChild(document.createTextNode(" крупный текст «Ааа»"));
+        крупно.appendChild(помощь(
+          "Для клиентов, которые плохо видят. На планшете в правом верхнем углу появится значок "
+          + "«Ааа»: нажимая его, клиент увеличивает буквы ступенями до двукратного размера. "
+          + "Значок показывается только на первой странице, а выбранный размер держится до конца "
+          + "работы с документом. На бумагу это не влияет: в PDF текст печатается обычным."));
+        флаги.appendChild(крупно);
+      }
+
       if (!kind) {
         var dyn = el("label", "check-inline dyn-anchor head-flag");
         var dynCb = el("input"); dynCb.type = "checkbox"; dynCb.checked = !!page.includeDynamic; dynCb.setAttribute("data-role", "includedynamic");
@@ -5005,7 +5029,7 @@
     state.doc.title = $("docTitle").value; state.doc.signPrompt = $("signPrompt").value;
     state.doc.idleReturnSec = parseInt($("idleReturn").value, 10) || 0;
     var pages = [];
-    document.querySelectorAll('#pagesEditor [data-role="pagecard"]').forEach(function (card) {
+    document.querySelectorAll('#pagesEditor [data-role="pagecard"]').forEach(function (card, номерКарточки) {
       var hEd = card.querySelector('[data-role="heading"]');
       var headingRuns = hEd ? editorToRuns(hEd) : [];
       var pageCond = readCondition(card.querySelector('[data-role="pagecond"]'));
@@ -5049,8 +5073,16 @@
           || { key: "", label: "", required: true };
         scanOwn.ord = 0; scans = [scanOwn]; signatures = [];
       }
+      // Признак крупного текста читается только у первой страницы, потому что и рисуется он
+      // только у неё. У остальных он остаётся таким, каким пришёл с сервера: документ мог
+      // приехать ввозом или из внешней системы с признаком не на первой странице, и стирать его
+      // молча нельзя, служба сама переносит его на первую уцелевшую страницу.
+      var крупныйТекст = номерКарточки === 0
+        ? !!(card.querySelector('[data-role="bigtext"]') || {}).checked
+        : !!((state.doc.pages || [])[номерКарточки] || {}).bigText;
       var page = { heading: "", body: "", kind: pageKind || null, headingRuns: headingRuns, headingAlign: headingAlign, blocks: blocks, checkboxes: checkboxes,
         groups: groups, signatures: signatures, scans: scans, inputs: inputs, inPdf: pageInPdf, includeDynamic: includeDynamic,
+        bigText: крупныйТекст,
         checkRules: readCheckRules(card, checkboxes), showCheckAll: !!(card.querySelector('[data-role="checkall"]') || {}).checked };
       if (pageCond) page.visibleWhen = pageCond;
       pages.push(page);
