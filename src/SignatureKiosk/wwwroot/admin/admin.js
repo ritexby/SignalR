@@ -9796,14 +9796,33 @@
       var id = String(sel.value).replace(/^device:/, "");
       dev = (state.devices || []).filter(function (d) { return d.id === id; })[0] || null;
     }
+    // Адресуется рабочее место, а не планшет: код места задаёт сам заказчик, он переживает
+    // замену планшета и не меняется при перенастройке. Номер планшета берётся только тогда,
+    // когда места у него нет.
     if (dev && dev.workstation && dev.workstation.externalId) цель = '"workstationExternalId": "' + dev.workstation.externalId + '"';
     else if (dev) цель = '"deviceId": "' + dev.id + '"';
-    else цель = '"workstationExternalId": "WS-204"';
+    else {
+      // Планшет не выбран. Выдуманный код вроде «WS-204» тут ставить нельзя: оператор нажмёт
+      // «Отправить запрос», получит «рабочего места с таким кодом нет» и решит, что сломано
+      // API. Подставляется настоящий код этой установки, а если мест ещё не заведено, так и
+      // пишется прямо в заготовке.
+      var первое = (state.workstations || []).filter(function (w) { return w.externalId; })[0];
+      цель = первое
+        ? '"workstationExternalId": "' + первое.externalId + '"'
+        : '"workstationExternalId": "СНАЧАЛА ЗАВЕДИТЕ РАБОЧЕЕ МЕСТО НА ВКЛАДКЕ «МЕСТА»"';
+    }
 
     var поля = {};
     previewFields().forEach(function (k) { поля[k] = previewDefault(k); });
     var keys = docKeys();
-    var тело = { fields: поля };
+    var тело = {};
+    // Код документа обязателен, и это не украшение заготовки. Без него служба берёт документ,
+    // назначенный основным, а не тот, который сейчас правят: оператор проверял вторую анкету,
+    // а на планшет уходила первая, и понять это по ответу «ok» было нельзя. Замер на службе:
+    // тело без documentCode дало «"document":"main"» при открытом документе VTOROY.
+    var своя = запись(state.docId);
+    if (своя && своя.code) тело.documentCode = своя.code;
+    тело.fields = поля;
     if (keys.checks.length) тело.checkboxes = keys.checks.map(function (k) { return { key: k, checked: false }; });
     var groupNames = Object.keys(keys.groups);
     if (groupNames.length) тело.groups = groupNames.map(function (g) { return { key: g, selected: "" }; });
