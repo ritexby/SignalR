@@ -786,8 +786,14 @@ public static partial class DocumentTemplating
             foreach (var inp in p.Inputs ?? new List<DocInput>())
             {
                 if (inp is null || string.IsNullOrWhiteSpace(inp.Key)) continue;
-                inputs.TryGetValue(inp.Key.Trim(), out var v);
-                v = (v ?? inp.Value ?? "").Trim();
+                // Предзаполненное значение подставляется, ТОЛЬКО если планшет о поле не сказал
+                // ничего. Сказал и прислал пустое, значит клиент его стёр, и обязательное поле
+                // не заполнено. Прежде подстановка шла в обоих случаях, и запрос на подпись с
+                // пустым перечнем полей проходил проверку обязательности насквозь: замер дал
+                // 200 и бумагу с подтверждённым телефоном, которого клиент не вводил, тогда как
+                // то же поле без предзаполнения честно отвечало «поле не заполнено».
+                var естьОтвет = inputs.TryGetValue(inp.Key.Trim(), out var v);
+                v = (естьОтвет ? (v ?? "") : (inp.Value ?? "")).Trim();
                 if (inp.Required && v.Length == 0)
                     return "поле «" + (string.IsNullOrWhiteSpace(inp.Label) ? inp.Key : inp.Label) + "» не заполнено";
                 if (v.Length > 0 && BadInputValue(inp.Type, v) is { } почему)
@@ -1333,18 +1339,40 @@ public static partial class DocumentTemplating
         // документе, поэтому и придуманное автоматически не может совпасть с тем, что оператор
         // задал руками на другой странице.
         var занятые = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Повторы имён называются вслух. Имя это то, чем элемент узнают в записи подписи, в
+        // бумаге, в условиях и во внешней системе, и два элемента с одним именем ломают всё
+        // сразу. Замер: клиент отметил второй из двух одноимённых пунктов, а в бумаге галочка
+        // встала у первого, то есть лист утверждал согласие, которого человек не давал.
+        //
+        // Молча переименовать нельзя: на имя могут ссылаться условия показа и внешняя система,
+        // и переименование сломало бы их так же тихо. Поэтому документ сохраняется как есть, а
+        // оператор узнаёт о повторе из ответа на сохранение и на ввоз файлом.
+        var повторы = new List<string>();
+        void Занять(string? сырое, string что, string подпись)
+        {
+            var k = CleanKey(сырое);
+            if (k.Length == 0) return;
+            if (!занятые.Add(k) && !повторы.Contains(k))
+            {
+                повторы.Add(k);
+                Срезано("имя «" + k + "» стоит у нескольких элементов сразу (" + что + " «" + подпись
+                        + "»). Имя должно быть одно на весь документ: по нему элемент узнают в записи "
+                        + "подписи, в бумаге, в условиях показа и во внешней системе. Пока имена "
+                        + "совпадают, в бумаге отметки могут встать не на свои места.");
+            }
+        }
         foreach (var p in doc.Pages)
         {
             foreach (var c in p.Checkboxes ?? new List<DocCheckbox>())
-                if (c is not null) { var k = CleanKey(c.Key); if (k.Length > 0) занятые.Add(k); }
+                if (c is not null) Занять(c.Key, "пункт", Имя(PlainOf(c.LabelRuns, c.Label), c.Key));
             foreach (var g in p.Groups ?? new List<DocGroup>())
-                if (g is not null) { var k = CleanKey(g.Key); if (k.Length > 0) занятые.Add(k); }
+                if (g is not null) Занять(g.Key, "выбор", Имя(PlainOf(g.TitleRuns, g.Title), g.Key));
             foreach (var x in p.Signatures ?? new List<DocSignature>())
-                if (x is not null) { var k = CleanKey(x.Key); if (k.Length > 0) занятые.Add(k); }
+                if (x is not null) Занять(x.Key, "поле подписи", Имя(x.Label, x.Key));
             foreach (var x in p.Scans ?? new List<DocScan>())
-                if (x is not null) { var k = CleanKey(x.Key); if (k.Length > 0) занятые.Add(k); }
+                if (x is not null) Занять(x.Key, "поле сканирования", Имя(x.Label, x.Key));
             foreach (var x in p.Inputs ?? new List<DocInput>())
-                if (x is not null) { var k = CleanKey(x.Key); if (k.Length > 0) занятые.Add(k); }
+                if (x is not null) Занять(x.Key, "поле ввода", Имя(x.Label, x.Key));
         }
         foreach (var p in doc.Pages)
         {

@@ -310,14 +310,22 @@ public class PdfService
         // собранные в конец галочки уже читались бы про другое. Состояние берётся из записи
         // подписи (что человек действительно отметил), а место - из документа, который ему
         // показали. Сопоставление по имени, а при его отсутствии по тексту, по порядку.
-        var itemsByKey = new Dictionary<string, SubmittedItem>(StringComparer.OrdinalIgnoreCase);
-        foreach (var it in rec.Items ?? new List<SubmittedItem>())
-            if (it is not null && !string.IsNullOrEmpty(it.Key)) itemsByKey[it.Key] = it;
+        // Записи держатся СПИСКОМ по порядку, а не словарём «имя к одной записи». Словарь при
+        // двух пунктах с одним именем оставлял последнюю, и StateOf отдавал её состояние обоим
+        // пунктам сразу. Замер: клиент отметил второй из двух одноимённых, и в бумаге галочка
+        // встала у первого, то есть лист утверждал согласие, которого человек не давал. Первая
+        // запись при этом уходила в хвост «Отмеченные пункты», и лист противоречил сам себе.
+        //
+        // Порядок записи совпадает с порядком документа: планшет собирает отметки, обходя
+        // страницы и их содержимое сверху вниз. Поэтому первая ещё не напечатанная запись с
+        // этим именем и есть та самая. Ровно так уже сделано для безымянных пунктов ниже, и
+        // верное правило просто не применялось к именованным.
+        var сПунктами = new List<SubmittedItem>((rec.Items ?? new List<SubmittedItem>())
+            .Where(i => i is not null && !string.IsNullOrEmpty(i.Key)));
         var unkeyed = new List<SubmittedItem>((rec.Items ?? new List<SubmittedItem>())
             .Where(i => i is not null && string.IsNullOrEmpty(i.Key)));
-        var groupsByKey = new Dictionary<string, SubmittedGroup>(StringComparer.OrdinalIgnoreCase);
-        foreach (var g in rec.Groups ?? new List<SubmittedGroup>())
-            if (g is not null && !string.IsNullOrEmpty(g.Key)) groupsByKey[g.Key] = g;
+        var сГруппами = new List<SubmittedGroup>((rec.Groups ?? new List<SubmittedGroup>())
+            .Where(g => g is not null && !string.IsNullOrEmpty(g.Key)));
         // Подпись из поля страницы. Расшифровывается один раз: одна и та же подпись может
         // печататься и в потоке, и по заданному месту.
         XImage? PageSignature(string? key)
@@ -344,10 +352,15 @@ public class PdfService
 
         bool StateOf(DocCheckbox cb)
         {
-            if (!string.IsNullOrEmpty(cb.Key) && itemsByKey.TryGetValue(cb.Key, out var byKey))
+            if (!string.IsNullOrEmpty(cb.Key))
             {
-                printedItems.Add(byKey);
-                return byKey.Checked;
+                var byKey = сПунктами.FirstOrDefault(i => !printedItems.Contains(i) &&
+                    string.Equals(i.Key, cb.Key, StringComparison.OrdinalIgnoreCase));
+                if (byKey is not null)
+                {
+                    printedItems.Add(byKey);
+                    return byKey.Checked;
+                }
             }
             // Безымянный пункт узнаём по тексту, беря первый ещё не напечатанный: на планшете
             // отметки собираются в том же порядке, в каком они здесь встречаются.
@@ -443,9 +456,17 @@ public class PdfService
                     // относится к соседнему абзацу, а собранное в конец читалось бы про другое.
                     var inp = page.Inputs[index];
                     w.ClearWrap();
-                    var значение = (rec.Inputs ?? new List<SubmittedInput>())
-                        .FirstOrDefault(x => x is not null && string.Equals(x.Key, inp.Key, StringComparison.OrdinalIgnoreCase))?.Value;
-                    if (string.IsNullOrWhiteSpace(значение)) значение = inp.Value;
+                    // Запись берётся целиком, а не сразу её значение. Разница решающая: «записи
+                    // по этому имени нет» и «запись есть, но пустая» это два разных ответа
+                    // клиента, а прежнее IsNullOrWhiteSpace склеивало их в один и на оба
+                    // подставляло предзаполненное значение из снимка. Клиент стирал присланный
+                    // заказом телефон, а бумага печатала его как подтверждённый.
+                    var записьПоля = (rec.Inputs ?? new List<SubmittedInput>())
+                        .FirstOrDefault(x => x is not null && string.Equals(x.Key, inp.Key, StringComparison.OrdinalIgnoreCase));
+                    // Записи нет вовсе: планшет старой версии её не слал. Тогда предзаполненное
+                    // это лучшее, что мы знаем. Запись есть и пуста: клиент поле видел и оставил
+                    // пустым, и подставлять сюда нечего.
+                    var значение = записьПоля is null ? inp.Value : записьПоля.Value;
                     var подпись = string.IsNullOrWhiteSpace(inp.Label) ? inp.Key : inp.Label;
                     w.Rich(new List<TextRun> { new() { Text = Надпись(подпись, inp.Required) } }
                         .Concat(new[] { new TextRun { Text = string.IsNullOrWhiteSpace(значение)
@@ -456,10 +477,14 @@ public class PdfService
 
                 var g = page.Groups[index];
                 SubmittedGroup? sg = null;
-                if (!string.IsNullOrEmpty(g.Key) && groupsByKey.TryGetValue(g.Key, out var foundGroup))
+                if (!string.IsNullOrEmpty(g.Key))
                 {
-                    sg = foundGroup;
-                    printedGroups.Add(sg);
+                    // Первая ещё не напечатанная запись с этим именем, а не «одна на имя»: два
+                    // выбора с одним именем иначе печатали бы один и тот же ответ дважды, а
+                    // второй выбор клиента терялся. То же правило, что и у пунктов выше.
+                    sg = сГруппами.FirstOrDefault(x => !printedGroups.Contains(x) &&
+                        string.Equals(x.Key, g.Key, StringComparison.OrdinalIgnoreCase));
+                    if (sg is not null) printedGroups.Add(sg);
                 }
                 // Что выбрано, знает только запись подписи, а как варианты выглядят, знает только
                 // документ, который показали клиенту: в нём у вариантов есть куски оформления, а
