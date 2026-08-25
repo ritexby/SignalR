@@ -704,7 +704,17 @@ admin.MapPost("/devices/enroll", (CreateEnrollmentDto dto) =>
 
 admin.MapPut("/devices/{id}", async (string id, DeviceUpdateDto dto, KioskCoordinator coord) =>
 {
-    if (!storage.UpdateDevice(id, dto?.Name, dto?.GroupIds, dto?.WorkstationId, touchWorkstation: true))
+    // Рабочее место трогается, только если поле прислали. Раньше оно трогалось всегда, и запрос
+    // «смени имя», в котором места нет вовсе, снимал планшет с места. Замер до починки: планшет
+    // на месте «1232», тело {"name":"Ресепшн 2"}, ответ 200 {"ok":true}, после чего место стало
+    // null, а показ документа по workstationExternalId «1232» ответил 404 «no tablet is assigned
+    // to this workstation». Имя и группы по этому правилу жили с самого начала, место было
+    // единственным исключением.
+    var поле = dto?.WorkstationId ?? default;
+    var местоПрислали = поле.ValueKind != System.Text.Json.JsonValueKind.Undefined;
+    // Строка это номер места, пустая строка и присланный null это осознанное «снять с места».
+    var местоИзТела = поле.ValueKind == System.Text.Json.JsonValueKind.String ? поле.GetString() : null;
+    if (!storage.UpdateDevice(id, dto?.Name, dto?.GroupIds, местоИзТела, touchWorkstation: местоПрислали))
         return Results.NotFound();
     await coord.NotifyAdminsDevicesAsync();
     return Results.Ok(new { ok = true });

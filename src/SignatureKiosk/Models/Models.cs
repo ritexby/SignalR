@@ -1040,7 +1040,22 @@ public record ShowDocumentDto(string? Target, Dictionary<string, string>? Fields
 
 public record EnrollRequest(string? Code);
 public record CreateEnrollmentDto(string? Name, string? WorkstationId, List<string>? GroupIds, int? TtlMinutes);
-public record DeviceUpdateDto(string? Name, List<string>? GroupIds, string? WorkstationId);
+/// <summary>
+/// Правка карточки планшета. Все три поля необязательны и означают одно и то же: «прислали,
+/// значит меняем». Чего в теле нет, того запрос не касается.
+///
+/// Рабочее место объявлено JsonElement, а не строкой, ровно затем, чтобы отличить «поля нет» от
+/// «поле прислали пустым». Раньше отличить было нельзя, и переименование планшета телом
+/// {"name":"..."} молча снимало его с рабочего места: система адресуется по коду места, и после
+/// такого переименования внешняя система получала «на этом месте нет планшета», хотя планшет
+/// висел на стене и был на связи.
+///
+/// Тип именно JsonElement, а не JsonElement?: обёртка над ним схлопывает «поля нет» и
+/// «прислали null» в одно и то же, а без обёртки это разные состояния, Undefined и Null.
+/// Пустая строка и null означают осознанное «снять с места»; пустую строку присылает админка,
+/// когда оператор выбрал «нет места».
+/// </summary>
+public record DeviceUpdateDto(string? Name, List<string>? GroupIds, System.Text.Json.JsonElement WorkstationId);
 public record GroupDto(string? Name);
 /// <summary>Сроки показа картинки в рекламе. Пустая дата снимает ограничение с этой стороны.</summary>
 public record ImageDatesDto(string? ShowFrom, string? ShowTo);
