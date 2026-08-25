@@ -540,9 +540,14 @@
       var n = числоИз(val);
       if (n === null) return false;
       if (cond.op === "numin") {
+        // Пустой край это «без предела», как у промежутка дат. Раньше требовались обе границы,
+        // и «5..» не выполнялся ни при каком значении.
         var гр = target.split("..");
         var a = числоИз(гр[0]), b = числоИз(гр.length > 1 ? гр[1] : "");
-        return a !== null && b !== null && n >= a && n <= b;
+        if (a === null && b === null) return false;
+        if (a !== null && n < a) return false;
+        if (b !== null && n > b) return false;
+        return true;
       }
       var lim = числоИз(target);
       if (lim === null) return false;
