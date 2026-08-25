@@ -282,16 +282,9 @@
   // Wipe every trace of the signer session from the tablet when returning to ads.
   function clearDocState() {
     endDocSession();
-    doc.config = null; doc.screens = []; doc.index = 0; doc.checks = {}; doc.picks = {};
-    // Росчерки полей стираются вместе с их картинками. Порознь нельзя: росчерк это и есть
-    // подпись, и оставленный в памяти он вернул бы её следующему клиенту на глаза.
-    doc.signStrokes = {}; doc.signGeom = {};
-    doc.signs = {}; doc.signThumbs = {}; doc.codes = {}; doc.pagePads = {};
-    doc.pad = null; doc.finalInk = ""; doc.finalStrokes = null; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
-    // Вписанное клиентом стирается вместе со всем остальным: заголовок этого куска обещает не
-    // оставить следа, а значения полей ввода тут забыли, и они лежали в памяти планшета до
-    // следующего документа.
-    doc.inputs = {};
+    doc.config = null; doc.screens = []; doc.index = 0;
+    забытьПодписанта();
+    doc.pad = null; doc.submitting = false; doc.docPadResize = null; doc.idleMs = 0;
     // Размер текста уходит вместе с остальным: и ступень, и сам множитель на слое документа, и
     // значок из разметки. Иначе следующий клиент получил бы чужой размер, а на планшете, который
     // вернулся к рекламе, в DOM остался бы след прошлого приёма.
@@ -300,6 +293,28 @@
     unmountBigText();
     el.docBody.innerHTML = ""; el.docFooter.innerHTML = "";
     el.docTitle.textContent = ""; el.docProgress.textContent = "";
+  }
+
+  /// Стереть из памяти планшета всё, что клиент ответил или нарисовал.
+  ///
+  /// Названо отдельно, потому что звать это надо из двух мест: при возврате к рекламе и на
+  /// экране прощания. Раньше стирание было только в первом, а на прощании чистились лишь
+  /// заголовок, документ и отметки. Замер: после подписи в памяти планшета оставались вписанный
+  /// телефон, выбранный вариант, росчерк поля, его картинка и уменьшенная копия, и всё это
+  /// уезжало оператору, если тот открывал наблюдение уже после ухода человека. Жило это до
+  /// срабатывания таймера прощания, то есть до минуты.
+  ///
+  /// Пояснение к экрану прощания при этом обещает обратное: данные стираются, как только
+  /// подписание закончено.
+  function забытьПодписанта() {
+    doc.checks = {}; doc.picks = {};
+    // Росчерки полей стираются вместе с их картинками. Порознь нельзя: росчерк это и есть
+    // подпись, и оставленный в памяти он вернул бы её следующему клиенту на глаза.
+    doc.signStrokes = {}; doc.signGeom = {};
+    doc.signs = {}; doc.signThumbs = {}; doc.codes = {}; doc.pagePads = {};
+    doc.finalInk = ""; doc.finalStrokes = null;
+    // Вписанное клиентом стирается вместе со всем остальным.
+    doc.inputs = {};
   }
 
   function checkKey(page, idx) { return "p" + page + "_c" + idx; }
@@ -1946,7 +1961,10 @@
     el.docTitle.textContent = "";
     doc.config = { thankYouText: thanks, thankYouRuns: runs, thankYouBlocks: blocks,
       thankYouAlign: align, thankYouSec: держать, pages: [] };
-    doc.checks = {};
+    // Ответы клиента стираются прямо здесь, а не через минуту, когда планшет вернётся к рекламе.
+    // Блоки прощания уже посчитаны выше и условий на себе не несут, поэтому стирать безопасно.
+    // Экран прощания личных данных не показывает: он собран оператором.
+    забытьПодписанта();
     var body = document.createElement("div");
     body.className = "thankyou";
     var mark = document.createElement("div"); mark.className = "mark"; body.appendChild(mark);
