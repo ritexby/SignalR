@@ -306,7 +306,19 @@
   ///
   /// Пояснение к экрану прощания при этом обещает обратное: данные стираются, как только
   /// подписание закончено.
+  /// Клиент что-то отметил или вписал. Признак переживает перезагрузку страницы и нужен ровно
+  /// для одного: сказать человеку, что заполненное пропало, и только если оно было. Никаких
+  /// данных подписанта здесь не хранится, только «было или нет».
+  var КЛЮЧ_БЫЛО_ЗАПОЛНЕНО = "sk_bylo_zapolneno";
+  function запомнитьЧтоЗаполняли() {
+    try { sessionStorage.setItem(КЛЮЧ_БЫЛО_ЗАПОЛНЕНО, "1"); } catch (e) { /* хранилище закрыто */ }
+  }
+  function забытьЧтоЗаполняли() {
+    try { sessionStorage.removeItem(КЛЮЧ_БЫЛО_ЗАПОЛНЕНО); } catch (e) { /* хранилище закрыто */ }
+  }
+
   function забытьПодписанта() {
+    забытьЧтоЗаполняли();
     doc.checks = {}; doc.picks = {};
     // Росчерки полей стираются вместе с их картинками. Порознь нельзя: росчерк это и есть
     // подпись, и оставленный в памяти он вернул бы её следующему клиенту на глаза.
@@ -1452,6 +1464,7 @@
       input.checked = !!doc.checks[key];
       input.addEventListener("change", function () {
         doc.checks[key] = input.checked;
+        запомнитьЧтоЗаполняли();
         // Взаимоисключающие пункты: отметка снимает остальные из того же правила. Иначе клиент
         // отмечает «согласен» и «отказываюсь» разом, и документ подписан сам себе противореча.
         var снято = input.checked && cb.key ? снятьВзаимоисключающие(cb.key) : false;
@@ -1514,6 +1527,7 @@
         input.checked = chosen;
         input.addEventListener("change", function () {
           doc.picks[g.key] = (doc.picks[g.key] || "") === o.key ? "" : o.key;
+          запомнитьЧтоЗаполняли();
           rerender();
         });
         var span = document.createElement("span");
@@ -1604,6 +1618,7 @@
       if (вид === "date") значение = вДатуПоля(значение);
       field.value = значение;
       doc.inputs[inp.key] = field.value;
+      запомнитьЧтоЗаполняли();
       var подсказка = document.createElement("div");
       подсказка.className = "page-input-hint";
       box.appendChild(field); box.appendChild(подсказка);
@@ -1615,6 +1630,8 @@
       }
       field.addEventListener("input", function () {
         doc.inputs[inp.key] = field.value;
+        запомнитьЧтоЗаполняли();
+      запомнитьЧтоЗаполняли();
         clearMiss(box);
         проверить();
         watchPush();
@@ -1749,6 +1766,7 @@
         // Своя копия: перо держит эти точки живым массивом и дописывает в него следующий
         // росчерк, а память планшета обязана хранить снятое сейчас, а не ссылку на чужое.
         doc.signStrokes[sig.key] = JSON.parse(JSON.stringify(точки));
+        запомнитьЧтоЗаполняли();
         doc.signGeom[sig.key] = { w: r.width, h: r.height, k: Math.max(window.devicePixelRatio || 1, 1) };
         doc.signs[sig.key] = рисунокПоля(sig.key);
         doc.signThumbs[sig.key] = padThumb(canvas);
@@ -1845,6 +1863,7 @@
       btn.addEventListener("click", function () {
         startScan({ label: sc.label, onCode: function (code, format) {
           doc.codes[sc.key] = { code: code, format: format || "", label: sc.label || "" };
+          запомнитьЧтоЗаполняли();
           sync();
           clearMiss(box);
           // От поля сканирования тоже может зависеть показ: «покажите это, когда код считан».
@@ -2129,8 +2148,7 @@
           // «Ниже есть ещё». Показ прокручивает страницу к первому непроставленному, так что
           // человек его видит.
           showMissing(screen.pageIndex);
-          var note = document.getElementById("footerNote");
-          if (note) note.textContent = "";
+          подвал("");
           return;
         }
         var to = stepIndex(doc.index, 1);
@@ -2148,8 +2166,7 @@
             wrap.classList.add("miss");
             setTimeout(function () { wrap.classList.remove("miss"); }, 2000);
           }
-          var note = document.getElementById("footerNote");
-          if (note) note.textContent = "Поставьте подпись в выделенном поле";
+          подвал("Поставьте подпись в выделенном поле");
           return;
         }
         submitSignature();
@@ -2161,6 +2178,16 @@
     // Высота содержимого известна только после того, как оно легло в страницу. Считать её
     // прямо здесь значило бы всегда получать нули и не показать кнопку ни разу.
     requestAnimationFrame(обновитьКнопкуВниз);
+  }
+
+  /// Написать в подвале или очистить его. Одно место на все случаи: оформление предупреждения
+  /// обязано сниматься вместе с текстом, иначе в подвале остаётся пустая серая плашка. Так и
+  /// было: сообщение о перезагрузке ставило класс, следующая же очистка стирала только текст.
+  function подвал(текст, тревога) {
+    var note = document.getElementById("footerNote");
+    if (!note) return;
+    note.textContent = текст || "";
+    note.classList.toggle("note-warn", !!(текст && тревога));
   }
 
   function updateFooter() {
@@ -2179,14 +2206,14 @@
       // пункт рамкой и пишет под ним, чего не хватает, прямо там, куда надо смотреть. Строка
       // в подвале повторяла это же в третий раз, стояла далеко от пункта и занимала место,
       // которое нужнее кнопке «Ниже есть ещё».
-      if (note && !el.docBody.querySelector(".miss")) note.textContent = "";
+      if (!el.docBody.querySelector(".miss")) подвал("");
       if (ok) clearAllMiss();
     }
     if (screen.type === "signature" && sign) {
       var empty = !doc.pad || doc.pad.isEmpty();
       sign.disabled = doc.submitting;
       sign.classList.toggle("btn-wait", empty);
-      if (note) note.textContent = empty ? "Поставьте подпись в поле выше" : "";
+      подвал(empty ? "Поставьте подпись в поле выше" : "");
     }
   }
 
@@ -2373,7 +2400,7 @@
       doc.submitting = false;
       startIdle();                                  // кнопка вернулась, таймер снова уместен
       updateFooter();                               // re-enable the button first...
-      if (note) note.textContent = "Не удалось отправить: нет связи с сервером. Нажмите ПОДПИСАТЬ ещё раз."; // ...then show the error so it is not wiped
+      подвал("Не удалось отправить: нет связи с сервером. Нажмите ПОДПИСАТЬ ещё раз."); // ...then show the error so it is not wiped
     });
   }
 
@@ -2671,17 +2698,19 @@
       // Заполненное не восстанавливается намеренно: держать ответы клиента на планшете между
       // загрузками значило бы оставлять их там и после его ухода, а это противоречит правилу,
       // по которому данные подписанта уходят с планшета сразу.
-      var потеряноПриПерезагрузке = перваяКомандаПослеЗагрузки
-        && (cmd.shownSecondsAgo || 0) >= 5;
+      // Показываем только если клиент действительно что-то отмечал или вписывал. Прежде
+      // условием было «документ лежит на планшете дольше пяти секунд», а это не одно и то же:
+      // документ мог простоять час, к нему никто не подходил, страницу обновил оператор при
+      // обновлении версии, и первый же клиент получал сообщение о потере того, чего не вводил.
+      var былоЗаполнено = false;
+      try { былоЗаполнено = sessionStorage.getItem(КЛЮЧ_БЫЛО_ЗАПОЛНЕНО) === "1"; } catch (e) { }
+      забытьЧтоЗаполняли();
+      var потеряноПриПерезагрузке = перваяКомандаПослеЗагрузки && былоЗаполнено;
       перваяКомандаПослеЗагрузки = false;
       applyDocument(cmd.document, cmd.sessionId);
       if (потеряноПриПерезагрузке) {
-        var подсказка = el.footerNote || document.getElementById("footerNote");
-        if (подсказка) {
-          подсказка.textContent = "Страница обновилась. То, что вы уже отмечали и вписывали, "
-            + "не сохранилось: пожалуйста, заполните документ заново.";
-          подсказка.classList.add("note-warn");
-        }
+        подвал("Страница обновилась. То, что вы уже отмечали и вписывали, "
+             + "не сохранилось: пожалуйста, заполните документ заново.", true);
       }
     }
     else { перваяКомандаПослеЗагрузки = false; applySlides(cmd.slides); }
@@ -2747,7 +2776,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "8.2";
+  var APP_VERSION = "8.3";
 
   // ==================================================================
   // Размер экрана планшета

@@ -190,6 +190,16 @@ html, body {
 
 /* ---------- Footer / buttons ---------- */
 .doc-footer { border-top: 2px solid #b8c2d1; padding-top: 16px; display: flex; gap: 14px; justify-content: space-between; align-items: center; }
+/* Кнопка «Ниже есть ещё» ровно посередине подвала, а не там, куда её вытолкнут соседи.
+   Прижатая к «Далее», она читалась как часть перехода на следующую страницу, хотя
+   говорит совсем о другом: тут ещё не дочитано. Середина это самое видное место экрана,
+   и туда смотрит человек, дошедший до низа.
+   Достигается так: место под неё есть всегда, даже когда её нет. Иначе «Назад» и «Далее»
+   прыгали бы вбок каждый раз, когда кнопка появляется и уходит. */
+.doc-footer > .footer-note { flex: 1 1 0; min-width: 0; }
+.doc-footer > .scroll-down { position: absolute; left: 50%; transform: translateX(-50%); }
+.doc-footer > .scroll-down:active { transform: translateX(-50%) translateY(1px); }
+.doc-footer { position: relative; }
 .btn {
   appearance: none; border: none; border-radius: 12px;
   padding: 16px 26px; font-size: clamp(1rem, 2.2vw, 1.2rem); font-weight: 600;
