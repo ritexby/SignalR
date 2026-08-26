@@ -194,6 +194,43 @@ html, body {
 }
 .btn:active { transform: translateY(1px); }
 .btn-primary { background: var(--accent); color: #fff; }
+
+/* Кнопка «Ниже есть ещё». Появляется только когда ниже действительно что-то есть, и стоит
+   посередине нижней панели, между «Назад» и «Далее»: это самое видное место экрана, туда и
+   смотрит человек, дочитавший до низа. Не значок, а кнопка с текстом: значок стрелки понимают
+   не все, а нажать проще, чем тянуть пальцем, особенно пожилому человеку.
+   Цвет тот же глубокий зелёный, что у главной кнопки продукта, но кнопка светлая: она
+   подсказывает, а не заменяет собой «Далее». */
+.scroll-down {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 13px 22px;
+  background: #e7f7ee; color: var(--accent);
+  border: 2px solid var(--accent);
+  box-shadow: 0 2px 0 rgba(21, 128, 61, .18);
+  font-weight: 700;
+  animation: scroll-down-in .18s ease-out;
+}
+.scroll-down:active { transform: translateY(1px); box-shadow: none; }
+.scroll-down-text { font-size: clamp(.95rem, 2vw, 1.1rem); white-space: nowrap; }
+/* Стрелка рисуется углом из границ, без картинок и шрифтовых значков: так она не зависит ни от
+   набора шрифтов планшета, ни от разрешения экрана. */
+.scroll-down-arrow {
+  width: 14px; height: 14px; flex: 0 0 auto;
+  border-right: 3px solid currentColor; border-bottom: 3px solid currentColor;
+  transform: translateY(-3px) rotate(45deg);
+  animation: scroll-down-nudge 1.6s ease-in-out infinite;
+}
+/* Стрелка мягко подталкивает вниз: движение ловит глаз даже боковым зрением, а полторы секунды
+   между толчками не раздражают того, кто и так читает. */
+@keyframes scroll-down-nudge {
+  0%, 60%, 100% { transform: translateY(-3px) rotate(45deg); }
+  30% { transform: translateY(2px) rotate(45deg); }
+}
+@keyframes scroll-down-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
+/* Человеку, который просил у системы покоя, ничего не мигает: остаётся сама кнопка. */
+@media (prefers-reduced-motion: reduce) {
+  .scroll-down, .scroll-down-arrow { animation: none; }
+}
 .btn-primary:disabled { background: #d7dbe3; color: #4b5563; cursor: not-allowed; }
 .btn-ghost { background: #e5e7eb; color: #374151; }
 /* Клиент должен прочесть, какая кнопка сейчас не работает, а не гадать, что за серое пятно. */

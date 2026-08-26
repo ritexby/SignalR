@@ -264,7 +264,15 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
    что-то постороннее. */
 .doc-head-row { display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin: 0 0 8px; }
 .doc-head-row h2 { margin: 0; }
-.rt-bar-host { position: sticky; top: calc(var(--topbar-h, 64px) + var(--doc-head-h, 0px)); z-index: 15; padding: 6px 0 10px; background: var(--panel); }
+.rt-bar-host { position: sticky; top: calc(var(--topbar-h, 64px) + var(--doc-head-h, 0px)); z-index: 15; padding: 6px 0 10px; background: var(--panel);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* «Шаг назад» стоит справа от панели оформления, в том пустом месте, где раньше не было
+   ничего. Порядком в разметке кнопка первая, показывается последней.
+   Перенос разрешён нарочно: панель обязана оставаться в одну строку, и когда окно узкое и
+   вдвоём им не поместиться, вниз уходит кнопка, а не разваливается панель. Основа у панели
+   по содержимому, поэтому решение принимает сама раскладка, без замеров в коде. */
+.rt-bar-host > .rt-toolbar { flex: 1 1 auto; order: 1; }
+.rt-bar-host > .tb-group-undo { order: 2; margin-left: auto; flex: 0 0 auto; }
 .rt-float { box-shadow: var(--sh2); border-color: var(--line); background: #fff; }
 /* Пока поле не выбрано, панель на месте, но не работает: ничего не прыгает, и сразу видно,
    что оформлять пока нечего. */
@@ -1069,6 +1077,20 @@ body.dragging-now .topbar { pointer-events: none; }
 /* Служебная строка планшета: множителем «крупнее» она не управляется, поэтому размер прямой. */
 .wt-progress { color: #5a6473; font-size: 16px; }
 .wt-body { flex: 1; overflow: hidden; padding: 18px 4px; display: flex; flex-direction: column; }
+/* Содержимое сцены не сжимается под высоту окна, а выходит за край, как на планшете.
+   Без этого единственный блок внутри сжимался до высоты окна, прокручивать было нечего,
+   и оператор всегда видел верх страницы: клиент листал вниз и отмечал пункты там, а у
+   оператора они оставались за краем сцены. Замер до правки: у планшета содержимое 3242
+   точки при окне 698, у сцены наблюдения 698 при окне 698. */
+.wt-body > * { flex: 0 0 auto; }
+/* Кнопка «Ниже есть ещё» так, как её видит клиент. Это копия, а не кнопка: нажать здесь нельзя
+   ничего, как и на остальные кнопки в сцене наблюдения. */
+.wt-scroll-down { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border: 2px solid #15803d; border-radius: 12px; background: #e7f7ee; color: #15803d;
+  font-weight: 700; font-size: var(--wt-text); white-space: nowrap; }
+.wt-scroll-down-arrow { width: 9px; height: 9px; flex: 0 0 auto;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg); }
 /* Содержимое лежит одним обычным блоком внутри колонки: ровно как на планшете. В колонке
    отступы соседей не схлопываются, а в обычном блоке схлопываются, и от этого зависит, где
    окажется каждый пункт. */

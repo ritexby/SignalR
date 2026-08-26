@@ -1,0 +1,9 @@
+{
+  "name": "signtablet-proverki",
+  "private": true,
+  "description": "Наборы проверок HELIX SignTablet. Ставится отсюда: npm install",
+  "devDependencies": {
+    "playwright": "^1.56.1",
+    "@microsoft/signalr": "^10.0.11"
+  }
+}

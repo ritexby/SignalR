@@ -976,7 +976,41 @@
     out.missing = screen.type === "page"
       ? (missingOn(screen.pageIndex) || []).map(function (m) { return m.kind + ":" + m.key; })
       : [];
+    // Куда клиент отлистал страницу. Страница выше экрана листается пальцем, и без этого
+    // оператор в наблюдении всегда видел её верх: клиент отмечал пункты внизу, а у оператора
+    // они были за краем сцены, обрезанные. Смотреть за подписанием и не видеть, что человек
+    // сейчас отмечает, значит не смотреть вовсе.
+    if (el.docBody) {
+      out.scroll = {
+        top: Math.round(el.docBody.scrollTop || 0),
+        h: Math.round(el.docBody.scrollHeight || 0),
+        view: Math.round(el.docBody.clientHeight || 0)
+      };
+    }
     return out;
+  }
+
+  /// Показать или убрать кнопку «Ниже есть ещё». Порог в 24 точки нарочно: без него кнопка
+  /// мигала бы на странице, у которой содержимое выходит за край на пару точек из-за округления.
+  function обновитьКнопкуВниз() {
+    var кн = document.getElementById("btnScrollDown");
+    if (!кн || !el.docBody) return;
+    var осталось = el.docBody.scrollHeight - el.docBody.scrollTop - el.docBody.clientHeight;
+    кн.classList.toggle("hidden", !(осталось > 24));
+  }
+
+  // Листание пальцем это событие и для клиента, и для наблюдателя: у первого от него зависит
+  // кнопка «Ниже есть ещё», у второго то, какое место страницы он видит. Слушатель ставится
+  // один раз и навсегда, а не при включении наблюдения: кнопка нужна клиенту всегда, даже
+  // когда за ним никто не смотрит. Пачки в watchPush сами прижимают поток к десяти сообщениям
+  // в секунду, поэтому отдельного придерживания здесь не нужно.
+  function следитьЗаПрокруткой() {
+    if (!el.docBody || el.docBody.__следим) return;
+    el.docBody.__следим = true;
+    el.docBody.addEventListener("scroll", function () {
+      обновитьКнопкуВниз();
+      watchPush();
+    }, { passive: true });
   }
 
   function watchPush() {
@@ -1034,6 +1068,10 @@
     // поломка с точки зрения человека.
     if (big.minus) big.minus.disabled = step <= 0;
     if (big.plus) big.plus.disabled = step >= BIG_STEPS.length - 1;
+    // Крупный текст удлиняет страницу: то, что помещалось при обычном размере, при упоре уже
+    // не помещается, и кнопка «Ниже есть ещё» обязана появиться. Через кадр, потому что до
+    // перерисовки высота ещё прежняя.
+    requestAnimationFrame(обновитьКнопкуВниз);
     watchPush();
   }
 
@@ -2012,6 +2050,27 @@
     note.className = "footer-note"; note.id = "footerNote";
     el.docFooter.appendChild(note);
 
+    // Страница выше экрана листается пальцем, но человек об этом не догадывается: он видит
+    // низ страницы, кнопку «Далее» и уходит дальше, не прочитав середину и не отметив то, что
+    // там стоит. Поэтому внизу появляется заметная кнопка, и появляется только тогда, когда
+    // ниже действительно что-то есть. Она не просто значок: по ней можно нажать, и страница
+    // подъедет сама, потому что пожилому человеку нажать проще, чем тянуть пальцем.
+    var вниз = document.createElement("button");
+    вниз.type = "button";
+    вниз.className = "btn scroll-down hidden";
+    вниз.id = "btnScrollDown";
+    вниз.setAttribute("aria-label", "Пролистать вниз, ниже есть ещё");
+    вниз.innerHTML = '<span class="scroll-down-text">Ниже есть ещё</span>'
+                   + '<span class="scroll-down-arrow" aria-hidden="true"></span>';
+    вниз.addEventListener("click", function () {
+      if (!el.docBody) return;
+      // Чуть меньше экрана: так последняя прочитанная строка остаётся вверху и человек видит,
+      // откуда продолжать. Полный экран за нажатие перескакивал бы через неё.
+      var шаг = Math.max(120, Math.round(el.docBody.clientHeight * 0.8));
+      el.docBody.scrollBy({ top: шаг, behavior: "smooth" });
+    });
+    el.docFooter.appendChild(вниз);
+
     if (opts.clear) {
       var clear = document.createElement("button");
       clear.className = "btn btn-ghost"; clear.textContent = "Очистить";
@@ -2070,6 +2129,10 @@
       el.docFooter.appendChild(sign);
     }
     updateFooter();
+    следитьЗаПрокруткой();
+    // Высота содержимого известна только после того, как оно легло в страницу. Считать её
+    // прямо здесь значило бы всегда получать нули и не показать кнопку ни разу.
+    requestAnimationFrame(обновитьКнопкуВниз);
   }
 
   function updateFooter() {
@@ -2283,7 +2346,11 @@
     });
   }
 
-  window.addEventListener("resize", function () { if (doc.docPadResize) doc.docPadResize(); });
+  window.addEventListener("resize", function () {
+    if (doc.docPadResize) doc.docPadResize();
+    // Поворот планшета меняет высоту экрана, а значит и то, помещается ли страница.
+    обновитьКнопкуВниз();
+  });
   // Слушаем на всём документе, а не только на слое документа. Оверлей «Соединение потеряно»
   // лежит поверх всего и не является потомком этого слоя: клиент тыкал в потемневший экран,
   // таймер бездействия этого не видел и дотикивал, а по истечении стирал всё заполненное.
@@ -2649,7 +2716,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "8.0";
+  var APP_VERSION = "8.1";
 
   // ==================================================================
   // Размер экрана планшета
