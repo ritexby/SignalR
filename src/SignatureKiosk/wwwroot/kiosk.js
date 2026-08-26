@@ -776,7 +776,11 @@
   }
 
   function clearAllMiss() {
+    var было = el.docBody.querySelectorAll(".miss").length;
     el.docBody.querySelectorAll(".miss").forEach(clearMiss);
+    // Погасла подсветка это тоже изменение экрана клиента, и оператор обязан увидеть, что
+    // человек разобрался, а не смотреть на красное, которого у клиента уже нет.
+    if (было) watchPush();
   }
 
   /// Подсветить пропущенное и подвести к первому. Возвращает, сколько нашлось.
@@ -792,6 +796,10 @@
       var node = el.docBody.querySelector('[' + attr + '="' + m.key + '"]');
       if (!node) return;
       node.classList.add("miss");
+      // Вид и ключ остаются на самом узле: по ним наблюдение повторит подсветку у оператора.
+      // Собирать их заново из doc нельзя: там лежит «чего не хватает вообще», а покрашено
+      // только то, что подсветилось после нажатия «Далее».
+      node.setAttribute("data-miss-kind", m.kind);
       var note = document.createElement("div");
       note.className = "miss-note";
       // Про поле ввода раньше говорилось «Нужно отсканировать код»: ветки для него не было, и
@@ -811,6 +819,10 @@
       var area = el.docBody.getBoundingClientRect();
       el.docBody.scrollBy({ top: box.top - area.top - 80, behavior: "smooth" });
     }
+    // Экран клиента изменился, значит наблюдатель обязан узнать. Полагаться на прокрутку
+    // выше нельзя: на короткой странице прокручиваться некуда, событие не случается, и
+    // оператор не видел подсветки вовсе.
+    watchPush();
     return missing.length;
   }
 
@@ -976,7 +988,55 @@
     out.missing = screen.type === "page"
       ? (missingOn(screen.pageIndex) || []).map(function (m) { return m.kind + ":" + m.key; })
       : [];
+    // Что сейчас покрашено красным на экране клиента, и какими словами. Это не то же самое, что
+    // missing: там «чего не хватает вообще», а покраска появляется только после нажатия «Далее».
+    // Оператор обязан видеть ровно то, что видит клиент: и рамку, и надпись под ней.
+    out.miss = [];
+    if (el.docBody) {
+      el.docBody.querySelectorAll(".miss").forEach(function (n) {
+        var вид = n.getAttribute("data-miss-kind") || "";
+        var ключ = n.getAttribute("data-miss-key") || n.getAttribute("data-miss-group")
+                || n.getAttribute("data-miss-sign") || n.getAttribute("data-miss-input")
+                || n.getAttribute("data-miss-scan") || "";
+        var надпись = n.querySelector(".miss-note");
+        out.miss.push({ kind: вид, key: ключ, text: надпись ? надпись.textContent : "" });
+      });
+    }
+    // Куда клиент отлистал страницу. Страница выше экрана листается пальцем, и без этого
+    // оператор в наблюдении всегда видел её верх: клиент отмечал пункты внизу, а у оператора
+    // они были за краем сцены, обрезанные. Смотреть за подписанием и не видеть, что человек
+    // сейчас отмечает, значит не смотреть вовсе.
+    if (el.docBody) {
+      out.scroll = {
+        top: Math.round(el.docBody.scrollTop || 0),
+        h: Math.round(el.docBody.scrollHeight || 0),
+        view: Math.round(el.docBody.clientHeight || 0)
+      };
+    }
     return out;
+  }
+
+  /// Показать или убрать кнопку «Ниже есть ещё». Порог в 24 точки нарочно: без него кнопка
+  /// мигала бы на странице, у которой содержимое выходит за край на пару точек из-за округления.
+  function обновитьКнопкуВниз() {
+    var кн = document.getElementById("btnScrollDown");
+    if (!кн || !el.docBody) return;
+    var осталось = el.docBody.scrollHeight - el.docBody.scrollTop - el.docBody.clientHeight;
+    кн.classList.toggle("hidden", !(осталось > 24));
+  }
+
+  // Листание пальцем это событие и для клиента, и для наблюдателя: у первого от него зависит
+  // кнопка «Ниже есть ещё», у второго то, какое место страницы он видит. Слушатель ставится
+  // один раз и навсегда, а не при включении наблюдения: кнопка нужна клиенту всегда, даже
+  // когда за ним никто не смотрит. Пачки в watchPush сами прижимают поток к десяти сообщениям
+  // в секунду, поэтому отдельного придерживания здесь не нужно.
+  function следитьЗаПрокруткой() {
+    if (!el.docBody || el.docBody.__следим) return;
+    el.docBody.__следим = true;
+    el.docBody.addEventListener("scroll", function () {
+      обновитьКнопкуВниз();
+      watchPush();
+    }, { passive: true });
   }
 
   function watchPush() {
@@ -1034,6 +1094,10 @@
     // поломка с точки зрения человека.
     if (big.minus) big.minus.disabled = step <= 0;
     if (big.plus) big.plus.disabled = step >= BIG_STEPS.length - 1;
+    // Крупный текст удлиняет страницу: то, что помещалось при обычном размере, при упоре уже
+    // не помещается, и кнопка «Ниже есть ещё» обязана появиться. Через кадр, потому что до
+    // перерисовки высота ещё прежняя.
+    requestAnimationFrame(обновитьКнопкуВниз);
     watchPush();
   }
 
@@ -2012,6 +2076,27 @@
     note.className = "footer-note"; note.id = "footerNote";
     el.docFooter.appendChild(note);
 
+    // Страница выше экрана листается пальцем, но человек об этом не догадывается: он видит
+    // низ страницы, кнопку «Далее» и уходит дальше, не прочитав середину и не отметив то, что
+    // там стоит. Поэтому внизу появляется заметная кнопка, и появляется только тогда, когда
+    // ниже действительно что-то есть. Она не просто значок: по ней можно нажать, и страница
+    // подъедет сама, потому что пожилому человеку нажать проще, чем тянуть пальцем.
+    var вниз = document.createElement("button");
+    вниз.type = "button";
+    вниз.className = "btn scroll-down hidden";
+    вниз.id = "btnScrollDown";
+    вниз.setAttribute("aria-label", "Пролистать вниз, ниже есть ещё");
+    вниз.innerHTML = '<span class="scroll-down-text">Ниже есть ещё</span>'
+                   + '<span class="scroll-down-arrow" aria-hidden="true"></span>';
+    вниз.addEventListener("click", function () {
+      if (!el.docBody) return;
+      // Чуть меньше экрана: так последняя прочитанная строка остаётся вверху и человек видит,
+      // откуда продолжать. Полный экран за нажатие перескакивал бы через неё.
+      var шаг = Math.max(120, Math.round(el.docBody.clientHeight * 0.8));
+      el.docBody.scrollBy({ top: шаг, behavior: "smooth" });
+    });
+    el.docFooter.appendChild(вниз);
+
     if (opts.clear) {
       var clear = document.createElement("button");
       clear.className = "btn btn-ghost"; clear.textContent = "Очистить";
@@ -2038,12 +2123,14 @@
       next.addEventListener("click", function () {
         var screen = doc.screens[doc.index];
         if (screen.type === "page" && !requiredSatisfied(screen.pageIndex)) {
-          // Не молчим и не блокируем кнопку: показываем, что именно осталось отметить.
-          var n = showMissing(screen.pageIndex);
+          // Не молчим и не блокируем кнопку: красим сам пункт и пишем под ним, чего не
+          // хватает, прямо там, куда надо смотреть. Строки в подвале больше нет: она говорила
+          // то же самое в третий раз, стояла далеко от пункта и занимала место, нужное кнопке
+          // «Ниже есть ещё». Показ прокручивает страницу к первому непроставленному, так что
+          // человек его видит.
+          showMissing(screen.pageIndex);
           var note = document.getElementById("footerNote");
-          if (note) note.textContent = n === 1
-            ? "Отметьте выделенный пункт, чтобы продолжить"
-            : "Отметьте выделенные пункты: осталось " + n;
+          if (note) note.textContent = "";
           return;
         }
         var to = stepIndex(doc.index, 1);
@@ -2070,6 +2157,10 @@
       el.docFooter.appendChild(sign);
     }
     updateFooter();
+    следитьЗаПрокруткой();
+    // Высота содержимого известна только после того, как оно легло в страницу. Считать её
+    // прямо здесь значило бы всегда получать нули и не показать кнопку ни разу.
+    requestAnimationFrame(обновитьКнопкуВниз);
   }
 
   function updateFooter() {
@@ -2084,8 +2175,11 @@
       var ok = requiredSatisfied(screen.pageIndex);
       next.disabled = false;
       next.classList.toggle("btn-wait", !ok);
-      if (note && !el.docBody.querySelector(".miss"))
-        note.textContent = ok ? "" : "Отметьте обязательные пункты (*)";
+      // Надписи в подвале про обязательные пункты больше нет. Нажатие «Далее» красит сам
+      // пункт рамкой и пишет под ним, чего не хватает, прямо там, куда надо смотреть. Строка
+      // в подвале повторяла это же в третий раз, стояла далеко от пункта и занимала место,
+      // которое нужнее кнопке «Ниже есть ещё».
+      if (note && !el.docBody.querySelector(".miss")) note.textContent = "";
       if (ok) clearAllMiss();
     }
     if (screen.type === "signature" && sign) {
@@ -2283,7 +2377,11 @@
     });
   }
 
-  window.addEventListener("resize", function () { if (doc.docPadResize) doc.docPadResize(); });
+  window.addEventListener("resize", function () {
+    if (doc.docPadResize) doc.docPadResize();
+    // Поворот планшета меняет высоту экрана, а значит и то, помещается ли страница.
+    обновитьКнопкуВниз();
+  });
   // Слушаем на всём документе, а не только на слое документа. Оверлей «Соединение потеряно»
   // лежит поверх всего и не является потомком этого слоя: клиент тыкал в потемневший экран,
   // таймер бездействия этого не видел и дотикивал, а по истечении стирал всё заполненное.
@@ -2649,7 +2747,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "8.0";
+  var APP_VERSION = "8.2";
 
   // ==================================================================
   // Размер экрана планшета

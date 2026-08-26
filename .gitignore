@@ -20,3 +20,5 @@ src/SignatureKiosk/wwwroot/lib/
 
 # Данные и журналы прогонов наборов проверок. Сами наборы лежат в репозитории, а их следы нет.
 .proverki/
+proverki/node_modules/
+proverki/package-lock.json
