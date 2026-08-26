@@ -1191,15 +1191,23 @@
       var д = узел.children[i];
       // Ширина рядом с высотой: перенос строки задаётся ими вместе, и без ширины по одной высоте
       // не понять, текст ли другой или места под него меньше.
+      var с = getComputedStyle(д);
       из.push({ t: (д.textContent || "").replace(/\s+/g, " ").trim().slice(0, 18),
-                h: Math.round(д.offsetHeight), w: Math.round(д.offsetWidth) });
+                h: Math.round(д.offsetHeight), w: Math.round(д.offsetWidth),
+                // Кегль, насыщенность и полная длина текста. Если высоты разные, а это совпало,
+                // значит расходится только перенос; если разошлась длина, значит тексты разные.
+                f: Math.round(parseFloat(с.fontSize) * 10) / 10, b: с.fontWeight,
+                n: (д.textContent || "").length });
       // Один уровень вглубь: у группы это заголовок и строка с вариантами, у пункта - квадратик
       // и подпись. Без этого видно только «кусок разошёлся», но не что именно в нём.
       if (из.length < 60 && д.children && д.children.length > 1 && д.children.length <= 6) {
         for (var j = 0; j < д.children.length; j++) {
           var в = д.children[j];
+          var св = getComputedStyle(в);
           из.push({ t: "  " + (в.textContent || "").replace(/\s+/g, " ").trim().slice(0, 16),
-                    h: Math.round(в.offsetHeight), w: Math.round(в.offsetWidth) });
+                    h: Math.round(в.offsetHeight), w: Math.round(в.offsetWidth),
+                    f: Math.round(parseFloat(св.fontSize) * 10) / 10, b: св.fontWeight,
+                    n: (в.textContent || "").length });
         }
       }
     }
@@ -2924,7 +2932,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "9.7";
+  var APP_VERSION = "9.8";
 
   // ==================================================================
   // Размер экрана планшета
