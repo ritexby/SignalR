@@ -11191,6 +11191,20 @@
     шапка.appendChild(h1);
     шапка.appendChild(el("div", "wt-progress",
       (type !== "thankyou" && st && st.step) ? ("Шаг " + st.step + " из " + st.steps) : ""));
+    // Значок «Размер текста» так, как его видит клиент. Это копия, а не кнопки: нажать здесь
+    // нельзя ничего. Нужен он и глазами, и геометрией: под него шапка на планшете расширяется до
+    // 112 точек, и без этого у оператора области под содержимое на сорок пять точек больше.
+    if (st && st.bigText) {
+      кадр.classList.add("wt-has-bigtext");
+      var размер = el("div", "wt-bigtext");
+      размер.appendChild(el("div", "wt-bigtext-cap", "Размер текста"));
+      var ряд = el("div", "wt-bigtext-row");
+      var шаг = (st.bigStep || 0), всего = (st.bigSteps || 5);
+      ряд.appendChild(el("span", "wt-bigtext-btn" + (шаг <= 0 ? " wt-off" : ""), "А−"));
+      ряд.appendChild(el("span", "wt-bigtext-btn" + (шаг >= всего - 1 ? " wt-off" : ""), "А+"));
+      размер.appendChild(ряд);
+      шапка.appendChild(размер);
+    }
     кадр.appendChild(шапка);
 
     // Тело экрана устроено как на планшете: сама область (.doc-body) это колонка, а всё
