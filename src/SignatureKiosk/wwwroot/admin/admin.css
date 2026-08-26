@@ -403,6 +403,12 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 /* Обычный поток, а не колонка: в колонке плавающая картинка на соседей не действует, и
    обтекание текстом, которое работает на планшете и печатается в PDF, в предпросмотре и в
    наблюдении не показывалось вовсе. Отступ между блоками задан снизу у самих блоков. */
+/* Документ у оператора рисуется тем же шрифтом, что на планшете, из того же файла.
+   Иначе одна и та же строка переносится по-разному: на Android system-ui это Roboto, в браузере
+   оператора на Windows это Segoe UI. Оператор обязан видеть то же, что клиент, вплоть до
+   переносов. Остальная админка своего шрифта не меняет: она к планшету отношения не имеет. */
+.watch-screen, .watch-screen *, .pv-body, .pv-body * { font-family: "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif; }
+
 .pv-body { display: block; }
 /* Блоки экрана подписи по центру, как на планшете (.sign-custom). */
 .pv-sign-custom { text-align: center; }
@@ -1091,6 +1097,20 @@ body.dragging-now .topbar { pointer-events: none; }
 .wt-scroll-down-arrow { width: 9px; height: 9px; flex: 0 0 auto;
   border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
   transform: translateY(-2px) rotate(45deg); }
+
+/* Красная подсветка «не отмечено» так, как её видит клиент. Цвета взяты из kiosk.css слово в
+   слово: оператор обязан видеть тот же экран, а не его пересказ. Мигания здесь нет намеренно:
+   на планшете оно случается один раз в момент нажатия, а сцена наблюдения перерисовывается на
+   каждый кадр, и мигало бы непрерывно. */
+.watch-screen .wt-miss { border-color: #dc2626 !important; background: #fef2f2 !important;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, .12); }
+.watch-screen .wt-miss .req { color: #dc2626; }
+.watch-screen .pv-group.wt-miss { padding: 12px; border: 2px solid #dc2626; border-radius: 14px; }
+.wt-miss-note { flex-basis: 100%; margin-top: 8px; color: #b91c1c; font-weight: 700;
+  font-size: var(--wt-text); display: flex; align-items: center; gap: 8px; }
+.wt-miss-note::before { content: "!"; display: inline-flex; align-items: center; justify-content: center;
+  width: 1.15em; height: 1.15em; border-radius: 50%; background: #dc2626; color: #fff;
+  font-weight: 800; flex: 0 0 auto; }
 /* Содержимое лежит одним обычным блоком внутри колонки: ровно как на планшете. В колонке
    отступы соседей не схлопываются, а в обычном блоке схлопываются, и от этого зависит, где
    окажется каждый пункт. */

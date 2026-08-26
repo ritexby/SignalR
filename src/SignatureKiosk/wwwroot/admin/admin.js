@@ -11273,7 +11273,10 @@
     var сколькоНеХватает = ((st && st.missing) || []).length;
     var подсказка = el("div", "wt-note");
     if (type === "signature") подсказка.textContent = (st && st.finalInk) ? "" : "Поставьте подпись в поле выше";
-    else подсказка.textContent = сколькоНеХватает ? "Отметьте обязательные пункты (*)" : "";
+    // Надписи про обязательные пункты в подвале больше нет ни здесь, ни на планшете: нажатие
+    // «Далее» красит сам пункт рамкой и пишет под ним, чего не хватает, прямо там, куда надо
+    // смотреть. Строка в подвале повторяла то же самое и стояла далеко от пункта.
+    else подсказка.textContent = "";
     низ.appendChild(подсказка);
     // Кнопка «Ниже есть ещё» с экрана клиента. Оператор обязан видеть то же, что клиент, вплоть
     // до того, подсказывает ли сейчас планшет пролистать вниз: иначе оператор считает, что
@@ -11522,14 +11525,16 @@
             "wt-btn-ghost wt-check-all"));
         }
         var key = "p" + pi + "_c" + it.index;
-        коробкаПунктов().appendChild(watchCheck(it.item.labelRuns, it.item.label, !!checks[key], it.item.required));
+        коробкаПунктов().appendChild(watchCheck(it.item.labelRuns, it.item.label, !!checks[key],
+          it.item.required, краснаяПометка(st, key)));
         return;
       }
       коробка = null;
       if (it.kind === 0) { previewBlock(body, it.item); return; }
       if (it.kind === 2) {
         var g = it.item;
-        var box = el("div", "pv-group");
+        var пометкаГруппы = краснаяПометка(st, g.key || "");
+        var box = el("div", "pv-group" + (пометкаГруппы ? " wt-miss" : ""));
         if (g.title || (g.titleRuns || []).length) {
           var gt = el("div", "pv-group-title");
           previewRuns(gt, labelRuns(g.titleRuns, g.title));
@@ -11541,6 +11546,7 @@
           opts.appendChild(watchCheck(o.labelRuns, o.label || o.key, (picks[g.key] || "") === o.key, false));
         });
         box.appendChild(opts);
+        if (пометкаГруппы && пометкаГруппы.text) box.appendChild(el("div", "wt-miss-note", пометкаГруппы.text));
         body.appendChild(box);
         return;
       }
@@ -11578,14 +11584,23 @@
     });
   }
 
-  // Пункт согласия так, как он выглядит у клиента. Красной подсветки «не отмечено» здесь нет
-  // намеренно: на планшете она загорается только после нажатия «Далее», а планшет об этом
-  // ничего не сообщает. Выдуманная подсветка расходилась бы с экраном клиента; о том, что
-  // отмечено не всё, оператор читает в нижней панели ровно ту же строку, что и клиент.
-  function watchCheck(runs, plain, on, required) {
-    var row = el("div", "watch-check" + (on ? " on" : ""));
+  /// Что сейчас покрашено красным на экране клиента, по ключу. Планшет присылает именно
+  /// покрашенное, а не «чего не хватает вообще»: краснеет оно только после нажатия «Далее», и
+  /// подсветка у оператора обязана загораться и гаснуть в те же мгновения, что у клиента.
+  function краснаяПометка(st, ключ) {
+    var спис = (st && st.miss) || [];
+    for (var i = 0; i < спис.length; i++) if (спис[i] && спис[i].key === ключ) return спис[i];
+    return null;
+  }
+
+  // Пункт согласия так, как он выглядит у клиента, включая красную подсветку «не отмечено» и
+  // надпись под ней теми же словами. Прежде подсветки здесь не было вовсе: планшет о ней не
+  // сообщал, и оператор видел спокойный пункт там, где у клиента горела красная рамка.
+  function watchCheck(runs, plain, on, required, пометка) {
+    var row = el("div", "watch-check" + (on ? " on" : "") + (пометка ? " wt-miss" : ""));
     row.appendChild(el("span", "watch-box", on ? "✓" : ""));
     row.appendChild(labelNode("watch-label", runs, plain, required));
+    if (пометка && пометка.text) row.appendChild(el("div", "wt-miss-note", пометка.text));
     return row;
   }
 

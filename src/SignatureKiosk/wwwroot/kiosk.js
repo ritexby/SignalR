@@ -776,7 +776,11 @@
   }
 
   function clearAllMiss() {
+    var было = el.docBody.querySelectorAll(".miss").length;
     el.docBody.querySelectorAll(".miss").forEach(clearMiss);
+    // Погасла подсветка это тоже изменение экрана клиента, и оператор обязан увидеть, что
+    // человек разобрался, а не смотреть на красное, которого у клиента уже нет.
+    if (было) watchPush();
   }
 
   /// Подсветить пропущенное и подвести к первому. Возвращает, сколько нашлось.
@@ -792,6 +796,10 @@
       var node = el.docBody.querySelector('[' + attr + '="' + m.key + '"]');
       if (!node) return;
       node.classList.add("miss");
+      // Вид и ключ остаются на самом узле: по ним наблюдение повторит подсветку у оператора.
+      // Собирать их заново из doc нельзя: там лежит «чего не хватает вообще», а покрашено
+      // только то, что подсветилось после нажатия «Далее».
+      node.setAttribute("data-miss-kind", m.kind);
       var note = document.createElement("div");
       note.className = "miss-note";
       // Про поле ввода раньше говорилось «Нужно отсканировать код»: ветки для него не было, и
@@ -811,6 +819,10 @@
       var area = el.docBody.getBoundingClientRect();
       el.docBody.scrollBy({ top: box.top - area.top - 80, behavior: "smooth" });
     }
+    // Экран клиента изменился, значит наблюдатель обязан узнать. Полагаться на прокрутку
+    // выше нельзя: на короткой странице прокручиваться некуда, событие не случается, и
+    // оператор не видел подсветки вовсе.
+    watchPush();
     return missing.length;
   }
 
@@ -976,6 +988,20 @@
     out.missing = screen.type === "page"
       ? (missingOn(screen.pageIndex) || []).map(function (m) { return m.kind + ":" + m.key; })
       : [];
+    // Что сейчас покрашено красным на экране клиента, и какими словами. Это не то же самое, что
+    // missing: там «чего не хватает вообще», а покраска появляется только после нажатия «Далее».
+    // Оператор обязан видеть ровно то, что видит клиент: и рамку, и надпись под ней.
+    out.miss = [];
+    if (el.docBody) {
+      el.docBody.querySelectorAll(".miss").forEach(function (n) {
+        var вид = n.getAttribute("data-miss-kind") || "";
+        var ключ = n.getAttribute("data-miss-key") || n.getAttribute("data-miss-group")
+                || n.getAttribute("data-miss-sign") || n.getAttribute("data-miss-input")
+                || n.getAttribute("data-miss-scan") || "";
+        var надпись = n.querySelector(".miss-note");
+        out.miss.push({ kind: вид, key: ключ, text: надпись ? надпись.textContent : "" });
+      });
+    }
     // Куда клиент отлистал страницу. Страница выше экрана листается пальцем, и без этого
     // оператор в наблюдении всегда видел её верх: клиент отмечал пункты внизу, а у оператора
     // они были за краем сцены, обрезанные. Смотреть за подписанием и не видеть, что человек
@@ -2097,12 +2123,14 @@
       next.addEventListener("click", function () {
         var screen = doc.screens[doc.index];
         if (screen.type === "page" && !requiredSatisfied(screen.pageIndex)) {
-          // Не молчим и не блокируем кнопку: показываем, что именно осталось отметить.
-          var n = showMissing(screen.pageIndex);
+          // Не молчим и не блокируем кнопку: красим сам пункт и пишем под ним, чего не
+          // хватает, прямо там, куда надо смотреть. Строки в подвале больше нет: она говорила
+          // то же самое в третий раз, стояла далеко от пункта и занимала место, нужное кнопке
+          // «Ниже есть ещё». Показ прокручивает страницу к первому непроставленному, так что
+          // человек его видит.
+          showMissing(screen.pageIndex);
           var note = document.getElementById("footerNote");
-          if (note) note.textContent = n === 1
-            ? "Отметьте выделенный пункт, чтобы продолжить"
-            : "Отметьте выделенные пункты: осталось " + n;
+          if (note) note.textContent = "";
           return;
         }
         var to = stepIndex(doc.index, 1);
@@ -2147,8 +2175,11 @@
       var ok = requiredSatisfied(screen.pageIndex);
       next.disabled = false;
       next.classList.toggle("btn-wait", !ok);
-      if (note && !el.docBody.querySelector(".miss"))
-        note.textContent = ok ? "" : "Отметьте обязательные пункты (*)";
+      // Надписи в подвале про обязательные пункты больше нет. Нажатие «Далее» красит сам
+      // пункт рамкой и пишет под ним, чего не хватает, прямо там, куда надо смотреть. Строка
+      // в подвале повторяла это же в третий раз, стояла далеко от пункта и занимала место,
+      // которое нужнее кнопке «Ниже есть ещё».
+      if (note && !el.docBody.querySelector(".miss")) note.textContent = "";
       if (ok) clearAllMiss();
     }
     if (screen.type === "signature" && sign) {
@@ -2716,7 +2747,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "8.1";
+  var APP_VERSION = "8.2";
 
   // ==================================================================
   // Размер экрана планшета

@@ -40,7 +40,10 @@ html, body {
   height: 100%;
   overflow: hidden;
   background: var(--bg);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Roboto из файла, а не «шрифт системы»: на Android system-ui это Roboto, а в браузере
+     оператора на Windows это Segoe UI, и одна и та же строка переносилась по-разному.
+     Объявление шрифта в /fonts/fonts.css. */
+  font-family: "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif;
   user-select: none;
   touch-action: manipulation;
 }
