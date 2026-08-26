@@ -1187,6 +1187,10 @@
     while (узел && узел.children && узел.children.length === 1) узел = узел.children[0];
     var из = [];
     if (!узел || !узел.children) return из;
+    // Предел нарочный: сорок кусков это очень длинная страница, а пересылать больше незачем.
+    // Но молчать об обрезке нельзя: ниже сорокового куска наблюдение положения не выравнивает, и
+    // оператор должен знать об этом, а не догадываться. Признак уходит первым куском списка.
+    if (узел.children.length > 40) из.push({ t: "…обрезано", h: 0, w: 0, cut: узел.children.length });
     for (var i = 0; i < узел.children.length && i < 40; i++) {
       var д = узел.children[i];
       // Ширина рядом с высотой: перенос строки задаётся ими вместе, и без ширины по одной высоте
@@ -1197,7 +1201,11 @@
                 // Кегль, насыщенность и полная длина текста. Если высоты разные, а это совпало,
                 // значит расходится только перенос; если разошлась длина, значит тексты разные.
                 f: Math.round(parseFloat(с.fontSize) * 10) / 10, b: с.fontWeight,
-                n: (д.textContent || "").length });
+                n: (д.textContent || "").length,
+                // Положение куска. По нему наблюдение ставит свои куски туда же, где они у
+                // клиента, не трогая ни текст, ни размеры. offsetTop преобразованиям не
+                // подвержен, а разница движков на него не влияет.
+                y: Math.round(д.offsetTop) });
       // Один уровень вглубь: у группы это заголовок и строка с вариантами, у пункта - квадратик
       // и подпись. Без этого видно только «кусок разошёлся», но не что именно в нём.
       if (из.length < 60 && д.children && д.children.length > 1 && д.children.length <= 6) {
@@ -2932,7 +2940,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "9.9";
+  var APP_VERSION = "10.0";
 
   // ==================================================================
   // Размер экрана планшета
