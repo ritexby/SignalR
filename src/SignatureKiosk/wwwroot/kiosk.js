@@ -1195,13 +1195,17 @@
       var д = узел.children[i];
       // Ширина рядом с высотой: перенос строки задаётся ими вместе, и без ширины по одной высоте
       // не понять, текст ли другой или места под него меньше.
+      // Кегль внутреннего куска. Своё оформление задаётся именно ему, а не всему пункту, и
+      // расхождение может сидеть только там: снаружи 20 и 20, а внутри 18.3 и 14.7.
+      var вн = д.querySelector ? д.querySelector("span[style*='font-size'], span[class^='rt-']") : null;
+      var внКегль = вн ? Math.round(parseFloat(getComputedStyle(вн).fontSize) * 10) / 10 : 0;
       var с = getComputedStyle(д);
       из.push({ t: (д.textContent || "").replace(/\s+/g, " ").trim().slice(0, 18),
                 h: Math.round(д.offsetHeight), w: Math.round(д.offsetWidth),
                 // Кегль, насыщенность и полная длина текста. Если высоты разные, а это совпало,
                 // значит расходится только перенос; если разошлась длина, значит тексты разные.
                 f: Math.round(parseFloat(с.fontSize) * 10) / 10, b: с.fontWeight,
-                n: (д.textContent || "").length,
+                n: (д.textContent || "").length, fs: внКегль,
                 // Положение куска. По нему наблюдение ставит свои куски туда же, где они у
                 // клиента, не трогая ни текст, ни размеры. offsetTop преобразованиям не
                 // подвержен, а разница движков на него не влияет.
@@ -2940,7 +2944,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "10.1";
+  var APP_VERSION = "10.2";
 
   // ==================================================================
   // Размер экрана планшета
