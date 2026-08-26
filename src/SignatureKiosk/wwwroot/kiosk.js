@@ -985,6 +985,14 @@
     // Выбранный клиентом размер текста: наблюдатель должен видеть тот же документ, что и клиент,
     // а не тот, который был бы при обычном размере.
     out.textScale = bigScale();
+    // Настоящие числа, а не формула. Наблюдение до сих пор вычисляло кегли по тем же выражениям,
+    // что записаны в kiosk.css, и совпадало ровно до тех пор, пока среда планшета вела себя как
+    // среда оператора. Замер владельца показал, что не ведёт: содержимое у клиента вышло на 86
+    // точек выше, то есть на три лишних переноса. В формулу не входит ни настройка размера шрифта
+    // в системе планшета, ни поведение WebView, ни ширина, которая осталась телу документа после
+    // отступов. Поэтому планшет меряет своё и отдаёт как есть, а наблюдение это применяет.
+    out.metrics = мерки();
+
     // Показан ли сам значок «Размер текста». Он не просто украшение: под него шапка страницы
     // расширяется до 112 точек (kiosk.css, .doc-frame.has-bigtext .doc-header), и без этого у
     // оператора области под содержимое на сорок пять точек больше, чем у клиента. То есть на
@@ -1099,6 +1107,48 @@
   }
 
   function bigScale() { return BIG_STEPS[doc.textStep || 0] || 1; }
+
+  // Ширина пробной строки. Зависит только от шрифта и от того, как система считает ширину букв,
+  // поэтому меряется один раз: перебирать это на каждое изменение состояния незачем.
+  var пробаШирины = null;
+  function ширинаПробы(гнездо) {
+    if (пробаШирины !== null) return пробаШирины;
+    if (!гнездо) return 0;
+    var п = document.createElement("span");
+    п.textContent = "Прием лекарственных средств, БАДов, гормональных препаратов, химиотерапии";
+    п.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;" +
+                      "font-weight:700;font-size:20px";
+    гнездо.appendChild(п);
+    пробаШирины = п.offsetWidth;
+    п.remove();
+    return пробаШирины;
+  }
+
+  /// Что планшет намерил у себя: кегли, ширина тела документа, размер квадратика отметки и
+  /// ширина пробной строки. Наблюдение ставит эти числа себе, вместо того чтобы выводить их
+  /// заново из тех же формул: формула не знает про среду планшета, а число знает.
+  function мерки() {
+    var рамка = document.querySelector(".doc-frame");
+    var тело = document.querySelector(".doc-body");
+    if (!рамка || !тело) return null;
+    var кегль = function (узел) {
+      if (!узел) return 0;
+      var з = parseFloat(getComputedStyle(узел).fontSize);
+      return з > 0 ? Math.round(з * 100) / 100 : 0;
+    };
+    var квадрат = document.querySelector(".check input");
+    var кнопка = document.querySelector(".doc-footer .btn");
+    return {
+      base: кегль(рамка),
+      text: кегль(document.querySelector(".doc-text")),
+      h1: кегль(document.querySelector(".doc-header h1")),
+      h2: кегль(document.querySelector(".doc-body h2")),
+      btn: кегль(кнопка),
+      box: квадрат ? Math.round(квадрат.offsetWidth) : 0,
+      bodyW: Math.round(тело.clientWidth),
+      proba: ширинаПробы(тело)
+    };
+  }
 
   // Множитель ставится один раз на весь слой документа: заголовок, текст, пункты, варианты,
   // подписи полей и таблицы берут размер через него, поэтому документ меняется целиком и в тот
@@ -2783,7 +2833,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "9.0";
+  var APP_VERSION = "9.1";
 
   // ==================================================================
   // Размер экрана планшета
