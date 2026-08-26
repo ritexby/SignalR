@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const BASE='http://127.0.0.1:5080', EXE=process.env.SK_CHROME || undefined;
+const b=await chromium.launch({executablePath:EXE,args:['--no-sandbox']});
+const p=await b.newPage({viewport:{width:1500,height:1100}});
+await p.goto(BASE+'/admin/'); await p.fill('#password','test123'); await p.click('#loginForm button[type=submit]');
+await p.waitForSelector('#app:not(.hidden)',{timeout:8000});
+await p.click('.tab[data-tab="document"]'); await p.waitForTimeout(1200);
+const r=await p.evaluate(()=>Array.from(document.querySelectorAll('input[type=color]')).slice(0,3).map(el=>{const s=getComputedStyle(el);return {класс:el.className,вид:el.offsetWidth+'x'+el.offsetHeight,ширина:s.borderTopWidth,стиль:s.borderTopStyle,цвет:s.borderTopColor,appearance:s.appearance,родитель:el.parentElement.className};}));
+console.log(JSON.stringify(r,null,1));
+await b.close();
