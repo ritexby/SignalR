@@ -82,21 +82,28 @@ await nabl.goto(BASE + "/admin/#watch=" + encodeURIComponent(para.deviceId));
 await nabl.waitForSelector(".watch-screen", { timeout: 15000 });
 await nabl.waitForTimeout(3000);
 
-const merkaShrifta = () => {
+const merkaShrifta = (gnezdo) => {
+  // Пробник вешается туда, где лежит настоящий текст документа, а не на body: свойства вроде
+  // text-rendering наследуются, и замер на body мерил бы не те условия, в которых текст верстается.
+  // Прежняя редакция набора этим и ошиблась, дав ложный провал 780,17 против 772.
+  const dom = document.querySelector(gnezdo) || document.body;
   const p = document.createElement("span");
   p.textContent = "Прием лекарственных средств, БАДов, гормональных препаратов, химиотерапии";
   p.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;" +
                     "font-weight:700;font-size:20px;font-family:'Roboto',system-ui,-apple-system,'Segoe UI',sans-serif";
-  document.body.appendChild(p);
-  const w = Math.round(p.getBoundingClientRect().width * 100) / 100;
+  dom.appendChild(p);
+  // offsetWidth, а не рамка: сцена наблюдения сжата преобразованием, и рамка отдала бы сжатое число.
+  const w = p.offsetWidth;
   p.remove();
-  return { shirina: w, zagruzhen: document.fonts.check("700 20px Roboto") };
+  return { shirina: w, tochnaya: getComputedStyle(dom).textRendering, zagruzhen: document.fonts.check("700 20px Roboto") };
 };
-const shP = await plan.evaluate(merkaShrifta), shN = await nabl.evaluate(merkaShrifta);
+const shP = await plan.evaluate(merkaShrifta, ".doc-body"), shN = await nabl.evaluate(merkaShrifta, ".wt-body");
 console.log("ширина одной строки: планшет " + JSON.stringify(shP) + ", оператор " + JSON.stringify(shN));
 ok(shP.zagruzhen, "на планшете Roboto загружен", String(shP.zagruzhen));
 ok(shN.zagruzhen, "у оператора Roboto загружен", String(shN.zagruzhen));
-ok(Math.abs(shP.shirina - shN.shirina) < 1,
+ok(shP.tochnaya === "geometricprecision", "у планшета ширина букв берётся из шрифта, а не округляется системой", shP.tochnaya);
+ok(shN.tochnaya === "geometricprecision", "и у оператора тоже, иначе переносы разойдутся", shN.tochnaya);
+ok(Math.abs(shP.shirina - shN.shirina) <= 1,
    "одна и та же строка одного кегля одной ширины, значит шрифт один и переносы совпадут",
    "планшет " + shP.shirina + ", оператор " + shN.shirina);
 

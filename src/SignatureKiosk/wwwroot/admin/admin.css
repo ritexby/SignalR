@@ -410,7 +410,10 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
    Иначе одна и та же строка переносится по-разному: на Android system-ui это Roboto, в браузере
    оператора на Windows это Segoe UI. Оператор обязан видеть то же, что клиент, вплоть до
    переносов. Остальная админка своего шрифта не меняет: она к планшету отношения не имеет. */
-.watch-screen, .watch-screen *, .pv-body, .pv-body * { font-family: "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif; }
+/* Ширина букв берётся из шрифта, а не округляется системой: без этого Windows и Android
+   считают одну и ту же строку по-разному, и переносы расходятся. Подробности в kiosk.css. */
+.watch-screen, .watch-screen *, .pv-body, .pv-body * { font-family: "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif;
+  text-rendering: geometricPrecision; }
 
 .pv-body { display: block; }
 /* Блоки экрана подписи по центру, как на планшете (.sign-custom). */
@@ -1741,3 +1744,12 @@ body.watch-solo .content { flex: 1 1 auto; min-height: 0; padding: 0; max-width:
   width: 62px; height: 52px; border-radius: 14px; background: #fff; color: #1a1c22;
   font-weight: 800; font-size: 24px; }
 .wt-bigtext-btn.wt-off { background: rgba(255, 255, 255, .16); color: rgba(255, 255, 255, .62); }
+
+
+/* Расхождение с планшетом. Не украшение и не подсказка: это признак того, что оператор смотрит
+   не на тот же экран, что клиент, и заметен он должен быть сразу. Рядом с признаком неизвестного
+   размера экрана, тем же местом в шапке. */
+.watch-raznica { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px;
+  padding: 4px 10px; border-radius: 999px; background: #fef3c7; color: #92400e;
+  border: 1px solid #f59e0b; font-size: .8rem; font-weight: 700; cursor: help; }
+.watch-raznica.hidden { display: none; }
