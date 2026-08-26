@@ -439,7 +439,7 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .pv-image img { max-width: 100%; border-radius: 8px; }
 /* Предпросмотр повторяет планшет и в этом: длинное слово переносится, а не раздвигает окно. */
 .pv-body, .pv-text, .pv-heading, .pv-check, .pv-group-title, .pv-title, .pv-prompt {
-  overflow-wrap: anywhere; word-break: break-word; }
+  overflow-wrap: break-word; }
 .pv-body { overflow-x: hidden; }
 .pv-check { display: flex; align-items: flex-start; gap: 10px; font-size: 1.02rem; line-height: 1.45; background: #fff; border: 2px solid #e5e7eb; border-radius: 10px; padding: 10px 12px; }
 .pv-check.on { border-color: var(--accent); background: #e7f7ee; }
@@ -1150,8 +1150,15 @@ body.dragging-now .topbar { pointer-events: none; }
    отступы соседей не схлопываются, а в обычном блоке схлопываются, и от этого зависит, где
    окажется каждый пункт. */
 .wt-page { display: block; }
-.wt-body, .wt-body .pv-text, .wt-body .pv-heading, .watch-label, .wt-doc-title {
-  overflow-wrap: anywhere; word-break: break-word; }
+/* Одно правило переноса, а не два. Прежде стояли сразу overflow-wrap: anywhere и устаревшее
+   word-break: break-word. Второе определено через первое, и что именно получится из этой пары,
+   разные версии движка решают по-своему. Мало того, anywhere меняет расчёт наименьшей ширины
+   содержимого, а тело документа выложено колонкой flex - значит от него зависит и ширина, по
+   которой считается перенос. Замер владельца: тот же кегль, та же ширина, тот же текст, а высота
+   заголовков групп разная - 82 против 85 и 85 против 74. Это и есть след такого спора.
+   Оставлено break-word: длинное слово он переносит так же, а наименьшую ширину не трогает. */
+.wt-body, .wt-body .pv-text, .wt-body .pv-heading, .wt-body .pv-group-title, .watch-label, .wt-doc-title {
+  overflow-wrap: break-word; }
 
 /* Нижняя панель планшета. Это её изображение, а не кнопки: нажать здесь нельзя ничего. */
 .wt-foot { border-top: 2px solid #b8c2d1; padding-top: 16px; display: flex; gap: 14px;
