@@ -83,7 +83,7 @@ await nabl.waitForTimeout(2200);
 const z1 = await znak();
 console.log("когда разошлось: " + JSON.stringify(z1));
 ok(z1.vidno, "значок сказал о расхождении, а не смолчал", JSON.stringify(z1));
-ok(/-?\d+\s*точек/.test(z1.tekst), "и сказал числом, а не общими словами", z1.tekst);
+ok(/-?\d+\s*(точек|место|места|мест)/.test(z1.tekst), "и сказал числом, а не общими словами", z1.tekst);
 ok(/Содержимое страницы у клиента \d+ точек, здесь \d+/.test(z1.podskazka),
    "в подсказке обе высоты названы прямо", z1.podskazka);
 // Общее число говорит «расходится на столько-то», а чинить надо место. Подсказка обязана назвать
@@ -97,7 +97,32 @@ ok(/Кегли: у клиента [\d.?]+ и [\d.?]+, здесь [\d.?]+ и [\d.
 ok(/Проба букв: [\d.?]+ и [\d.?]+, добавка [-\d.]+em, рост [\d.?]+/.test(z1.podskazka),
    "и проба букв с добавкой и ростом", z1.podskazka);
 
-// ===== 3. Починили: значок снова молчит.
+// ===== 3. Сумма сошлась, а куски разошлись. Прежде значок в этом случае молчал: порог стоял на
+// общей высоте. Владелец сказал прямо: расхождение вижу, значка нет.
+await nabl.evaluate(() => { const s = document.getElementById("porcha"); if (s) s.remove(); });
+await nabl.evaluate(() => {
+  // Первый абзац выше на строку, второй ровно на столько же ниже. Общая высота не меняется.
+  const s = document.createElement("style");
+  s.id = "porcha2";
+  // Второй кусок выше на сорок точек по-настоящему (padding меняет offsetHeight), третий на
+  // столько же ближе к нему отступом (margin высоту куска не меняет, но общую сумму меняет).
+  // Итог: сумма та же, а куски разные. Прежняя редакция набора двигала оба отступами, высоты
+  // при этом не менялись вовсе, и проверка зеленела на пустом месте.
+  s.textContent = ".watch-screen .pv-body > *:nth-child(2) { padding-top: 40px !important; }" +
+                  ".watch-screen .pv-body > *:nth-child(3) { margin-top: -40px !important; }";
+  document.head.appendChild(s);
+});
+await plan.click(".check");
+await plan.waitForTimeout(1800);
+await nabl.waitForTimeout(2200);
+const z15 = await znak();
+console.log("сумма сошлась, куски нет: " + JSON.stringify(z15));
+ok(z15.vidno, "значок заговорил и тогда, когда общая высота сошлась, а куски разошлись",
+   JSON.stringify(z15));
+ok(/\d+ (место|места|мест)/.test(z15.tekst), "и сказал, сколько мест разошлось", z15.tekst);
+await nabl.evaluate(() => { const s = document.getElementById("porcha2"); if (s) s.remove(); });
+
+// ===== 4. Починили: значок снова молчит.
 await nabl.evaluate(() => { const s = document.getElementById("porcha"); if (s) s.remove(); });
 await plan.click(".check");
 await plan.waitForTimeout(1800);

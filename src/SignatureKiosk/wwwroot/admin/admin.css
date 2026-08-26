@@ -1761,3 +1761,19 @@ body.watch-solo .content { flex: 1 1 auto; min-height: 0; padding: 0; max-width:
   padding: 4px 10px; border-radius: 999px; background: #fef3c7; color: #92400e;
   border: 1px solid #f59e0b; font-size: .8rem; font-weight: 700; cursor: help; }
 .watch-raznica.hidden { display: none; }
+
+
+/* Кегли, которые в сцене оставались числами и потому не росли вместе с выбранным клиентом
+   размером. Владелец сказал прямо: на планшете растут все строки и поля, а в наблюдении не все.
+   Соотношения взяты из kiosk.css слово в слово, а --wt-base и --wt-text уже равны тому, что
+   намерил у себя планшет, поэтому этого достаточно.
+     .page-input-field  calc(1.05rem * scale)  = base * 1.05
+     .page-input-hint   calc(.9rem  * scale)   = base * .9
+     .page-input-title  наследует .doc-frame   = base
+     .miss-note         calc(var(--doc-text) * .86)
+     .page-scan-value   calc(var(--doc-text) * 1.05) */
+.watch-screen .pv-input-field { font-size: calc(var(--wt-base) * 1.05); }
+.watch-screen .pv-hint { font-size: calc(var(--wt-base) * .9); }
+.watch-screen .pv-input-title { font-size: var(--wt-base); }
+.watch-screen .wt-miss-note { font-size: calc(var(--wt-text) * .86); }
+.watch-screen .watch-code { font-size: calc(var(--wt-text) * 1.05); }
