@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.DataProtection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -265,6 +266,52 @@ app.Use(async (context, next) =>
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
+
+// Отпечаток на ссылках страницы.
+//
+// Между планшетом и сервером стоит обратный прокси, а перед оператором браузер, и каждый из них
+// вправе придержать у себя вчерашний admin.js. Заголовков сервера для этого мало: no-cache ниже
+// мы отдаём, но настройка кэша на прокси делается отдельно и не нами, и владелец её не обязан
+// знать. Последствие тихое и потому опасное: оператор смотрит на документ, нарисованный старым
+// кодом, клиент на новый, оба уверены, что видят одно и то же.
+//
+// Поэтому адрес файла меняется сам, как только меняется файл: к каждой своей ссылке на js и css
+// приписывается отпечаток из времени правки и длины. Старый адрес после разворачивания просто
+// перестаёт запрашиваться, и придержать по нему нечего.
+string ОтпечатокФайла(string корень, string адрес)
+{
+    var путь = Path.Combine(корень, адрес.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+    var и = new FileInfo(путь);
+    return и.Exists ? (и.LastWriteTimeUtc.Ticks ^ и.Length).ToString("x") : "";
+}
+string СоШтампом(string корень, string файл)
+{
+    var html = File.ReadAllText(Path.Combine(корень, файл));
+    return Regex.Replace(html, "(src|href)=\"(/[^\"?>]+\\.(?:js|css))\"", м =>
+    {
+        var отпечаток = ОтпечатокФайла(корень, м.Groups[2].Value);
+        // Чужого файла может не быть в дереве (библиотеки планшета в git не лежат). Тогда ссылка
+        // остаётся как была: молча подставить пустой отпечаток значило бы сломать страницу.
+        return отпечаток.Length == 0 ? м.Value
+             : м.Groups[1].Value + "=\"" + м.Groups[2].Value + "?v=" + отпечаток + "\"";
+    });
+}
+app.Use(async (ctx, next) =>
+{
+    var путь = ctx.Request.Path.Value ?? "";
+    var файл = путь switch
+    {
+        "/" or "/index.html" => "index.html",
+        "/admin/" or "/admin/index.html" => Path.Combine("admin", "index.html"),
+        _ => null
+    };
+    if (файл is null || !HttpMethods.IsGet(ctx.Request.Method)) { await next(); return; }
+    var корень = app.Environment.WebRootPath;
+    if (!File.Exists(Path.Combine(корень, файл))) { await next(); return; }
+    ctx.Response.Headers["Cache-Control"] = "no-cache, must-revalidate";
+    ctx.Response.ContentType = "text/html; charset=utf-8";
+    await ctx.Response.WriteAsync(СоШтампом(корень, файл));
+});
 
 app.UseDefaultFiles();
 // Kiosk tablets (Android WebView) and browsers cache JS/CSS aggressively; without this they
