@@ -2104,8 +2104,8 @@
     вниз.type = "button";
     вниз.className = "btn scroll-down hidden";
     вниз.id = "btnScrollDown";
-    вниз.setAttribute("aria-label", "Пролистать вниз, ниже есть ещё");
-    вниз.innerHTML = '<span class="scroll-down-text">Ниже есть ещё</span>'
+    вниз.setAttribute("aria-label", "Пролистайте ниже");
+    вниз.innerHTML = '<span class="scroll-down-text">Пролистайте ниже</span>'
                    + '<span class="scroll-down-arrow" aria-hidden="true"></span>';
     вниз.addEventListener("click", function () {
       if (!el.docBody) return;
@@ -2776,7 +2776,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "8.4";
+  var APP_VERSION = "8.5";
 
   // ==================================================================
   // Размер экрана планшета
