@@ -203,6 +203,11 @@ html, body {
 .btn {
   appearance: none; border: none; border-radius: 12px;
   padding: 16px 26px; font-size: clamp(1rem, 2.2vw, 1.2rem); font-weight: 600;
+  /* Межстрочный задан числом, а не оставлен на normal: в наблюдении та же кнопка нарисована
+     не элементом button, и при normal высоты расходились на точку, из-за чего у оператора
+     обрезался пункт, целиком видный клиенту. Для планшета значение подобрано так, что высота
+     кнопки не изменилась. */
+  line-height: 1.2;
   cursor: pointer; min-width: 130px; transition: transform .05s, background .15s, opacity .15s;
 }
 .btn:active { transform: translateY(1px); }

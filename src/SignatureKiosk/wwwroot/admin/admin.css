@@ -1082,7 +1082,10 @@ body.dragging-now .topbar { pointer-events: none; }
 .wt-frame { position: absolute; inset: 0; display: flex; flex-direction: column;
   max-width: 960px; margin: 0 auto; padding: var(--wt-pad); font-size: var(--wt-base); }
 .wt-head { border-bottom: 2px solid #e5e7eb; padding-bottom: 14px; margin-bottom: 8px; }
-.wt-doc-title { font-size: var(--wt-h1); margin: 0 0 10px; font-weight: 700; line-height: 1.2; }
+/* Межстрочный заголовку не навязывается: у планшета (.doc-header h1) его нет, там normal, и
+   принудительные 1.2 давали шапку на две точки выше клиентской. Шрифт у обеих сторон один и тот
+   же Roboto, поэтому normal считается одинаково. */
+.wt-doc-title { font-size: var(--wt-h1); margin: 0 0 10px; font-weight: 700; }
 /* Служебная строка планшета: множителем «крупнее» она не управляется, поэтому размер прямой. */
 .wt-progress { color: #5a6473; font-size: 16px; }
 .wt-body { flex: 1; overflow: hidden; padding: 18px 4px; display: flex; flex-direction: column; }
@@ -1148,7 +1151,7 @@ body.dragging-now .topbar { pointer-events: none; }
 .wt-foot > .wt-scroll-down { position: absolute; left: 50%; transform: translateX(-50%); }
 .wt-foot-empty { border-top: none; padding-top: 0; }
 .wt-btn { border-radius: 12px; padding: 16px 26px; font-size: var(--wt-btn); font-weight: 600;
-  min-width: 130px; text-align: center; user-select: none; }
+  min-width: 130px; text-align: center; user-select: none; line-height: 1.2; }
 .wt-btn-primary { background: #15803d; color: #fff; }
 .wt-btn-sign { background: #15803d; color: #fff; }
 .wt-btn-ghost { background: #e5e7eb; color: #374151; }
