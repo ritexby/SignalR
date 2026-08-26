@@ -985,6 +985,13 @@
     // Выбранный клиентом размер текста: наблюдатель должен видеть тот же документ, что и клиент,
     // а не тот, который был бы при обычном размере.
     out.textScale = bigScale();
+    // Показан ли сам значок «Размер текста». Он не просто украшение: под него шапка страницы
+    // расширяется до 112 точек (kiosk.css, .doc-frame.has-bigtext .doc-header), и без этого у
+    // оператора области под содержимое на сорок пять точек больше, чем у клиента. То есть на
+    // первой странице оператор видел больше, чем человек перед планшетом.
+    out.bigText = !!big.node;
+    out.bigStep = doc.textStep || 0;
+    out.bigSteps = BIG_STEPS.length;
     out.checks = doc.checks;
     out.picks = doc.picks;
     out.codes = doc.codes;
@@ -2776,7 +2783,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "8.6";
+  var APP_VERSION = "8.7";
 
   // ==================================================================
   // Размер экрана планшета
