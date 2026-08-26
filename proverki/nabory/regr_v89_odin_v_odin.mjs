@@ -21,9 +21,9 @@ const SH = { "Content-Type": "application/json", Cookie: kuka };
 // Страница как у владельца: пары ДА/НЕТ, длинные надписи, пояснения между ними.
 const gruppy = [
   ["Прием лекарственных средств, БАДов, гормональных препаратов, химиотерапии в течение последних 2-х недель", 10],
-  ["С момента последнего мочеиспускания прошло не менее 1,5-2 ч", 14],
-  ["Взятие биоматериала или осмотр врачом акушером-гинекологом накануне или в день сдачи анализов", 16],
-  ["Девственность", 18]
+  ["С момента последнего мочеиспускания прошло не менее 1,5-2 ч", 20],
+  ["Взятие биоматериала или осмотр врачом акушером-гинекологом накануне или в день сдачи анализов", 21],
+  ["Девственность", 22]
 ].map(([t, o], i) => ({ key: "g" + i, title: t, ord: o,
   options: [{ key: "da", label: "ДА" }, { key: "net", label: "НЕТ" }] }));
 
@@ -35,23 +35,28 @@ await fetch(BASE + "/api/admin/document", { method: "PUT", headers: SH, body: JS
     inPdf: true,
     blocks: [
       { runs: [{ text: "В случае приема препаратов сообщите медицинскому регистратору кодовое слово ЛП1 и назовите название препарата. Например ЛП1 - витамины" }], ord: 11 },
-      { runs: [{ text: "При наличии беременности сообщите медицинскому регистратору кодовое слово Б1 и назовите срок в неделях. Например, Б1 = 14" }], ord: 19 }
+      { runs: [{ text: "При наличии беременности сообщите медицинскому регистратору кодовое слово Б1 и назовите срок в неделях. Например, Б1 = 14" }], ord: 23 }
     ],
     groups: gruppy,
     checkboxes: [
       { key: "gormony", label: "Гормоны", ord: 12 },
-      { key: "antibiotiki", label: "Антибиотики", ord: 12.1 },
-      { key: "himio", label: "Химиотерапия", ord: 12.2 },
-      { key: "bady", label: "БАДы, витамины", ord: 12.3 },
-      { key: "drugoe", label: "Другое", ord: 12.4 },
-      { key: "lishnee1", label: "Ещё один пункт для высоты страницы", ord: 12.5 },
-      { key: "lishnee2", label: "И ещё один пункт для высоты страницы", ord: 12.6 },
-      { key: "lishnee3", label: "И третий пункт для высоты страницы", ord: 12.7 },
-      { key: "dostavka", required: true, ord: 20,
+      { key: "antibiotiki", label: "Антибиотики", ord: 13 },
+      { key: "himio", label: "Химиотерапия", ord: 14 },
+      { key: "bady", label: "БАДы, витамины", ord: 15 },
+      { key: "drugoe", label: "Другое", ord: 16 },
+      { key: "lishnee1", label: "Ещё один пункт для высоты страницы", ord: 17 },
+      { key: "lishnee2", label: "И ещё один пункт для высоты страницы", ord: 18 },
+      { key: "lishnee3", label: "И третий пункт для высоты страницы", ord: 19 },
+      { key: "dostavka", required: true, ord: 24,
         label: "Доставка приносного материала произведена самостоятельно в пробирке или контейнере, позволяющем провести соответствующее исследование." }
     ]
   }],
-  signBlocks: [], signBlocksBelow: [] }) });
+  signBlocks: [], signBlocksBelow: [] }) }).then(async o => {
+  // Прежде эта проверка отсутствовала, служба отвечала 400 с пустым телом, документ не
+  // сохранялся, а набор мерил чужой и зеленел на пустом месте.
+  const t = await o.text();
+  ok(o.status === 200, "документ сохранён, иначе меряли бы чужой", o.status + " " + t.slice(0, 160));
+});
 
 const kod = await (await fetch(BASE + "/api/admin/devices/enroll", {
   method: "POST", headers: SH, body: JSON.stringify({ name: "Планшет один в один" }) })).json();
@@ -86,10 +91,13 @@ const chtoVidno = (imena) => {
   const r = b.getBoundingClientRect();
   const vidno = Array.prototype.slice.call(b.querySelectorAll(punkt))
     .filter(u => { const a = u.getBoundingClientRect(); return a.top >= r.top - 2 && a.bottom <= r.bottom + 2; })
-    .map(u => (u.textContent || "").replace(/\s+/g, " ").trim().slice(0, 30));
+    .map(u => (u.textContent || "").replace(/\s+/g, "").trim().slice(0, 26));
   const noga = document.querySelector(telo === ".doc-body" ? ".doc-footer" : ".wt-foot");
+  // offsetHeight, а не рамка: сцена наблюдения сжата преобразованием 0.815, и рамка отдавала
+  // сжатые числа. Прежде набор из-за этого сообщал о разнице подвала 71 против 57, которой нет:
+  // 71 * 0.815 = 58. Раскладочные свойства сжатию не подвержены.
   return { verh: Math.round(b.scrollTop), vsego: Math.round(b.scrollHeight), okno: Math.round(b.clientHeight),
-           podval: noga ? Math.round(noga.getBoundingClientRect().height) : 0, vidno: vidno };
+           podval: noga ? noga.offsetHeight : 0, vidno: vidno };
 };
 const merkaP = () => plan.evaluate(chtoVidno, { telo: ".doc-body", punkt: ".check, .group" });
 const merkaN = () => nabl.evaluate(chtoVidno, { telo: ".wt-body", punkt: ".watch-check, .pv-group" });
