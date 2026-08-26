@@ -10700,17 +10700,46 @@
     var м = (watch.state && watch.state.textScale > 0) ? watch.state.textScale : 1;
     var зажать = function (мин, доля, макс) { return Math.min(Math.max(ф.w * доля, мин), макс); };
     var п = function (имя, знач) { сцена.style.setProperty(имя, знач.toFixed(2) + "px"); };
-    п("--wt-base", 16 * м);                                   // .doc-frame: calc(1rem * var(--doc-scale))
-    п("--wt-text", зажать(16.32, 0.022, 20) * м);             // --doc-text-base: clamp(1.02rem, 2.2vw, 1.25rem)
-    п("--wt-h1", зажать(20.8, 0.032, 32) * м);                // .doc-header h1: clamp(1.3rem, 3.2vw, 2rem)
-    п("--wt-h2", зажать(18.4, 0.026, 25.6) * м);              // .doc-body h2: clamp(1.15rem, 2.6vw, 1.6rem)
-    п("--wt-thanks", зажать(22.4, 0.03, 32) * м);             // .thankyou h2: clamp(1.4rem, 3vw, 2rem)
-    п("--wt-btn", зажать(16, 0.022, 19.2));                   // .btn: clamp(1rem, 2.2vw, 1.2rem), без множителя
-    п("--wt-pad", Math.min(Math.max(ф.w * 0.03, 16), 40));    // .doc-frame padding: clamp(16px, 3vw, 40px)
-    п("--wt-box", Math.min(30 * м, 46));                      // .check input: min(30px * scale, 46px)
-    п("--wt-ink", Math.min(ф.h * 0.55, 520));                 // .sign-wrap: height: min(55vh, 520px)
-    п("--wt-ink-page", Math.min(ф.h * 0.52, 460));            // .screen-sign .page-sign-wrap
-    п("--wt-scan", Math.min(ф.w * 0.78, 560));                // .scan-window: width: min(78vw, 560px)
+    // Числа, намеренные самим планшетом, если он их прислал. Это главный путь: формула ниже
+    // повторяет выражения из kiosk.css и потому знает только про сам документ, а не про среду
+    // планшета. Настройка размера шрифта в системе, поведение WebView, ширина, которая осталась
+    // телу документа после отступов - всё это в формулу не входит, и именно на этом экраны
+    // разошлись: содержимое у клиента вышло на 86 точек выше, на три лишних переноса.
+    var н = (watch.state && watch.state.metrics) || null;
+    var есть = function (з) { return typeof з === "number" && з > 0; };
+    if (н && есть(н.base)) {
+      п("--wt-base", н.base);
+      п("--wt-text", есть(н.text) ? н.text : зажать(16.32, 0.022, 20) * м);
+      п("--wt-h1", есть(н.h1) ? н.h1 : зажать(20.8, 0.032, 32) * м);
+      п("--wt-h2", есть(н.h2) ? н.h2 : зажать(18.4, 0.026, 25.6) * м);
+      п("--wt-btn", есть(н.btn) ? н.btn : зажать(16, 0.022, 19.2));
+      п("--wt-box", есть(н.box) ? н.box : Math.min(30 * м, 46));
+      // Ширина тела документа. Совпадение кеглей без совпадения ширины ничего не даёт: перенос
+      // определяется тем и другим вместе. Рамка не шире 960 (.wt-frame, как и .doc-frame), у тела
+      // свои 4 точки отступа с каждой стороны, остальное добираем отступом рамки.
+      if (есть(н.bodyW)) {
+        // clientWidth тела уже включает его собственные отступы, вычитать их второй раз нельзя:
+        // из-за этого тело у оператора выходило на восемь точек шире, чем у клиента.
+        var рамкаШ = Math.min(ф.w, 960);
+        п("--wt-pad", Math.max(0, (рамкаШ - н.bodyW) / 2));
+      } else {
+        п("--wt-pad", Math.min(Math.max(ф.w * 0.03, 16), 40));
+      }
+    } else {
+      // Планшет на старой странице мерок не шлёт. Тогда считаем по формулам из kiosk.css: это
+      // хуже, но лучше, чем ничего, и расхождение всё равно будет названо вслух значком в шапке.
+      п("--wt-base", 16 * м);                                   // .doc-frame: calc(1rem * var(--doc-scale))
+      п("--wt-text", зажать(16.32, 0.022, 20) * м);             // --doc-text-base: clamp(1.02rem, 2.2vw, 1.25rem)
+      п("--wt-h1", зажать(20.8, 0.032, 32) * м);                // .doc-header h1: clamp(1.3rem, 3.2vw, 2rem)
+      п("--wt-h2", зажать(18.4, 0.026, 25.6) * м);              // .doc-body h2: clamp(1.15rem, 2.6vw, 1.6rem)
+      п("--wt-btn", зажать(16, 0.022, 19.2));                   // .btn: clamp(1rem, 2.2vw, 1.2rem), без множителя
+      п("--wt-pad", Math.min(Math.max(ф.w * 0.03, 16), 40));    // .doc-frame padding: clamp(16px, 3vw, 40px)
+      п("--wt-box", Math.min(30 * м, 46));                      // .check input: min(30px * scale, 46px)
+    }
+    п("--wt-thanks", зажать(22.4, 0.03, 32) * м);               // .thankyou h2: clamp(1.4rem, 3vw, 2rem)
+    п("--wt-ink", Math.min(ф.h * 0.55, 520));                   // .sign-wrap: height: min(55vh, 520px)
+    п("--wt-ink-page", Math.min(ф.h * 0.52, 460));              // .screen-sign .page-sign-wrap
+    п("--wt-scan", Math.min(ф.w * 0.78, 560));                  // .scan-window: width: min(78vw, 560px)
   }
 
   /// Пересобрать сцену под текущую форму экрана и выбранный оператором размер. Вёрстку это не
