@@ -31,6 +31,11 @@ const otvet = await fetch(BASE + "/api/admin/document", { method: "PUT", headers
         options: [{ key: "da", label: "ДА" }, { key: "net", label: "НЕТ" }] },
       // Без своего размера: этот обязан расти сам по себе.
       { key: "g1", ord: 20, required: false, title: "С момента последнего мочеиспускания прошло не менее 1,5-2 ч",
+        options: [{ key: "da", label: "ДА" }, { key: "net", label: "НЕТ" }] },
+      // Относительный размер «крупнее». Он задаётся не пунктами, а долей от окружающего текста,
+      // и в наблюдении правило для него было записано только внутри абзаца и заголовка раздела.
+      { key: "g2", ord: 21, required: false,
+        titleRuns: [{ text: "Девственность", bold: true, size: "l" }],
         options: [{ key: "da", label: "ДА" }, { key: "net", label: "НЕТ" }] }
     ],
     checkboxes: [
@@ -75,17 +80,21 @@ const меркаП = () => plan.evaluate((к) => к, {}).then(() => plan.evaluat
   const кегль = (s) => { const u = document.querySelector(s); return u ? Math.round(parseFloat(getComputedStyle(u).fontSize) * 10) / 10 : 0; };
   const впт = document.querySelectorAll(".group-title")[0];
   const обычный = document.querySelectorAll(".group-title")[1];
+  const крупнее = document.querySelectorAll(".group-title")[2];
   const подпись = document.querySelectorAll(".check .label")[0];
-  return { своиПт: впт ? кегль(".group-title span") : 0,
+  return { крупнее: крупнее ? Math.round(parseFloat(getComputedStyle(крупнее.querySelector("span") || крупнее).fontSize) * 10) / 10 : 0,
+           своиПт: впт ? кегль(".group-title span") : 0,
            обычный: обычный ? Math.round(parseFloat(getComputedStyle(обычный).fontSize) * 10) / 10 : 0,
            подписьПт: подпись ? Math.round(parseFloat(getComputedStyle(подпись.querySelector("span") || подпись).fontSize) * 10) / 10 : 0 };
 }));
 const меркаН = () => nabl.evaluate(() => {
   const впт = document.querySelectorAll(".watch-screen .pv-group-title")[0];
   const обычный = document.querySelectorAll(".watch-screen .pv-group-title")[1];
+  const крупнее = document.querySelectorAll(".watch-screen .pv-group-title")[2];
   const подпись = document.querySelectorAll(".watch-screen .watch-label")[0];
   const кегль = (u) => u ? Math.round(parseFloat(getComputedStyle(u).fontSize) * 10) / 10 : 0;
-  return { своиПт: кегль(впт ? впт.querySelector("span") : null),
+  return { крупнее: кегль(крупнее ? крупнее.querySelector("span") : null),
+           своиПт: кегль(впт ? впт.querySelector("span") : null),
            обычный: кегль(обычный),
            подписьПт: кегль(подпись ? подпись.querySelector("span") : null),
            scale: getComputedStyle(document.querySelector(".watch-screen")).getPropertyValue("--wt-scale").trim() };
@@ -105,6 +114,11 @@ async function сверить(гдe) {
      p.обычный + " против " + n.обычный);
   ok(Math.abs(p.подписьПт - n.подписьПт) < 0.6, гдe + ": подпись пункта со своим размером совпала",
      p.подписьПт + " против " + n.подписьПт);
+  ok(p.крупнее > 0 && Math.abs(p.крупнее - n.крупнее) < 0.6,
+     гдe + ": заголовок с относительным размером «крупнее» совпал",
+     p.крупнее + " против " + n.крупнее);
+  ok(p.крупнее > p.обычный + 1, гдe + ": «крупнее» и вправду крупнее обычного, иначе сверять нечего",
+     p.крупнее + " против " + p.обычный);
   return { p, n };
 }
 
