@@ -1110,17 +1110,28 @@
 
   // Ширина пробной строки. Зависит только от шрифта и от того, как система считает ширину букв,
   // поэтому меряется один раз: перебирать это на каждое изменение состояния незачем.
+  // Пробная строка. Один в один такая же лежит в admin.js: по разнице её ширины наблюдение
+  // догоняет ширину букв планшета. Менять её можно только в обоих файлах разом.
+  var ПРОБНАЯ_СТРОКА = "Прием лекарственных средств, БАДов, гормональных препаратов, химиотерапии";
   var пробаШирины = null;
   function ширинаПробы(гнездо) {
     if (пробаШирины !== null) return пробаШирины;
     if (!гнездо) return 0;
     var п = document.createElement("span");
-    п.textContent = "Прием лекарственных средств, БАДов, гормональных препаратов, химиотерапии";
+    п.textContent = ПРОБНАЯ_СТРОКА;
     п.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;" +
                       "font-weight:700;font-size:20px";
     гнездо.appendChild(п);
-    пробаШирины = п.offsetWidth;
+    // Дробная ширина, а не offsetWidth: округление до целого само даёт до половины точки, а
+    // разница, ради которой всё затевается, того же порядка. Пробник в потоке не участвует
+    // (position: absolute), преобразований над ним нет, поэтому рамка тут честна.
+    var ш = Math.round(п.getBoundingClientRect().width * 100) / 100;
     п.remove();
+    // Запоминаем только когда шрифт документа точно загружен. До этого браузер рисует запасным,
+    // ширина букв у него другая, и запомненное навсегда число было бы чужим. У наблюдения на этом
+    // и сорвалась подгонка: оно запомнило 953 вместо 780 и отбросило поправку как несуразную.
+    if (document.fonts && document.fonts.check && !document.fonts.check("700 20px Roboto")) return ш;
+    пробаШирины = ш;
     return пробаШирины;
   }
 
@@ -1146,7 +1157,9 @@
       btn: кегль(кнопка),
       box: квадрат ? Math.round(квадрат.offsetWidth) : 0,
       bodyW: Math.round(тело.clientWidth),
-      proba: ширинаПробы(тело)
+      proba: ширинаПробы(тело),
+      probaN: ПРОБНАЯ_СТРОКА.length,
+      probaKegl: 20
     };
   }
 
@@ -2833,7 +2846,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "9.1";
+  var APP_VERSION = "9.2";
 
   // ==================================================================
   // Размер экрана планшета
