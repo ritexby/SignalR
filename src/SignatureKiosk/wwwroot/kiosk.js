@@ -1135,6 +1135,45 @@
     return пробаШирины;
   }
 
+  /// Во сколько раз система на самом деле рисует текст крупнее, чем говорит getComputedStyle.
+  ///
+  /// Android WebView умеет домножать размер шрифта при отрисовке, и getComputedStyle этой
+  /// надбавки не показывает: он отдаёт исходное число. Запрет мы поставили (kiosk.css,
+  /// text-size-adjust), но полагаться на то, что он подействовал на всяком устройстве, нельзя:
+  /// молчаливое расхождение экранов недопустимо. Поэтому меряем.
+  ///
+  /// Мерка простая: настоящий кусок текста в потоке против того же куска вне потока тем же
+  /// кеглем. Автоувеличение к тому, что вне потока, не применяется, поэтому их отношение и есть
+  /// множитель. Берём десять знаков от начала текстового узла: перенос строки там невозможен.
+  function ростТекста(тело) {
+    if (!тело || !document.createTreeWalker || !document.createRange) return 1;
+    var обход = document.createTreeWalker(тело, NodeFilter.SHOW_TEXT, null);
+    var узел = null;
+    while (обход.nextNode()) {
+      var т = обход.currentNode;
+      if (т.nodeValue && т.nodeValue.trim().length >= 12 && т.parentElement) { узел = т; break; }
+    }
+    if (!узел) return 1;
+    var кусок = document.createRange();
+    кусок.setStart(узел, 0); кусок.setEnd(узел, 10);
+    var прямоугольники = кусок.getClientRects();
+    if (!прямоугольники.length) return 1;
+    var нарисовано = прямоугольники[0].width;
+    var п = document.createElement("span");
+    п.textContent = узел.nodeValue.slice(0, 10);
+    // Вне потока, тем кеглем, который называет getComputedStyle. Семейство и насыщенность
+    // наследуются от того же родителя, значит сравниваются одинаковые буквы.
+    п.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;white-space:pre;" +
+                      "font-size:" + getComputedStyle(узел.parentElement).fontSize;
+    узел.parentElement.appendChild(п);
+    var расчёт = п.getBoundingClientRect().width;
+    п.remove();
+    if (!(нарисовано > 0) || !(расчёт > 0)) return 1;
+    var к = нарисовано / расчёт;
+    // За пределами разумного это уже не автоувеличение, а ошибка мерки: не подменяем.
+    return (к > 0.5 && к < 3) ? Math.round(к * 10000) / 10000 : 1;
+  }
+
   /// Что планшет намерил у себя: кегли, ширина тела документа, размер квадратика отметки и
   /// ширина пробной строки. Наблюдение ставит эти числа себе, вместо того чтобы выводить их
   /// заново из тех же формул: формула не знает про среду планшета, а число знает.
@@ -1159,7 +1198,8 @@
       bodyW: Math.round(тело.clientWidth),
       proba: ширинаПробы(тело),
       probaN: ПРОБНАЯ_СТРОКА.length,
-      probaKegl: 20
+      probaKegl: 20,
+      boost: ростТекста(тело)
     };
   }
 
@@ -2846,7 +2886,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "9.2";
+  var APP_VERSION = "9.3";
 
   // ==================================================================
   // Размер экрана планшета

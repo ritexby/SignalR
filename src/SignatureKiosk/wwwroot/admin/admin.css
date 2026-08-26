@@ -417,6 +417,9 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 /* Добавка на букву, которой сцена догоняет ширину букв планшета. Считается по разнице ширины
    одной и той же пробной строки и ставится из admin.js (догнатьШиринуБукв). По умолчанию нуля
    нет вовсе: пока планшет мерок не прислал, ничего не раздвигаем. */
+/* Тот же запрет автоувеличения, что и на планшете: сцена обязана считать размеры сама, а не
+   получать надбавку от браузера оператора. */
+.watch-screen, .watch-screen * { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 .watch-screen { --wt-track: 0em; }
 .watch-screen, .watch-screen * { letter-spacing: var(--wt-track); }
 
