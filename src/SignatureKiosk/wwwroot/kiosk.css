@@ -108,9 +108,15 @@ html, body {
 .doc-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 18px 4px; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; }
 /* Текст приходит из внешней системы и из редактора: в нём может оказаться что угодно, в том
    числе слово длиннее экрана. Разрываем такое слово, а не ломаем из-за него всю страницу. */
+/* Одно правило переноса, а не два. Прежде стояли сразу overflow-wrap: anywhere и устаревшее
+   word-break: break-word. Второе определено через первое, и что именно получится из этой пары,
+   разные версии движка решают по-своему. Мало того, anywhere меняет расчёт наименьшей ширины
+   содержимого, а тело документа выложено колонкой flex - значит от него зависит и ширина, по
+   которой считается перенос. Замер владельца: тот же кегль, та же ширина, тот же текст, а высота
+   заголовков групп разная - 82 против 85 и 85 против 74. Это и есть след такого спора.
+   Оставлено break-word: длинное слово он переносит так же, а наименьшую ширину не трогает. */
 .doc-body, .doc-body h2, .doc-text, .check .label, .group-title, .doc-title, .sign-prompt {
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 .doc-body h2 { font-size: calc(clamp(1.15rem, 2.6vw, 1.6rem) * var(--doc-scale)); margin: 0 0 14px; }
 .doc-text { font-size: var(--doc-text); line-height: var(--doc-line); white-space: pre-wrap; margin-bottom: 22px; }
