@@ -1189,8 +1189,10 @@
     if (!узел || !узел.children) return из;
     for (var i = 0; i < узел.children.length && i < 40; i++) {
       var д = узел.children[i];
+      // Ширина рядом с высотой: перенос строки задаётся ими вместе, и без ширины по одной высоте
+      // не понять, текст ли другой или места под него меньше.
       из.push({ t: (д.textContent || "").replace(/\s+/g, " ").trim().slice(0, 18),
-                h: Math.round(д.offsetHeight) });
+                h: Math.round(д.offsetHeight), w: Math.round(д.offsetWidth) });
     }
     return из;
   }
@@ -2908,7 +2910,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "9.4";
+  var APP_VERSION = "9.5";
 
   // ==================================================================
   // Размер экрана планшета
