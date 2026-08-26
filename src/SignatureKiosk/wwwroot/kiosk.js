@@ -1212,7 +1212,7 @@
         for (var j = 0; j < д.children.length; j++) {
           var в = д.children[j];
           var св = getComputedStyle(в);
-          из.push({ t: "  " + (в.textContent || "").replace(/\s+/g, " ").trim().slice(0, 16),
+          из.push({ p: 1, t: "  " + (в.textContent || "").replace(/\s+/g, " ").trim().slice(0, 16),
                     h: Math.round(в.offsetHeight), w: Math.round(в.offsetWidth),
                     f: Math.round(parseFloat(св.fontSize) * 10) / 10, b: св.fontWeight,
                     n: (в.textContent || "").length });
@@ -2940,7 +2940,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "10.0";
+  var APP_VERSION = "10.1";
 
   // ==================================================================
   // Размер экрана планшета
