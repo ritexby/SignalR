@@ -265,14 +265,17 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
 .doc-head-row { display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin: 0 0 8px; }
 .doc-head-row h2 { margin: 0; }
 .rt-bar-host { position: sticky; top: calc(var(--topbar-h, 64px) + var(--doc-head-h, 0px)); z-index: 15; padding: 6px 0 10px; background: var(--panel);
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-/* «Шаг назад» стоит справа от панели оформления, в том пустом месте, где раньше не было
-   ничего. Порядком в разметке кнопка первая, показывается последней.
-   Перенос разрешён нарочно: панель обязана оставаться в одну строку, и когда окно узкое и
-   вдвоём им не поместиться, вниз уходит кнопка, а не разваливается панель. Основа у панели
-   по содержимому, поэтому решение принимает сама раскладка, без замеров в коде. */
-.rt-bar-host > .rt-toolbar { flex: 1 1 auto; order: 1; }
-.rt-bar-host > .tb-group-undo { order: 2; margin-left: auto; flex: 0 0 auto; }
+  display: block; }
+/* «Шаг назад» живёт внутри самой панели оформления, прижатый к её правому краю: там пустое
+   место, и там же рука оператора, который только что что-то набрал и хочет это отменить.
+   Отдельной строкой под панелью кнопка читалась как что-то постороннее.
+   Размер подогнан под остаток строки: в полном виде кнопке нужно 132 точки, а свободно там
+   около 123, и она уезжала на вторую строку. Здесь она того же роста, что и значки панели. */
+.rt-toolbar > .tb-group-undo { margin-left: auto; display: flex; align-items: center; }
+.rt-toolbar > .tb-group-undo .btn {
+  padding: 6px 12px; font-size: .84rem; font-weight: 600; gap: 6px; white-space: nowrap;
+}
+.rt-toolbar > .tb-group-undo .btn svg { width: 15px; height: 15px; }
 .rt-float { box-shadow: var(--sh2); border-color: var(--line); background: #fff; }
 /* Пока поле не выбрано, панель на месте, но не работает: ничего не прыгает, и сразу видно,
    что оформлять пока нечего. */
