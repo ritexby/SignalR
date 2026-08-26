@@ -1784,3 +1784,8 @@ body.watch-solo .content { flex: 1 1 auto; min-height: 0; padding: 0; max-width:
 .watch-screen .pv-input-title { font-size: var(--wt-base); }
 .watch-screen .wt-miss-note { font-size: calc(var(--wt-text) * .86); }
 .watch-screen .watch-code { font-size: calc(var(--wt-text) * 1.05); }
+
+
+/* Звёздочка обязательного пункта отделяется отступом, а не пробелом в тексте: на планшете она
+   написана без пробела (kiosk.js), и лишний знак делал строку у оператора другой. */
+.watch-screen .req, .pv-body .req { margin-left: 4px; }
