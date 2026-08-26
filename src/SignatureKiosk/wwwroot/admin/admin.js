@@ -11426,15 +11426,23 @@
       var д = узел.children[i];
       // Ширина рядом с высотой: перенос строки задаётся ими вместе, и без ширины по одной высоте
       // не понять, текст ли другой или места под него меньше.
+      var с = getComputedStyle(д);
       из.push({ t: (д.textContent || "").replace(/\s+/g, " ").trim().slice(0, 18),
-                h: Math.round(д.offsetHeight), w: Math.round(д.offsetWidth) });
+                h: Math.round(д.offsetHeight), w: Math.round(д.offsetWidth),
+                // Кегль, насыщенность и полная длина текста. Если высоты разные, а это совпало,
+                // значит расходится только перенос; если разошлась длина, значит тексты разные.
+                f: Math.round(parseFloat(с.fontSize) * 10) / 10, b: с.fontWeight,
+                n: (д.textContent || "").length });
       // Один уровень вглубь: у группы это заголовок и строка с вариантами, у пункта - квадратик
       // и подпись. Без этого видно только «кусок разошёлся», но не что именно в нём.
       if (из.length < 60 && д.children && д.children.length > 1 && д.children.length <= 6) {
         for (var j = 0; j < д.children.length; j++) {
           var в = д.children[j];
+          var св = getComputedStyle(в);
           из.push({ t: "  " + (в.textContent || "").replace(/\s+/g, " ").trim().slice(0, 16),
-                    h: Math.round(в.offsetHeight), w: Math.round(в.offsetWidth) });
+                    h: Math.round(в.offsetHeight), w: Math.round(в.offsetWidth),
+                    f: Math.round(parseFloat(св.fontSize) * 10) / 10, b: св.fontWeight,
+                    n: (в.textContent || "").length });
         }
       }
     }
@@ -11458,9 +11466,18 @@
       var разница = (чужие[i].h || 0) - (свои[i].h || 0);
       // Две точки это округление высот, а не расхождение вёрстки.
       if (Math.abs(разница) <= 2) continue;
-      var ширины = (чужие[i].w != null && свои[i].w != null && Math.abs(чужие[i].w - свои[i].w) > 2)
-        ? (" при ширине " + чужие[i].w + " и " + свои[i].w) : "";
-      из.push("«" + (чужие[i].t || "?") + "»: у клиента " + чужие[i].h + ", здесь " + свои[i].h + ширины);
+      var добавка = "";
+      if (чужие[i].w != null && свои[i].w != null && Math.abs(чужие[i].w - свои[i].w) > 2)
+        добавка += " при ширине " + чужие[i].w + " и " + свои[i].w;
+      if (чужие[i].f != null && свои[i].f != null && Math.abs(чужие[i].f - свои[i].f) > 0.5)
+        добавка += " при кегле " + чужие[i].f + " и " + свои[i].f;
+      if (чужие[i].b != null && свои[i].b != null && String(чужие[i].b) !== String(свои[i].b))
+        добавка += " при насыщенности " + чужие[i].b + " и " + свои[i].b;
+      if (чужие[i].n != null && свои[i].n != null && чужие[i].n !== свои[i].n)
+        добавка += " при длине текста " + чужие[i].n + " и " + свои[i].n;
+      // Ничего из перечисленного не разошлось - значит разошёлся только перенос строк.
+      if (!добавка) добавка = " при том же кегле, ширине и тексте";
+      из.push("«" + (чужие[i].t || "?") + "»: у клиента " + чужие[i].h + ", здесь " + свои[i].h + добавка);
     }
     if (свои.length !== чужие.length) {
       из.push("кусков страницы у клиента " + чужие.length + ", здесь " + свои.length);
