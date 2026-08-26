@@ -414,6 +414,11 @@ input[type=color] { border: 1px solid var(--field-line); border-radius: 7px; pad
    считают одну и ту же строку по-разному, и переносы расходятся. Подробности в kiosk.css. */
 .watch-screen, .watch-screen *, .pv-body, .pv-body * { font-family: "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif;
   text-rendering: geometricPrecision; }
+/* Добавка на букву, которой сцена догоняет ширину букв планшета. Считается по разнице ширины
+   одной и той же пробной строки и ставится из admin.js (догнатьШиринуБукв). По умолчанию нуля
+   нет вовсе: пока планшет мерок не прислал, ничего не раздвигаем. */
+.watch-screen { --wt-track: 0em; }
+.watch-screen, .watch-screen * { letter-spacing: var(--wt-track); }
 
 .pv-body { display: block; }
 /* Блоки экрана подписи по центру, как на планшете (.sign-custom). */
