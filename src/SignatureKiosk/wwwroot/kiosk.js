@@ -1223,7 +1223,11 @@
       probaN: ПРОБНАЯ_СТРОКА.length,
       probaKegl: 20,
       boost: ростТекста(тело),
-      rows: рядыВысот(тело)
+      rows: рядыВысот(тело),
+      // Шапка и подвал тоже: сверять одно тело мало. Владелец видел расхождение при одном
+      // нажатии, а значок молчал, потому что расходилась шапка, а её никто не сверял.
+      headH: (function () { var у = document.querySelector(".doc-header"); return у ? Math.round(у.offsetHeight) : 0; })(),
+      footH: (function () { var у = document.querySelector(".doc-footer"); return у ? Math.round(у.offsetHeight) : 0; })()
     };
   }
 
@@ -2910,7 +2914,7 @@
   // Reported on every connect so the operator can see which build a tablet is actually running.
   // A WebView that has not reloaded since an older deploy keeps working but ignores anything
   // added since, and without this the only symptom is a command that seems to do nothing.
-  var APP_VERSION = "9.5";
+  var APP_VERSION = "9.6";
 
   // ==================================================================
   // Размер экрана планшета
