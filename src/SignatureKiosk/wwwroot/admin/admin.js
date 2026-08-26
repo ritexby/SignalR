@@ -11291,7 +11291,7 @@
     var прокрутка = (st && st.scroll) || null;
     if (прокрутка && (прокрутка.h - прокрутка.top - прокрутка.view) > 24) {
       var ниже = el("div", "wt-scroll-down");
-      ниже.appendChild(el("span", null, "Ниже есть ещё"));
+      ниже.appendChild(el("span", null, "Пролистайте ниже"));
       ниже.appendChild(el("span", "wt-scroll-down-arrow"));
       низ.appendChild(ниже);
     }

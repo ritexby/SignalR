@@ -1094,19 +1094,26 @@ body.dragging-now .topbar { pointer-events: none; }
 .wt-body > * { flex: 0 0 auto; }
 /* Кнопка «Ниже есть ещё» так, как её видит клиент. Это копия, а не кнопка: нажать здесь нельзя
    ничего, как и на остальные кнопки в сцене наблюдения. */
-.wt-scroll-down { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px;
+/* Размеры взяты из kiosk.css слово в слово (.scroll-down), а не подобраны на глаз. Иначе
+   копия ниже настоящей кнопки, подвал у оператора получается другой высоты, и от него
+   съезжает вся страница: замер показал подвал 71 на планшете против 57 у оператора. */
+.wt-scroll-down { display: inline-flex; align-items: center; gap: 10px; padding: 13px 22px;
   border: 2px solid #15803d; border-radius: 12px; background: #e7f7ee; color: #15803d;
-  font-weight: 700; font-size: var(--wt-text); white-space: nowrap; }
-.wt-scroll-down-arrow { width: 9px; height: 9px; flex: 0 0 auto;
-  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
-  transform: translateY(-2px) rotate(45deg); }
+  font-weight: 700; font-size: var(--wt-btn); white-space: nowrap; line-height: 1.2; }
+.wt-scroll-down-arrow { width: 14px; height: 14px; flex: 0 0 auto;
+  border-right: 3px solid currentColor; border-bottom: 3px solid currentColor;
+  transform: translateY(-3px) rotate(45deg); }
 
 /* Красная подсветка «не отмечено» так, как её видит клиент. Цвета взяты из kiosk.css слово в
    слово: оператор обязан видеть тот же экран, а не его пересказ. Мигания здесь нет намеренно:
    на планшете оно случается один раз в момент нажатия, а сцена наблюдения перерисовывается на
    каждый кадр, и мигало бы непрерывно. */
 .watch-screen .wt-miss { border-color: #dc2626 !important; background: #fef2f2 !important;
-  box-shadow: 0 0 0 3px rgba(220, 38, 38, .12); }
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, .12);
+  /* Подпись уходит на свою строку, а не теснит текст пункта, ровно как на планшете
+     (kiosk.css, .miss). Без этого надпись вставала сбоку, текст пункта переносился на три
+     строки вместо одной, и дальше вся страница у оператора съезжала относительно планшета. */
+  flex-wrap: wrap; }
 .watch-screen .wt-miss .req { color: #dc2626; }
 .watch-screen .pv-group.wt-miss { padding: 12px; border: 2px solid #dc2626; border-radius: 14px; }
 .wt-miss-note { flex-basis: 100%; margin-top: 8px; color: #b91c1c; font-weight: 700;
@@ -1123,7 +1130,11 @@ body.dragging-now .topbar { pointer-events: none; }
 
 /* Нижняя панель планшета. Это её изображение, а не кнопки: нажать здесь нельзя ничего. */
 .wt-foot { border-top: 2px solid #b8c2d1; padding-top: 16px; display: flex; gap: 14px;
-  justify-content: space-between; align-items: center; }
+  justify-content: space-between; align-items: center; position: relative; }
+/* Копия кнопки «Пролистайте ниже» стоит ровно посередине, как на планшете (kiosk.css,
+   .doc-footer > .scroll-down). Прижатая к «Далее», она и на экране оператора читалась бы как
+   часть перехода на следующую страницу. */
+.wt-foot > .wt-scroll-down { position: absolute; left: 50%; transform: translateX(-50%); }
 .wt-foot-empty { border-top: none; padding-top: 0; }
 .wt-btn { border-radius: 12px; padding: 16px 26px; font-size: var(--wt-btn); font-weight: 600;
   min-width: 130px; text-align: center; user-select: none; }
