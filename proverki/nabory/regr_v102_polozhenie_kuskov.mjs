@@ -164,8 +164,8 @@ const состояние = await nabl.evaluate(() => {
 });
 console.log("состояние выравнивания: " + состояние);
 const подсказка = await nabl.evaluate(() => {
-  const r = document.querySelector(".watch-raznica");
-  return r ? (r.title || "") : "";
+  const s = document.querySelector(".watch-screen");
+  return s ? (s.getAttribute("data-raznica") || "") : "";
 });
 const остаток = ((подсказка.match(/наибольший остаток (\d+) точек/) || [])[1]);
 console.log("подсказка про остаток: " + (остаток === undefined ? "нет" : остаток));
