@@ -53,9 +53,12 @@ await nabl.waitForSelector(".watch-screen", { timeout: 15000 });
 await nabl.waitForTimeout(3000);
 
 const znak = () => nabl.evaluate(() => {
-  const u = document.querySelector(".watch-raznica");
-  if (!u) return { est: false };
-  return { est: true, vidno: !u.classList.contains("hidden"), tekst: u.textContent || "", podskazka: u.title || "" };
+  // Значка в шапке больше нет: он был нужен, чтобы найти причины, и своё дело сделал. Числа
+  // остались признаком data-raznica на сцене, и проверяется теперь он.
+  const s = document.querySelector(".watch-screen");
+  if (!s) return { est: false };
+  const т = s.getAttribute("data-raznica") || "";
+  return { est: true, vidno: !!т, tekst: т, podskazka: т };
 });
 
 // ===== 1. Совпало: значок молчит.
@@ -83,7 +86,7 @@ await nabl.waitForTimeout(2200);
 const z1 = await znak();
 console.log("когда разошлось: " + JSON.stringify(z1));
 ok(z1.vidno, "значок сказал о расхождении, а не смолчал", JSON.stringify(z1));
-ok(/-?\d+\s*(точек|место|места|мест)/.test(z1.tekst), "и сказал числом, а не общими словами", z1.tekst);
+ok(/-?\d+\s*точек/.test(z1.tekst), "и сказал числом, а не общими словами", z1.tekst);
 ok(/Содержимое страницы у клиента \d+ точек, здесь \d+/.test(z1.podskazka),
    "в подсказке обе высоты названы прямо", z1.podskazka);
 // Общее число говорит «расходится на столько-то», а чинить надо место. Подсказка обязана назвать
@@ -119,7 +122,7 @@ const z15 = await znak();
 console.log("сумма сошлась, куски нет: " + JSON.stringify(z15));
 ok(z15.vidno, "значок заговорил и тогда, когда общая высота сошлась, а куски разошлись",
    JSON.stringify(z15));
-ok(/\d+ (место|места|мест)/.test(z15.tekst), "и сказал, сколько мест разошлось", z15.tekst);
+ok(/Расходятся: «[^»]+»/.test(z15.tekst), "и назвал, какой именно кусок разошёлся", z15.tekst);
 await nabl.evaluate(() => { const s = document.getElementById("porcha2"); if (s) s.remove(); });
 
 // ===== 4. Починили: значок снова молчит.

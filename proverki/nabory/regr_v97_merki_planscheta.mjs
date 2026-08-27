@@ -76,13 +76,13 @@ const merkaP = () => plan.evaluate(() => {
 });
 const merkaN = () => nabl.evaluate(() => {
   const s = document.querySelector(".watch-screen"), b = document.querySelector(".wt-body");
-  const r = document.querySelector(".watch-raznica");
+  const r = document.querySelector(".watch-screen");
   const g = document.querySelector(".watch-screen .pv-group-title");
   return { base: Math.round(parseFloat(getComputedStyle(s).getPropertyValue("--wt-base")) * 100) / 100,
            bodyW: b.clientWidth, vsego: b.scrollHeight, okno: b.clientHeight,
            zagH: g ? g.offsetHeight : 0,
            zagKegl: g ? Math.round(parseFloat(getComputedStyle(g).fontSize)) : 0,
-           raznica: !!(r && !r.classList.contains("hidden")), raznicaTekst: r ? r.textContent : "" };
+           raznica: !!(r && r.getAttribute("data-raznica")), raznicaTekst: r ? (r.getAttribute("data-raznica") || "") : "" };
 });
 
 async function sverit(gde) {

@@ -1764,13 +1764,8 @@ body.watch-solo .content { flex: 1 1 auto; min-height: 0; padding: 0; max-width:
 .wt-bigtext-btn.wt-off { background: rgba(255, 255, 255, .16); color: rgba(255, 255, 255, .62); }
 
 
-/* Расхождение с планшетом. Не украшение и не подсказка: это признак того, что оператор смотрит
-   не на тот же экран, что клиент, и заметен он должен быть сразу. Рядом с признаком неизвестного
-   размера экрана, тем же местом в шапке. */
-.watch-raznica { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px;
-  padding: 4px 10px; border-radius: 999px; background: #fef3c7; color: #92400e;
-  border: 1px solid #f59e0b; font-size: .8rem; font-weight: 700; cursor: help; }
-.watch-raznica.hidden { display: none; }
+/* Значок расхождения убран: он был нужен, чтобы найти причины, и своё дело сделал.
+   Числа остались признаками data-raznica, data-vyravnivanie и data-proba на сцене. */
 
 
 /* Кегли, которые в сцене оставались числами и потому не росли вместе с выбранным клиентом
