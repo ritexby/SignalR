@@ -10844,8 +10844,13 @@
       п("--wt-box", Math.min(30 * м, 46));                      // .check input: min(30px * scale, 46px)
     }
     п("--wt-thanks", зажать(22.4, 0.03, 32) * м);               // .thankyou h2: clamp(1.4rem, 3vw, 2rem)
-    п("--wt-ink", Math.min(ф.h * 0.55, 520));                   // .sign-wrap: height: min(55vh, 520px)
-    п("--wt-ink-page", Math.min(ф.h * 0.52, 460));              // .screen-sign .page-sign-wrap
+    // Высота поля подписи берётся с планшета, если он её прислал: она задана долей от его экрана,
+    // и считать её здесь заново значит промахнуться.
+    if (н && н.inkH > 0) { п("--wt-ink", н.inkH); п("--wt-ink-page", н.inkH); }
+    else {
+      п("--wt-ink", Math.min(ф.h * 0.55, 520));                 // .sign-wrap: height: min(55vh, 520px)
+      п("--wt-ink-page", Math.min(ф.h * 0.52, 460));            // .screen-sign .page-sign-wrap
+    }
     п("--wt-scan", Math.min(ф.w * 0.78, 560));                  // .scan-window: width: min(78vw, 560px)
     // Ступень безразмерным числом: ею множатся размеры, заданные в пунктах у отдельных кусков
     // текста. Берётся из намеренного планшетом кегля рамки, а не из присланной ступени: так в
@@ -11404,7 +11409,10 @@
       var свСверху = el("div", "wt-sign-custom"); экранП.appendChild(свСверху);
       видимыеБлоки(doc.signBlocks, держит).forEach(function (b) { previewBlock(свСверху, b); });
       экранП.appendChild(el("div", "wt-sign-prompt", doc.signPrompt || "Распишитесь"));
-      экранП.appendChild(watchInk(st && st.finalInk, "Клиент ещё не расписался"));
+      // Та же надпись, что и на планшете (kiosk.js: .sign-hint). Прежде здесь стояло «Клиент ещё
+      // не расписался»: оператор видел не то, что клиент, и списки кусков расходились - 17 знаков
+      // против 24. Расписался клиент или нет, видно и так: в поле появляется его подпись.
+      экранП.appendChild(watchInk(st && st.finalInk, "Распишитесь здесь"));
       var свСнизу = el("div", "wt-sign-custom"); экранП.appendChild(свСнизу);
       видимыеБлоки(doc.signBlocksBelow, держит).forEach(function (b) { previewBlock(свСнизу, b); });
       body.appendChild(экранП);
